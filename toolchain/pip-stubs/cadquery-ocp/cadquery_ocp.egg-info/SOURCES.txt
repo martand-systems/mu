@@ -1,0 +1,5 @@
+pyproject.toml
+cadquery_ocp.egg-info/PKG-INFO
+cadquery_ocp.egg-info/SOURCES.txt
+cadquery_ocp.egg-info/dependency_links.txt
+cadquery_ocp.egg-info/top_level.txt

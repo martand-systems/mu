@@ -1,0 +1,11 @@
+# Empty placeholder: OCP 8.0.1.1 is provided by conda-forge (package 'ocp') in ./env.
+# Satisfies pip requirements on 'cadquery-ocp-novtk' so pip never installs a second, conflicting OCP.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "cadquery-ocp-novtk"
+version = "8.0.1.1"
+description = "placeholder; OCP comes from conda-forge"
+[tool.setuptools]
+packages = []

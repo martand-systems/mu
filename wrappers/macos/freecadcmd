@@ -1,0 +1,8 @@
+#!/bin/sh
+# FreeCAD 1.1.4 headless. User config/data kept inside this folder.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$ROOT/tools/scripts/freecad-env.sh"
+"$ROOT/apps/FreeCAD-1.1.4.app/Contents/Resources/bin/freecadcmd" "$@"
+rc=$?
+_fc_cleanup
+exit $rc

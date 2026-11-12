@@ -1,0 +1,4 @@
+#!/bin/sh
+# Gmsh 4.15.2 (./env) with HOME inside the folder: the GUI saves ~/.gmshrc and ~/.gmsh-options on exit.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HOME="$ROOT/.cache/home" exec "$ROOT/env/bin/gmsh" "$@"

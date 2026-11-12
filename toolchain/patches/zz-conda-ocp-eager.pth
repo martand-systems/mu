@@ -1,0 +1,1 @@
+import cad._internal.lazy_kernel as _lk; _lk.KERNEL = ("build123d",)  # conda-forge OCP is one extension module, not a package: lazy-loading it breaks `from OCP.gp import ...` (see SETUP_REPORT.md)

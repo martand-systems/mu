@@ -1,0 +1,5 @@
+#!/bin/sh
+# Wrapper: micromamba always registers envs in $HOME/.conda/environments.txt
+# (no config switch in 2.x), so run it with HOME pointed inside this folder.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HOME="$ROOT/.cache/home" exec "$ROOT/tools/bin/real/micromamba" "$@"

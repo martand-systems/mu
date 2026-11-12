@@ -1,0 +1,4 @@
+#!/bin/sh
+# Unmount the OpenFOAM volume (/Volumes/OpenFOAM-v2606) when you are done.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+exec "$ROOT/apps/OpenFOAM-v2606.app/Contents/Resources/volume" eject

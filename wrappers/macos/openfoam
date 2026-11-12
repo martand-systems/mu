@@ -1,0 +1,11 @@
+#!/bin/zsh
+# OpenFOAM v2606 (gerlero OpenFOAM.app, native arm64) - launcher for this folder.
+# The app keeps OpenFOAM in a read-only, case-sensitive disk image that it mounts at
+# /Volumes/OpenFOAM-v2606 while in use (its bundled conda tools hard-code that path, so an
+# in-folder mount point does not work). A mount writes no files; `openfoam-eject` removes it.
+# HOME is pointed inside this folder so OpenFOAM's user dirs (~/OpenFOAM, ~/.OpenFOAM) stay local.
+#   openfoam                 -> interactive OpenFOAM shell
+#   openfoam <cmd> [args]    -> run one command, e.g.  openfoam -c 'blockMesh && icoFoam'
+ROOT="${0:A:h:h:h}"
+export HOME="$ROOT/.cache/home"
+exec "$ROOT/apps/OpenFOAM-v2606.app/Contents/Resources/etc/openfoam" "$@"

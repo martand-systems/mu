@@ -1,0 +1,8 @@
+#!/bin/sh
+# Python 3.11 from FreeCAD 1.1.4 (venv ./tools/cam-venv): FreeCAD + CAM, build123d 0.12, CadQuery 2.8, ocp-freecad-cam. User config/data kept inside this folder.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$ROOT/tools/scripts/freecad-env.sh"
+"$ROOT/tools/cam-venv/bin/python" "$@"
+rc=$?
+_fc_cleanup
+exit $rc

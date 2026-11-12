@@ -1,0 +1,4 @@
+#!/bin/sh
+# Headless PNG snapshot of STEP/STL/mesh/result files. See tools/scripts/render_png.py
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+exec "$ROOT/env/bin/python" "$ROOT/tools/scripts/render_png.py" "$@"

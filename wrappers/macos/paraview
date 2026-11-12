@@ -1,0 +1,8 @@
+#!/bin/sh
+# ParaView 6.2.1 (official .app) with HOME kept inside the folder (ParaView writes ~/.config/ParaView)
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HOME="$ROOT/.cache/home" exec "$ROOT/apps/ParaView-6.2.1.app/Contents/MacOS/paraview" "$@"
+#!/bin/sh
+# ParaView 6.2.1 (official .app) with HOME kept inside the folder (ParaView writes ~/.config/ParaView)
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HOME="$ROOT/.cache/home" exec "$ROOT/apps/ParaView-6.2.1.app/Contents/MacOS/paraview" "$@"

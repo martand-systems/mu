@@ -1,0 +1,6 @@
+#!/bin/sh
+# PrusaSlicer 2.9.7 (./apps) with its config dir and HOME kept inside this folder.
+# CLI:  prusa-slicer --export-gcode --load profile.ini part.stl -o part.gcode
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+mkdir -p "$ROOT/.cache/prusaslicer"
+HOME="$ROOT/.cache/home" exec "$ROOT/apps/PrusaSlicer-2.9.7.app/Contents/MacOS/PrusaSlicer" --datadir "$ROOT/.cache/prusaslicer" "$@"

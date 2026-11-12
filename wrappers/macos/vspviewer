@@ -1,0 +1,3 @@
+#!/bin/sh
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+HOME="$ROOT/.cache/home" exec "$ROOT/apps/OpenVSP-3.56.0-MacOS/vspviewer" "$@"
