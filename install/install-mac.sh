@@ -53,8 +53,10 @@ else
     ref="${head_ref#ref: }"
     COMMIT="$(cat "$RECIPE/.git/$ref" 2>/dev/null || awk -v r="$ref" '$2==r{print $1}' "$RECIPE/.git/packed-refs")"
   else COMMIT="$head_ref"; fi
-  TAG="$(grep -l "^$COMMIT" "$RECIPE"/.git/refs/tags/* 2>/dev/null | head -1 | xargs -I{} basename {} || true)"
-  [ -n "$TAG" ] || TAG="$(awk -v c="$COMMIT" '$1==c && $2 ~ /^refs\/tags\//{sub("refs/tags/","",$2); print $2; exit}' "$RECIPE/.git/packed-refs" 2>/dev/null || true)"
+  # packed-refs: "<sha> refs/tags/X" (lightweight) or that line followed by "^<commit>" (annotated, peeled)
+  TAG="$(awk -v c="$COMMIT" '/^\^/{ if (substr($1,2)==c && last!="") {print last; exit} next }
+        { last=""; if ($2 ~ /^refs\/tags\//) { name=$2; sub("refs/tags/","",name); last=name; if ($1==c) {print name; exit} } }' \
+        "$RECIPE/.git/packed-refs" 2>/dev/null || true)"
   DIRTY=""
 fi
 [ -n "$VERSION" ] || VERSION="${TAG:-dev-${COMMIT:0:10}}"
