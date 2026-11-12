@@ -31,7 +31,7 @@ Turn today's engineering toolchain (code-driven CAD, FEA, CFD, aero, slicing and
 | Analogy | Here | Example |
 |---|---|---|
 | VS Code / Microsoft Word, the application | **mu**: the toolchain. Installed once per machine, company-agnostic | `mu v2026.11.0` |
-| Company template | **Org profile**: Martand Defense's engineering rules, templates, materials | `martand-org` |
+| Company template | **Org profile**: Martand Defense's engineering rules, templates, materials | `mu-org-profile` |
 | A document / a code repo | **Project**: one product, fully contained in its own git folder | `jatayu` |
 
 Requirements:
@@ -418,7 +418,7 @@ jatayu/                       (GitHub: martand-systems/jatayu)
   README.md
   .claude/settings.json       enables the mu plugin at the pinned version; permission allowlist (mu, git, gh read-only)
   .gitmodules
-  org/                        git submodule → martand-systems/martand-org at a pinned commit
+  org/                        git submodule → martand-systems/mu-org-profile at a pinned commit
   docs/                       Phase 1 docx files, technical concept                     (git-lfs)
   frame/                      from projects/jatayu-frame: params.py, frame.py, fea_*.py, cfd/, mfg/, report
     results/                  JSON summaries                                            (git)
@@ -556,10 +556,10 @@ services:
 
 ---
 
-## 8. Org profile repo: `martand-systems/martand-org`
+## 8. Org profile repo: `martand-systems/mu-org-profile`
 
 ```
-martand-org/
+mu-org-profile/
   org.toml                 name, default mu version, default compute policy, relay URL, divisions
   CLAUDE-org.md            validation policy (benchmark → convergence → no singular peaks → hand checks
                            → stated assumptions → evidence in README), units, sign-off rules
@@ -600,7 +600,7 @@ It's included in every project as the `org/` submodule. Updating it is a deliber
 | Repo | Visibility | Contents |
 |---|---|---|
 | `martand-systems/mu` | **Private** (decided). The Free plan works because no images are stored | Source, recipes and lock files, installers, relay, Claude Code plugin marketplace, benchmarks |
-| `martand-systems/martand-org` | Private | Org profile (submodule of each project) |
+| `martand-systems/mu-org-profile` | Private | Org profile (submodule of each project) |
 | `martand-systems/jatayu` | Private | Project (git-lfs). **Cleared for GitHub** |
 
 **A release is just a git tag** (`v2026.11.0`) on `mu`. No binary assets and no container registry:
@@ -660,7 +660,7 @@ Nothing in the current folder is deleted until the new setup reproduces today's 
 |---|---|---|
 | M1 | Freeze the baseline: `jatayu-frame/results/*.json`, the report docx, the run commands from `README.md` | Read only |
 | M2 | Export exact package lists from `env/` and `tools/cam-venv` into lock files. Record app versions and checksums | Read only |
-| M3 | Move `felib.py` generics into `mu.fea`, docx styling into the `martand-org` template, and the `CLAUDE.md` tool knowledge into plugin skills | Copies only |
+| M3 | Move `felib.py` generics into `mu.fea`, docx styling into the `mu-org-profile` template, and the `CLAUDE.md` tool knowledge into plugin skills | Copies only |
 | M4 | Create `jatayu` repo: docs, the frame files (without `work/`, `__pycache__`, possibly `old/`), `mu.toml`, `org/` submodule, a JATAYU-only `CLAUDE.md`, `.claude/settings.json`, LFS rules. Replace the `../../` paths | Copies only |
 | M5 | Re-run the README sequence through `mu` on `local` and `office-pc`, and compare with M1 | No |
 | M6 | Archive the old `ENGINEERING/` folder. This later frees ~14 GB of `work/` and 4.7 GB of `.cache` | After M5 passes |
@@ -671,14 +671,14 @@ Nothing in the current folder is deleted until the new setup reproduces today's 
 
 | Phase | Work | Done when |
 |---|---|---|
-| **P0 Prerequisites** | Private repos created in `martand-systems` (`mu`, `martand-org`, `jatayu`); Porkbun `A` record for `relay.martand.systems`; Dokploy GitHub provider for the `mu` repo; Dokploy CLI detail calls working (or first setup in the Dokploy UI); admin access to the office PC; AMD SVM on | All the §15 items answered |
+| **P0 Prerequisites** | Private repos created in `martand-systems` (`mu`, `mu-org-profile`, `jatayu`); Porkbun `A` record for `relay.martand.systems`; Dokploy GitHub provider for the `mu` repo; Dokploy CLI detail calls working (or first setup in the Dokploy UI); admin access to the office PC; AMD SVM on | All the §15 items answered |
 | **P1 macOS full install** | `mu` repo, locks, `apps.toml`, wrappers, CLI (`run`, `test`, `doctor`, `context`), the rebuilt 5 benchmarks, `install-mac.sh`, install to `~/Library/Application Support/Mu` | A fresh install on the laptop passes all benchmarks offline. `mu` is on `PATH` from any folder |
 | **P2 Claude Code plugin and project format** | Plugin (skills, commands, hooks), `mu new`, `mu.toml`, org submodule, run records, `mu check` | Claude Code in a fresh `mu new` project designs and analyses a test part end to end using only mu commands, with run records produced |
 | **P3 Linux compute recipe** | `provision-linux.sh` and linux-64 locks, tested in a local Ubuntu container/VM on the laptop; `mu release` checklist; first tag | A fresh linux-64 build passes the benchmarks and matches the macOS results |
 | **P4 Agent and job protocol** | Agent, `compute add/list/status`, `submit/status/log/fetch`, content-addressed upload, `auto` fallback | Works end to end against the `local` node and a Linux test container on the laptop |
 | **P5 Windows compute installer** | `MuComputeSetup.exe`, startup task, `.wslconfig`, remote management commands | One run on the office PC (plus one reboot) leaves an agent that passes the benchmarks and survives a reboot with nobody logged in |
 | **P6 Relay (Stage A)** | `relay/Dockerfile` (chisel) and `relay/compose.yaml`, built by Dokploy, Dokploy project `mu` with the `relay` service and domain on 195.201.236.190 (`relay.martand.systems`, HTTPS); chisel client in the agent and in the mu CLI; pairing; LAN direct path | The laptop runs jobs on `office-pc` **from home**. With the PC off, jobs fall back to `local` without errors |
-| **P7 Org profile and JATAYU migration** | `martand-org`, `jatayu` repo, steps M1–M6 | JATAYU frame results reproduce the baseline on both nodes within tolerance. The old folder is archived |
+| **P7 Org profile and JATAYU migration** | `mu-org-profile`, `jatayu` repo, steps M1–M6 | JATAYU frame results reproduce the baseline on both nodes within tolerance. The old folder is archived |
 | **P8 Hardening** | OpenVSP and FreeCAD CAM headless in the linux-64 recipe, relay Stage B if needed, `pvserver` remote viewing, signed `.pkg` and `.exe`, uninstallers | All 5 benchmarks run on both nodes. Remote viewing works from home |
 
 ---
@@ -727,7 +727,7 @@ Nothing in the current folder is deleted until the new setup reproduces today's 
 | DNS | `relay.martand.systems` → 195.201.236.190 (done) |
 | Relay setup | Martand does it in the Dokploy UI |
 | Compute architecture | ADR-001: Linux compute; WSL2 is the first Windows host adapter |
-| Shared libraries | Default: `felib.py` generics → `mu.fea`, docx styling → `martand-org` (M3) |
+| Shared libraries | Default: `felib.py` generics → `mu.fea`, docx styling → `mu-org-profile` (M3) |
 | JATAYU | Existing work moves into `martand-systems/jatayu` now, ahead of P7, using the current toolchain until mu P1 lands |
 
 **Note on the name:** `mu` is also the name of an unrelated email tool (maildir-utils). If it were ever installed, the two CLIs
