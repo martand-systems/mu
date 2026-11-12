@@ -53,7 +53,7 @@ static and modal steps, nodal fields, reactions and integration-point stresses. 
 
 **Aero (OpenVSP / VSPAERO)**
 
-- `import openvsp as vsp`, and set `vsp.SetVSPAEROPath(os.environ["MU_TOOLCHAIN"] + "/apps/OpenVSP-3.56.0-MacOS")`.
+- `import openvsp as vsp`, and set `vsp.SetVSPAEROPath(os.environ["MU_VSPAERO_DIR"])` (set by μ on every platform).
 - For VLM, set `GeomSet=[SET_NONE]` and `ThinGeomSet=[SET_ALL]` on both `VSPAEROComputeGeometry` and `VSPAEROSweep`.
 - **Set `Sref`, `bref` and `cref` explicitly.** The default reference area is 100 (manual mode), which silently scales every coefficient.
 - Validate against an independent solution, not Helmbold. Helmbold assumes elliptic loading and overpredicts a rectangular AR 6 wing by ~7%.

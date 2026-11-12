@@ -1,6 +1,6 @@
 # Upstream applications bundled by mu, pinned by SHA-256 of the exact archive.
 # osx-arm64 hashes are from the archives behind the working legacy toolchain (2026-11-12).
-# TODO(S2): add [<app>.linux-64] entries.
+# linux-64 entries: Ubuntu 24.04 x86_64 (WSL2 and containers), verified headless by the S2 probes (tools/s2/).
 
 [micromamba]
 version = "2.10.0"
@@ -9,6 +9,11 @@ source  = "github.com/mamba-org/micromamba-releases"
 file   = "micromamba-osx-arm64"
 sha256 = "c547639f5caf742236641c362746abb4a3505774753ecd08fe341643670c4c01"
 url    = "https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-osx-arm64"
+kind   = "binary"
+[micromamba.linux-64]
+file   = "micromamba-linux-64"
+sha256 = "701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd"
+url    = "https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-linux-64"
 kind   = "binary"
 
 [uv]
@@ -39,6 +44,25 @@ url    = "https://openvsp.org/zips/old/mac/OpenVSP-3.56.0-macos-15-ARM64-Python3
 kind   = "zip"
 source_item = "OpenVSP-3.56.0-MacOS"   # top-level item in the archive
 target = "OpenVSP-3.56.0-MacOS"   # name under <toolchain>/apps/
+[openvsp.linux-64]   # official Ubuntu 24.04 build: binaries (vspaero etc.); its Python API targets Python 3.12, see [openvsp-api]
+file   = "OpenVSP-3.56.0-Ubuntu-24.04_amd64.deb"
+sha256 = "9ed933fc20fe305b2d543823fd30a6e1db3628ce19c86d6915fd0d5cba3a2744"
+url    = "https://openvsp.org/zips/old/linux/OpenVSP-3.56.0-Ubuntu-24.04_amd64.deb"
+kind   = "deb"
+source_item = "opt/OpenVSP"
+target = "OpenVSP-3.56.0-Linux"
+
+[openvsp-api]
+version = "3.56.0"
+source  = "OpenVSP source at tag OpenVSP_3.56.0. Linux only: the official .deb's Python API is for Python 3.12, so the
+           3.13 API is built on the device by the recipe script, once per machine (a cached layer)"
+[openvsp-api.linux-64]
+file   = "OpenVSP-3.56.0-src.tar.gz"
+sha256 = "fb493903cc68a1a0fe864878aac5a098c804c818b8f7d255ca1e77384bfde66f"
+url    = "https://codeload.github.com/OpenVSP/OpenVSP/tar.gz/refs/tags/OpenVSP_3.56.0"
+kind   = "build"
+source_item = "toolchain/linux-64/build-openvsp-api.sh"   # build recipe in this repo
+target = "OpenVSP-3.56.0-api"
 
 [paraview]
 version = "6.2.1"
@@ -50,6 +74,13 @@ url    = "https://www.paraview.org/files/v6.2/ParaView-6.2.1-MPI-OSX11.0-Python3
 kind   = "dmg"
 source_item = "ParaView-6.2.1.app"   # top-level item in the archive
 target = "ParaView-6.2.1.app"   # name under <toolchain>/apps/
+[paraview.linux-64]   # one build for all Linux: GLX / EGL / OSMesa chosen at run time (wrappers force OSMesa: headless)
+file   = "ParaView-6.2.1-MPI-Linux-Python3.12-x86_64.tar.gz"
+sha256 = "91eab8deadb0314856c8780fb7ccb272515cfc4bac417766103cb658ec8be7f5"
+url    = "https://www.paraview.org/files/v6.2/ParaView-6.2.1-MPI-Linux-Python3.12-x86_64.tar.gz"
+kind   = "tar"
+source_item = "ParaView-6.2.1-MPI-Linux-Python3.12-x86_64"
+target = "ParaView-6.2.1"
 
 [openfoam]
 version = "v2606"
@@ -61,6 +92,13 @@ url    = "https://github.com/gerlero/openfoam-app/releases/download/v2.2.3/openf
 kind   = "zip"
 source_item = "OpenFOAM-v2606.app"   # top-level item in the archive
 target = "OpenFOAM-v2606.app"   # name under <toolchain>/apps/
+[openfoam.linux-64]   # ESI/OpenCFD's noble .debs (runtime, common, tutorials), unpacked without root; same source as the macOS app
+file   = "openfoam2606_2606.0~rc2-1_amd64.deb openfoam2606-common_2606.0~rc2-1_all.deb openfoam2606-tutorials_2606.0~rc2-1_all.deb"
+sha256 = "ef129961af180427090ff04938845c54a21419376474baa371559bad31e19a26 db8b1e75f3e8af5a5ec39f3f0a37f601b31c05eed6667aac25de58034a11f6ba 255f9ddbf7d88dca11b63adb60398ec04992033302e64ab425e56eccb6c16646"
+url    = "https://dl.openfoam.com/repos/deb/dists/noble/main/pool/2606_0/binary-amd64/openfoam2606_2606.0~rc2-1_amd64.deb https://dl.openfoam.com/repos/deb/dists/noble/main/pool/2606_0/binary-all/openfoam2606-common_2606.0~rc2-1_all.deb https://dl.openfoam.com/repos/deb/dists/noble/main/pool/2606_0/binary-all/openfoam2606-tutorials_2606.0~rc2-1_all.deb"
+kind   = "deb"
+source_item = "usr/lib/openfoam/openfoam2606"
+target = "openfoam2606"
 
 [prusaslicer]
 version = "2.9.7"
@@ -72,6 +110,13 @@ url    = "https://github.com/prusa3d/PrusaSlicer/releases/download/version_2.9.7
 kind   = "dmg"
 source_item = "Original Prusa Drivers/PrusaSlicer.app"   # top-level item in the archive
 target = "PrusaSlicer-2.9.7.app"   # name under <toolchain>/apps/
+[prusaslicer.linux-64]   # Flathub is PrusaSlicer's only Linux channel since 2.9; pinned by OSTree commit (a SHA-256 flatpak verifies)
+file   = "com.prusa3d.PrusaSlicer"
+sha256 = "22caa5995fef8170cbed1d404f993996e5552e47159391666a7b096a85d8f641"
+url    = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+kind   = "flatpak"
+runtime = "runtime/org.gnome.Platform/x86_64/50@4337a389125f814785bd83f4ace01da5b6baa80fdcf5a9c81e60dcd03896c067"
+target = "prusaslicer-flatpak"
 
 [freecad]
 version = "1.1.4"
@@ -83,3 +128,14 @@ url    = "https://github.com/FreeCAD/FreeCAD/releases/download/1.1.4/FreeCAD_1.1
 kind   = "dmg"
 source_item = "*.app"   # top-level item in the archive
 target = "FreeCAD-1.1.4.app"   # name under <toolchain>/apps/
+python = "Contents/Resources/bin/python"   # hosts the CAM venv
+pylib  = "Contents/Resources/lib"          # FreeCAD's own modules (freecad.pth)
+[freecad.linux-64]   # AppImage, extracted without FUSE; same Python 3.11.14 bundle as macOS
+file   = "FreeCAD_1.1.4-Linux-x86_64-py311.AppImage"
+sha256 = "f6dc6ba676e5ac96a565ebc8d657232f94c6158e85b4352141bd1a46f6b43434"
+url    = "https://github.com/FreeCAD/FreeCAD/releases/download/1.1.4/FreeCAD_1.1.4-Linux-x86_64-py311.AppImage"
+kind   = "appimage"
+source_item = "squashfs-root"
+target = "FreeCAD-1.1.4"
+python = "usr/bin/python"
+pylib  = "usr/lib"

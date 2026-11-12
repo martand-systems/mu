@@ -1,0 +1,6 @@
+#!/bin/sh
+# FreeCAD 1.1.4 GUI (needs a display: WSLg or X).
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"; export QT_QPA_PLATFORM
+. "$T/bin/freecad-env.sh"
+PYTHONHOME="$FC" SSL_CERT_FILE="$FC/ssl/cacert.pem" exec "$FC/bin/freecad" "$@"

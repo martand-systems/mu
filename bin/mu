@@ -2,10 +2,10 @@
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
 # Manages versions itself (status, versions, install, update, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
-MU_DISPATCHER_REV=4   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=5   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
-MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
-MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
+case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
+case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
 export MU_HOME
 TC="$MU_HOME/toolchains"
 DEFAULT_SOURCE="https://github.com/martand-systems/mu.git"

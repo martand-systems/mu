@@ -8,8 +8,7 @@ from _common import check
 def run(wd, quick):
     import openvsp as vsp
     vsp.VSPRenew()
-    vsp.SetVSPAEROPath(str(pathlib.Path(shutil.which("vspaero")).resolve().parent) if not os.environ.get("MU_TOOLCHAIN")
-                       else os.path.join(os.environ["MU_TOOLCHAIN"], "apps", "OpenVSP-3.56.0-MacOS"))
+    vsp.SetVSPAEROPath(os.environ.get("MU_VSPAERO_DIR") or str(pathlib.Path(shutil.which("vspaero")).resolve().parent))
     span, chord = 6.0, 1.0                          # AR 6
     w = vsp.AddGeom("WING")
     vsp.SetDriverGroup(w, 1, vsp.SPAN_WSECT_DRIVER, vsp.ROOTC_WSECT_DRIVER, vsp.TIPC_WSECT_DRIVER)

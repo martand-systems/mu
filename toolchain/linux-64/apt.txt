@@ -10,7 +10,9 @@ libgl1 libegl1 libglu1-mesa libgl1-mesa-dri libx11-6 libxext6 libxrender1 libxt6
 libpciaccess0
 # OpenVSP 3.56.0 (vspaero, vspscript)
 libxml2 libcminpack1
+# building OpenVSP's Python 3.13 API on the device (once per OpenVSP version)
+build-essential cmake swig libxml2-dev libcminpack-dev libglm-dev libeigen3-dev patchelf
 # PrusaSlicer 2.9.7 (Flathub, pinned commits)
-flatpak
+flatpak dbus
 # text-to-cad stills (OCCT on Linux is GLX-only)
 xvfb

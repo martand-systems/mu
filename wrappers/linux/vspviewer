@@ -1,0 +1,4 @@
+#!/bin/sh
+# OpenVSP 3.56.0: vspviewer
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+HOME="$S/home" exec "$T/apps/OpenVSP-3.56.0-Linux/vspviewer" "$@"
