@@ -15,7 +15,7 @@ ResetCamera(v); SaveScreenshot(r"{png}", v)
 
 def run(wd, quick):
     case = wd / "cavity"
-    sh(["openfoam", "-c", f'rm -rf "{case}" && cp -r "$FOAM_TUTORIALS/incompressible/icoFoam/cavity/cavity" "{case}" && '
+    sh(["openfoam", "-c", f'{{ [ ! -e "{case}" ] || chmod -R u+w "{case}"; }} && rm -rf "{case}" && cp -r "$FOAM_TUTORIALS/incompressible/icoFoam/cavity/cavity" "{case}" && chmod -R u+w "{case}" && '
                            f'cd "{case}" && blockMesh > log.blockMesh 2>&1 && checkMesh > log.checkMesh 2>&1 && icoFoam > log.icoFoam 2>&1'])
     cm = (case / "log.checkMesh").read_text(); ico = (case / "log.icoFoam").read_text()
     cells = int(re.search(r"cells:\s+(\d+)", cm).group(1))

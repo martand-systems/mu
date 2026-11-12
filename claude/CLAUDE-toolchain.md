@@ -67,6 +67,7 @@ mu run openfoam-eject            # unmount /Volumes/OpenFOAM-v2606 when finished
 ```
 
 - **Case paths must not contain spaces.** OpenFOAM rejects them (`fileName::stripInvalid`).
+- The toolchain is read-only, so a tutorial copied out of `$FOAM_TUTORIALS` is too: `cp -r … case && chmod -R u+w case`.
 - On macOS the app mounts a read-only image at `/Volumes/OpenFOAM-v2606` while it's in use.
 - MPI-parallel snappyHexMesh hangs on Apple Silicon laptops, so run serially locally. Parallel CFD belongs on a Linux compute node.
 
