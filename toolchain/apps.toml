@@ -1,11 +1,15 @@
 # Upstream applications bundled by mu, pinned by SHA-256 of the exact archive.
 # osx-arm64 hashes are from the archives behind the working legacy toolchain (2026-11-12).
-# TODO(S1): record the exact download URL for each (url = ""), then verify by fresh download.
 # TODO(S2): add [<app>.linux-64] entries.
 
 [micromamba]
 version = "2.10.0"
 source  = "github.com/mamba-org/micromamba-releases"
+[micromamba.osx-arm64]
+file   = "micromamba-osx-arm64"
+sha256 = "c547639f5caf742236641c362746abb4a3505774753ecd08fe341643670c4c01"
+url    = "https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-osx-arm64"
+kind   = "binary"
 
 [openvsp]
 version = "3.56.0"
@@ -13,7 +17,10 @@ source  = "openvsp.org (ARM64 / Python 3.13 build; includes VSPAERO 7.2.2 and th
 [openvsp.osx-arm64]
 file   = "OpenVSP-3.56.0-macos-15-ARM64-Python3.13.zip"
 sha256 = "ed37928d306a7a1d4a916ad66d0ba02ec95c569f84a7ea0fe55a9e72940b47d0"
-url    = ""
+url    = "https://openvsp.org/zips/old/mac/OpenVSP-3.56.0-macos-15-ARM64-Python3.13.zip"
+kind   = "zip"
+source_item = "OpenVSP-3.56.0-MacOS"   # top-level item in the archive
+target = "OpenVSP-3.56.0-MacOS"   # name under <toolchain>/apps/
 
 [paraview]
 version = "6.2.1"
@@ -21,7 +28,10 @@ source  = "paraview.org (signed arm64 DMG). Not from conda-forge: its 6.2.x buil
 [paraview.osx-arm64]
 file   = "ParaView-6.2.1-MPI-OSX11.0-Python3.12-arm64.dmg"
 sha256 = "14ab14fb68adab31677c21c008a2d987145093b001ac2424c7a025dc6d765b57"
-url    = ""
+url    = "https://www.paraview.org/files/v6.2/ParaView-6.2.1-MPI-OSX11.0-Python3.12-arm64.dmg"
+kind   = "dmg"
+source_item = "ParaView-6.2.1.app"   # top-level item in the archive
+target = "ParaView-6.2.1.app"   # name under <toolchain>/apps/
 
 [openfoam]
 version = "v2606"
@@ -29,7 +39,10 @@ source  = "github.com/gerlero/openfoam-app 2.2.3 (macOS); ESI/OpenCFD apt repo o
 [openfoam.osx-arm64]
 file   = "openfoam2606-app-arm64.zip"
 sha256 = "22456639168cff9fab89335224e5dfe2627e7942e93e99bd0540f60d89679e49"
-url    = ""
+url    = "https://github.com/gerlero/openfoam-app/releases/download/v2.2.3/openfoam2606-app-arm64.zip"
+kind   = "zip"
+source_item = "OpenFOAM-v2606.app"   # top-level item in the archive
+target = "OpenFOAM-v2606.app"   # name under <toolchain>/apps/
 
 [prusaslicer]
 version = "2.9.7"
@@ -37,7 +50,10 @@ source  = "github.com/prusa3d/PrusaSlicer (signed DMG)"
 [prusaslicer.osx-arm64]
 file   = "PrusaSlicer-2.9.7.dmg"
 sha256 = "f735f9d527823d159d9ac1e8f84ce1b74ea571e705e70e723bee546d070db60b"
-url    = ""
+url    = "https://github.com/prusa3d/PrusaSlicer/releases/download/version_2.9.7/PrusaSlicer-2.9.7.dmg"
+kind   = "dmg"
+source_item = "*.app"   # top-level item in the archive
+target = "PrusaSlicer-2.9.7.app"   # name under <toolchain>/apps/
 
 [freecad]
 version = "1.1.4"
@@ -45,4 +61,7 @@ source  = "github.com/FreeCAD/FreeCAD releases (Python 3.11.14; also hosts the C
 [freecad.osx-arm64]
 file   = "FreeCAD_1.1.4-macOS-arm64-py311.dmg"
 sha256 = "071343b4abb70492b75c973f41eaf1d2528f9b9c7ea018d22a4f46ae14d27ac0"
-url    = ""
+url    = "https://github.com/FreeCAD/FreeCAD/releases/download/1.1.4/FreeCAD_1.1.4-macOS-arm64-py311.dmg"
+kind   = "dmg"
+source_item = "*.app"   # top-level item in the archive
+target = "FreeCAD-1.1.4.app"   # name under <toolchain>/apps/

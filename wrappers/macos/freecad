@@ -1,8 +1,8 @@
 #!/bin/sh
-# FreeCAD 1.1.4 GUI (./apps). User config/data kept inside this folder.
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-. "$ROOT/tools/scripts/freecad-env.sh"
-"$ROOT/apps/FreeCAD-1.1.4.app/Contents/MacOS/FreeCAD" "$@"
+# FreeCAD 1.1.4 GUI.
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+. "$T/bin/freecad-env.sh"
+"$T/apps/FreeCAD-1.1.4.app/Contents/MacOS/FreeCAD" "$@"
 rc=$?
 _fc_cleanup
 exit $rc

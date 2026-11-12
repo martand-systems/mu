@@ -1,8 +1,4 @@
 #!/bin/sh
-# ParaView 6.2.1 (official .app) with HOME kept inside the folder (ParaView writes ~/.config/ParaView)
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-HOME="$ROOT/.cache/home" exec "$ROOT/apps/ParaView-6.2.1.app/Contents/bin/pvpython" "$@"
-#!/bin/sh
-# ParaView 6.2.1 (official .app) with HOME kept inside the folder (ParaView writes ~/.config/ParaView)
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-HOME="$ROOT/.cache/home" exec "$ROOT/apps/ParaView-6.2.1.app/Contents/bin/pvpython" "$@"
+# ParaView 6.2.1 pvpython.
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+HOME="$S/home" exec "$T/apps/ParaView-6.2.1.app/Contents/bin/pvpython" "$@"

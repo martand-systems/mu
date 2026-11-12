@@ -14,6 +14,12 @@ in `mu.toml`.
 
 The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md).
 
+## Install (macOS, Apple Silicon)
+
+    git clone https://github.com/martand-systems/mu.git && cd mu
+    install/install-mac.sh            # full role: builds the toolchain, runs mu doctor + the benchmark suite
+    mu help
+
 ## Status
 
 | Phase | State |

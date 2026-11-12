@@ -4,6 +4,6 @@ repo   = "https://github.com/CadQuery/cadquery"
 commit = "b3f9afd4f39cbd856d0c46aa30aa37b714b8f6cb"   # 2.9.0.dev; stable 2.8.0 needs OCP < 8
 
 [text-to-cad]
-repo    = "https://github.com/earthtojake/text-to-cad"   # TODO(S1): confirm the upstream URL
+repo    = "https://github.com/earthtojake/text-to-cad"   # confirmed: origin of the legacy vendor checkout
 version = "0.11.9"
 commit  = "8ea243463968e81b682d678ace010ad835f162b1"

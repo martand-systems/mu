@@ -1,0 +1,34 @@
+#!/bin/bash
+# Commands for one installed toolchain. Reached through the `mu` dispatcher.
+set -euo pipefail
+MU_TOOLCHAIN="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$MU_TOOLCHAIN/recipe/lib/mu-env.sh"
+cmd="${1:-help}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  version)  if [ "${1:-}" = "--json" ]; then cat "$MU_TOOLCHAIN/MANIFEST.json"; else python -c 'import json,sys;m=json.load(open(sys.argv[1]));print(f"μ {m[\"version\"]}  (recipe {m[\"recipe_commit\"][:10]}, {m[\"platform\"]}, installed {m[\"installed\"]})")' "$MU_TOOLCHAIN/MANIFEST.json"; fi ;;
+  path)     echo "$MU_TOOLCHAIN" ;;
+  env)      printf 'export MU_TOOLCHAIN=%q\n. %q\n' "$MU_TOOLCHAIN" "$MU_TOOLCHAIN/recipe/lib/mu-env.sh" ;;
+  run)      [ $# -gt 0 ] || { echo "usage: mu run <command> [args...]" >&2; exit 2; }; exec "$@" ;;
+  shell)    echo "μ $(basename "$MU_TOOLCHAIN") shell. Type exit to leave." >&2; exec "${SHELL:-/bin/zsh}" -i ;;
+  python)   exec python "$@" ;;
+  doctor)   exec python -m mu.doctor "$@" ;;
+  test)     exec python -m mu.bench "$@" ;;
+  help|-h|--help)
+    cat <<'H'
+μ (mu): Martand engineering toolchain
+
+  mu run <cmd> [args]    run a command with the toolchain (python, gmsh, ccx, openfoam, pvbatch, vsp,
+                         prusa-slicer, cam-python, render-png, cad, ...)
+  mu shell               interactive shell with the toolchain active
+  mu env                 print shell code to activate in the current shell:  eval "$(mu env)"
+  mu python [args]       the toolchain's Python (build123d, CadQuery, gmsh, PyVista, openvsp, mu.fea)
+  mu doctor [--json]     check that every tool resolves and starts
+  mu test [names] [--json] [--quick]   run the benchmark suite (known-answer checks)
+  mu version [--json]    installed toolchain version and recipe commit
+  mu path                toolchain install folder
+
+The version comes from the nearest mu.toml ([mu] version), else $MU_HOME/default.
+H
+    ;;
+  *) echo "mu: unknown command '$cmd' (see mu help)" >&2; exit 2 ;;
+esac

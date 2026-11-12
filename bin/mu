@@ -1,0 +1,29 @@
+#!/bin/bash
+# μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH).
+# Picks the toolchain version: $MU_VERSION, else the nearest mu.toml ([mu] version), else $MU_HOME/default.
+set -euo pipefail
+MU_HOME="${MU_HOME:-$HOME/Library/Application Support/Mu}"
+export MU_HOME
+v="${MU_VERSION:-}"
+if [ -z "$v" ]; then
+  d="$PWD"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/mu.toml" ]; then
+      v="$(awk '/^\[/{s=($0=="[mu]")} s && $1=="version"{gsub(/"/,"",$3); print $3; exit}' "$d/mu.toml")"
+      export MU_PROJECT="$d"
+      break
+    fi
+    d="$(dirname "$d")"
+  done
+fi
+if [ -z "$v" ] || [ "$v" = "unreleased" ]; then
+  [ -f "$MU_HOME/default" ] || { echo "mu: no toolchain installed (no $MU_HOME/default)" >&2; exit 3; }
+  v="$(cat "$MU_HOME/default")"
+fi
+T="$MU_HOME/toolchains/$v"
+if [ ! -x "$T/recipe/bin/mu-toolchain" ]; then
+  echo "mu: toolchain '$v' is not installed (looked in $T)." >&2
+  echo "    installed: $(ls "$MU_HOME/toolchains" 2>/dev/null | tr '\n' ' ')" >&2
+  exit 3
+fi
+exec "$T/recipe/bin/mu-toolchain" "$@"

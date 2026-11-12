@@ -1,5 +1,4 @@
 #!/bin/sh
-# Wrapper: micromamba always registers envs in $HOME/.conda/environments.txt
-# (no config switch in 2.x), so run it with HOME pointed inside this folder.
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-HOME="$ROOT/.cache/home" exec "$ROOT/tools/bin/real/micromamba" "$@"
+# micromamba writes $HOME/.conda/environments.txt (no switch in 2.x): run it with HOME inside μ state.
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+HOME="$S/home" exec "$T/libexec/micromamba" "$@"
