@@ -123,7 +123,7 @@ Problems:
                 │                  └───────────────────────────┘
                 │ (same office LAN: direct connection, relay skipped)          ▲
                 ▼ git push/pull                                                │ release downloads
-        GitHub: mu (source, releases, plugin) · martand-org · jatayu ─────────┘
+        GitHub: mu (source, plugin) · mu-org-profile · jatayu ─────────────┘
 ```
 
 **Both the laptop and the office PC only make outbound connections.** No ports are opened on the office
