@@ -164,7 +164,21 @@ network, and no VPN software is installed on the laptop.
 | Startup task | Task Scheduler entry |
 | Agent config | Inside the distro |
 
-**Linux (later):** `/opt/mu` plus `/usr/local/bin/mu`, or a container built on the server with `docker compose build` (§5.3).
+**Linux (S2, 2026-11-13; the WSL2 compute distro and plain Ubuntu 24.04):** per user, XDG: `~/.local/share/mu/`
+(toolchains, store, state, logs), `~/.cache/mu/` (downloads, packages), `~/.local/bin/mu`. One root step,
+`sudo ./install.sh --system`, installs the Ubuntu packages in `toolchain/linux-64/apt.txt`. How each tool runs on Linux:
+
+| Tool | linux-64 route (pinned) |
+|---|---|
+| conda env | same versions as macOS (`toolchain/linux-64/env.explicit.txt`; only build strings differ), software EGL via mesa-llvmpipe |
+| OpenFOAM v2606 | ESI's noble `.deb`s unpacked without root (same source as the macOS app); Open MPI 4.1 from Ubuntu |
+| ParaView 6.2.1 | Kitware's Linux tarball; pvbatch forced to OSMesa (headless, no GPU) |
+| OpenVSP 3.56.0 | official Ubuntu 24.04 `.deb` (vspaero etc.) + the Python API **built on the device** for Python 3.13 (the `.deb`'s API is 3.12-only), a cached layer |
+| FreeCAD 1.1.4 | AppImage extracted without FUSE; same Python 3.11.14 bundle hosts the CAM venv |
+| PrusaSlicer 2.9.7 | Flathub (its only Linux channel since 2.9), pinned by OSTree commit, in μ's own flatpak installation |
+
+A container server (later) builds the same thing with `docker compose build` (§5.3). Containers need `--privileged`
+(flatpak's sandbox) and a system D-Bus; WSL2 with systemd needs neither.
 
 **The current `CLAUDE.md` folder rule** ("never write outside this folder") **is replaced** for mu once it's installed:
 mu owns the locations above, and projects own their git folders. The rule stays in force for the current

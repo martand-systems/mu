@@ -1,0 +1,75 @@
+{
+ "_about": "Regression reference for linux-64: the SAME values as osx-arm64 (legacy macOS toolchain, 2026-11-12). A Linux install must reproduce the macOS results within these tolerances: cross-platform equivalence.",
+ "cad-solid": {
+  "volume": {
+   "value": 12382.099133547013,
+   "rel_tol": 1e-09
+  },
+  "faces": {
+   "value": 15,
+   "rel_tol": 0
+  },
+  "edges": {
+   "value": 36,
+   "rel_tol": 0
+  }
+ },
+ "fea-cantilever": {
+  "tip_h5": {
+   "value": 2.267518,
+   "rel_tol": 0.002
+  },
+  "tip_h2.5": {
+   "value": 2.270316,
+   "rel_tol": 0.002
+  },
+  "nodes_h5": {
+   "value": 3872,
+   "rel_tol": 0.02
+  },
+  "nodes_h2.5": {
+   "value": 21472,
+   "rel_tol": 0.02
+  }
+ },
+ "aero-vlm-wing": {
+  "CLalpha_per_rad": {
+   "value": 4.229531327252392,
+   "rel_tol": 0.0001
+  }
+ },
+ "cfd-cavity": {
+  "cells": {
+   "value": 400,
+   "rel_tol": 0
+  },
+  "steps": {
+   "value": 100,
+   "rel_tol": 0
+  }
+ },
+ "slice-print": {
+  "filament_g": {
+   "value": 11.86,
+   "rel_tol": 1e-06
+  },
+  "layers": {
+   "value": 30,
+   "rel_tol": 0
+  },
+  "gcode_lines": {
+   "value": 94289,
+   "rel_tol": 0.001
+  }
+ },
+ "cam-plate": {
+  "lines": {
+   "value": 291,
+   "rel_tol": 0
+  },
+  "deepest": {
+   "value": -6.0,
+   "rel_tol": 0
+  }
+ }
+}

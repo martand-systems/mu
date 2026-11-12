@@ -4,6 +4,7 @@
 #   build-openvsp-api.sh SRC.tar.gz BUILD_DIR PREFIX     (env: PYTHON = a Python 3.13 with numpy; JOBS)
 # Verified by tools/s2/probe-openvsp.sh: the aero benchmark gives CLalpha identical to macOS (4.229531327252392).
 set -euo pipefail
+export LC_ALL=C.UTF-8 LANG=C.UTF-8   # CMake can't unpack the bundled zips (UTF-8 file names) in the C locale
 SRC_TGZ="$1"; B="$2"; PREFIX="$3"; PY="${PYTHON:?PYTHON must point at the env Python}"; J="${JOBS:-$(nproc)}"
 mkdir -p "$B"; tar -xzf "$SRC_TGZ" -C "$B"; SRC="$(echo "$B"/OpenVSP-*)"
 mkdir -p "$B/libs" "$B/vsp"

@@ -14,9 +14,19 @@ in `mu.toml`.
 
 The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md).
 
-## Install (macOS, Apple Silicon)
+## Install
+
+**macOS (Apple Silicon)**
 
     git clone https://github.com/martand-systems/mu.git && mu/install.sh
+
+**Linux x86_64 (Ubuntu 24.04, including WSL2 on Windows)**
+
+    git clone https://github.com/martand-systems/mu.git && sudo mu/install.sh --system && mu/install.sh
+
+`--system` installs the Ubuntu packages μ needs (`toolchain/linux-64/apt.txt`: OpenFOAM's MPI runtime, GL/X client
+libraries, flatpak, build tools for OpenVSP's Python API). It's the only step that needs root. If you skip it, the installer
+asks for sudo when something is missing. Everything else installs per user in `~/.local/share/mu`.
 
 That's it. The installer builds the full toolchain from the locked recipe, checks every tool (`mu doctor`) and runs the
 benchmark suite. It puts `mu` on your PATH (`~/.local/bin`, added to your shell profile if needed). Options:
@@ -54,6 +64,8 @@ so projects on different versions coexist.
 
 ## Layout
 
+macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
+
     ~/Library/Mu/toolchains/<version>/   recipe snapshot, commands, MANIFEST.json, links to its layers
     ~/Library/Mu/store/                  shared read-only layers: env-<hash>, cam-<hash>, app-<name>-<sha>
     ~/Library/Mu/state/                  tool state and caches (text-to-cad, FreeCAD, ParaView, bytecode, benchmarks)
@@ -66,6 +78,7 @@ so projects on different versions coexist.
 |---|---|
 | Plan | v5 (`docs/PLAN.md`) |
 | S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain (`docs/verification/`) |
-| S2–S4 | Not started |
+| S2: linux-64 provisioning | Every tool runs headless on Ubuntu 24.04 (plain and WSL images); see `docs/verification/` |
+| S3–S4 | Not started |
 
 `legacy/` holds the hand-built toolchain's activation script, setup report and instructions. They're the reference that the recipe has to reproduce.

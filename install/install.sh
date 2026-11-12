@@ -33,7 +33,7 @@ DISPATCHER_REV=5              # must match MU_DISPATCHER_REV in bin/mu; bump on 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)  PLAT=osx-arm64; FAMILY=macos; MU_HOME="${MU_HOME:-$HOME/Library/Mu}"; MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;;
-  Linux-x86_64)  PLAT=linux-64;  FAMILY=linux; MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}"; MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;;
+  Linux-x86_64)  PLAT=linux-64;  FAMILY=linux; [ -n "${LC_ALL:-}${LANG:-}" ] || export LANG=C.UTF-8; MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}"; MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;;
   *) echo "μ runs on macOS (Apple Silicon) and Linux x86_64; this is $(uname -s) $(uname -m)" >&2; exit 2 ;;
 esac
 MU_LINK_DIR="${MU_LINK_DIR:-$HOME/.local/bin}"
