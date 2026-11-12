@@ -15,7 +15,8 @@ CHECKS = [
     ("gmsh",         ["gmsh", "--version"], "4.15"),
     ("ccx",          ["ccx", "-v"], "2.23"),
     ("cad",          ["cad", "doctor", "--check"], None),
-    ("cad-registry", ["cad", "doctor", "--check"], "registered"),
+    # text-to-cad's "current" installation must be this toolchain (per-version state; see lib/mu-env.sh)
+    ("cad-registry", ["cad", "doctor", "--check"], os.path.basename(os.environ.get("MU_TOOLCHAIN", "?")) + "/env)"),
     ("render-png",   ["render-png", "--help"], None),
     ("vspaero",      ["vspaero", "-help"], None),
     ("pvbatch",      ["pvbatch", "--version"], "6.2.1"),
