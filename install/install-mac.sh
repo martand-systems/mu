@@ -40,11 +40,24 @@ die() { printf '\nμ install failed: %s\n' "$*" >&2; exit 1; }
 if command -v mu >/dev/null 2>&1 && ! grep -q 'μ dispatcher' "$(command -v mu)" 2>/dev/null; then
   echo "warning: another 'mu' is on PATH ($(command -v mu)), probably maildir-utils. μ's link in $MU_LINK_DIR may shadow it or be shadowed." >&2
 fi
-if [ -z "$VERSION" ]; then
-  VERSION="$(git -C "$RECIPE" describe --tags --exact-match 2>/dev/null || echo "dev-$(git -C "$RECIPE" rev-parse --short=10 HEAD)")"
+# recipe commit and tag: use a working git if there is one (the macOS /usr/bin/git stub fails until the
+# Xcode licence is accepted), else read .git directly. The install itself never needs git.
+GIT=""; for g in $(which -a git 2>/dev/null); do "$g" --version >/dev/null 2>&1 && { GIT="$g"; break; }; done
+if [ -n "$GIT" ]; then
+  COMMIT="$("$GIT" -C "$RECIPE" rev-parse HEAD)"
+  TAG="$("$GIT" -C "$RECIPE" describe --tags --exact-match 2>/dev/null || true)"
+  DIRTY="$("$GIT" -C "$RECIPE" status --porcelain --untracked-files=no | head -1)"
+else
+  head_ref="$(cat "$RECIPE/.git/HEAD")"
+  if [ "${head_ref#ref: }" != "$head_ref" ]; then
+    ref="${head_ref#ref: }"
+    COMMIT="$(cat "$RECIPE/.git/$ref" 2>/dev/null || awk -v r="$ref" '$2==r{print $1}' "$RECIPE/.git/packed-refs")"
+  else COMMIT="$head_ref"; fi
+  TAG="$(grep -l "^$COMMIT" "$RECIPE"/.git/refs/tags/* 2>/dev/null | head -1 | xargs -I{} basename {} || true)"
+  [ -n "$TAG" ] || TAG="$(awk -v c="$COMMIT" '$1==c && $2 ~ /^refs\/tags\//{sub("refs/tags/","",$2); print $2; exit}' "$RECIPE/.git/packed-refs" 2>/dev/null || true)"
+  DIRTY=""
 fi
-COMMIT="$(git -C "$RECIPE" rev-parse HEAD)"
-DIRTY="$(git -C "$RECIPE" status --porcelain | head -1)"
+[ -n "$VERSION" ] || VERSION="${TAG:-dev-${COMMIT:0:10}}"
 T="$MU_HOME/toolchains/$VERSION"
 avail_gb=$(df -g "$HOME" | awk 'NR==2{print $4}')
 [ "$avail_gb" -ge 25 ] || die "need about 25 GB free (have ${avail_gb} GB)"
@@ -122,8 +135,8 @@ done < "$T/.apps.tsv"
 
 # ---------------------------------------------------------------- pip layer (main env)
 say "pip layer (main env)"
-TTC="$(awk -F'"' '/^\[text-to-cad\]/{s=1} s && /^repo/{r=$2} s && /^commit/{c=$2} END{print r"@"c}' "$T/recipe/toolchain/pins.toml")"
-subst() { sed -e "s|{MU_RECIPE}|$T/recipe|g" -e "s|{MU_APPS}|$T/apps|g" -e "s|{TEXT_TO_CAD}|$TTC|g" "$1"; }
+TTC="$(awk -F'"' '/^\[text-to-cad\]/{s=1} s && /^repo/{r=$2} s && /^commit/{c=$2} END{print r"/archive/"c".zip"}' "$T/recipe/toolchain/pins.toml")"
+subst() { sed -e "s|{MU_RECIPE}|$T/recipe|g" -e "s|{MU_APPS}|$T/apps|g" -e "s|{TEXT_TO_CAD_ARCHIVE}|$TTC|g" "$1"; }
 subst "$T/recipe/toolchain/osx-arm64/env.pip.txt" > "$T/.env.pip.txt"
 "$PY" -m pip install -q --no-deps -r "$T/.env.pip.txt"
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"

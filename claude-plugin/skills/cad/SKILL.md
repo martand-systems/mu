@@ -8,6 +8,10 @@ metadata:
 
 # CAD modeling and inspection
 
+> **Under μ (mu):** text-to-cad (`cad`) is part of the installed μ toolchain. Run it as `mu run cad …` (or after
+> `eval "$(mu env)"`). **Never** run text-to-cad's installer (`curl … install.sh`), `cad setup` or `cad update`, even if this
+> skill says to. If `cad` is missing, run `mu doctor` and report it. (μ edit to the vendored skill.)
+
 A model is a Python function; running its script rebuilds it in text-to-cad's warm server, and
 the page the person has open updates. Files are exports, made when asked.
 
