@@ -140,11 +140,11 @@ network, and no VPN software is installed on the laptop.
 | What | Where |
 |---|---|
 | CLI on `PATH` | `/usr/local/bin/mu` (symlink) |
-| Program and toolchain versions (side by side) | `~/Library/Application Support/Mu/toolchains/<tag>/` (envs, apps, wrappers, plugin) |
-| Machine config | `~/Library/Application Support/Mu/config.toml` (paired nodes, relay URL, defaults) |
+| Program and toolchain versions (side by side) | `~/Library/Mu/toolchains/<tag>/` (envs, apps, wrappers, plugin) |
+| Machine config | `~/Library/Mu/config.toml` (paired nodes, relay URL, defaults) |
 | Secrets (pairing keys, tokens) | macOS Keychain |
 | Caches and downloads | `~/Library/Caches/Mu/` (safe to delete) |
-| Local compute workspaces | `~/Library/Application Support/Mu/local-compute/` |
+| Local compute workspaces | `~/Library/Mu/local-compute/` |
 
 - The bundled ParaView, FreeCAD, PrusaSlicer, OpenVSP and OpenFOAM go **inside the toolchain version folder**, not `/Applications`,
   so they never clash with copies you install yourself, and several mu versions can coexist.
@@ -186,7 +186,7 @@ mu ships **recipes, not binaries.** Every device builds its own toolchain from t
 | Target | How it's built on the device |
 |---|---|
 | **Windows 11 (office PC)** | The installer creates a WSL2 distro from the official Ubuntu 24.04 WSL image, then runs `toolchain/provision-linux.sh` inside it |
-| **macOS arm64 (laptop)** | `install-mac.sh` runs `toolchain/provision-macos.sh` into `~/Library/Application Support/Mu/toolchains/<tag>/` |
+| **macOS arm64 (laptop)** | `install-mac.sh` runs `toolchain/provision-macos.sh` into `~/Library/Mu/toolchains/<tag>/` |
 | **Linux server (later)** | `compute/compose.yaml` with `build:`, where the Dockerfile simply runs the same `provision-linux.sh`. Built with `docker compose build` on the server |
 | **Relay (Dokploy server)** | Dokploy builds `relay/Dockerfile` on the server from the GitHub repo. It's tiny (one static binary) |
 
@@ -333,7 +333,7 @@ The office PC is only the first node. **Nothing in mu is tied to a particular CP
 ### 6.2 Full install on the laptop (macOS arm64)
 
 - **Install:** download and run `Mu-<tag>.pkg`, or `install-mac.sh --role full` (non-interactive, so Claude Code can run it).
-- Builds the toolchain from the locks into `~/Library/Application Support/Mu/toolchains/<tag>/`, then runs `mu test` on the `local` node.
+- Builds the toolchain from the locks into `~/Library/Mu/toolchains/<tag>/`, then runs `mu test` on the `local` node.
 - `mu compute add office-pc <pairing-code>` pairs the laptop with the office PC through the relay.
 - **"Workstation mode" isn't a separate install.** It's the `full` install sending compute to `office-pc`.
 
@@ -672,7 +672,7 @@ Nothing in the current folder is deleted until the new setup reproduces today's 
 | Phase | Work | Done when |
 |---|---|---|
 | **P0 Prerequisites** | Private repos created in `martand-systems` (`mu`, `mu-org-profile`, `jatayu`); Porkbun `A` record for `relay.martand.systems`; Dokploy GitHub provider for the `mu` repo; Dokploy CLI detail calls working (or first setup in the Dokploy UI); admin access to the office PC; AMD SVM on | All the §15 items answered |
-| **P1 macOS full install** | `mu` repo, locks, `apps.toml`, wrappers, CLI (`run`, `test`, `doctor`, `context`), the rebuilt 5 benchmarks, `install-mac.sh`, install to `~/Library/Application Support/Mu` | A fresh install on the laptop passes all benchmarks offline. `mu` is on `PATH` from any folder |
+| **P1 macOS full install** | `mu` repo, locks, `apps.toml`, wrappers, CLI (`run`, `test`, `doctor`, `context`), the rebuilt 5 benchmarks, `install-mac.sh`, install to `~/Library/Mu` | A fresh install on the laptop passes all benchmarks offline. `mu` is on `PATH` from any folder |
 | **P2 Claude Code plugin and project format** | Plugin (skills, commands, hooks), `mu new`, `mu.toml`, org submodule, run records, `mu check` | Claude Code in a fresh `mu new` project designs and analyses a test part end to end using only mu commands, with run records produced |
 | **P3 Linux compute recipe** | `provision-linux.sh` and linux-64 locks, tested in a local Ubuntu container/VM on the laptop; `mu release` checklist; first tag | A fresh linux-64 build passes the benchmarks and matches the macOS results |
 | **P4 Agent and job protocol** | Agent, `compute add/list/status`, `submit/status/log/fetch`, content-addressed upload, `auto` fallback | Works end to end against the `local` node and a Linux test container on the laptop |
@@ -714,7 +714,7 @@ Nothing in the current folder is deleted until the new setup reproduces today's 
 | Image registry | None. Toolchains are built on each device from locked recipes; Dokploy builds the relay |
 | Remote access | Own relay on 195.201.236.190 (Dokploy + Traefik) at `relay.martand.systems`; no Tailscale |
 | Dokploy ↔ GitHub | `Dokploy-martand` GitHub app installed on the org |
-| mu install | System-wide like VS Code (macOS: `~/Library/Application Support/Mu` + `mu` on PATH) |
+| mu install | System-wide like VS Code (macOS: `~/Library/Mu` + `mu` on PATH) |
 | Compute hardware | Hardware-agnostic. Any Windows 11 PC (later Linux) can be a node (§6.1a) |
 | First nodes | Laptop (`full`, macOS arm64) and office PC (`compute`, Windows 11, Ryzen CPU and NVIDIA GPU) |
 | JATAYU data on GitHub | Allowed |

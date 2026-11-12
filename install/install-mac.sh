@@ -10,14 +10,14 @@
 #   --force                rebuild an existing install of the same version
 #   --skip-tests           skip the benchmark suite (doctor still runs)
 #
-# Installs into   ~/Library/Application Support/Mu/toolchains/<version>/   (MU_HOME overrides)
+# Installs into   ~/Library/Mu/toolchains/<version>/   (MU_HOME overrides)
 # Caches in       ~/Library/Caches/Mu/                                       (MU_CACHE overrides)
 # Links `mu` into ~/.local/bin (MU_LINK_DIR overrides). Nothing else outside those folders is written,
 # except the OpenFOAM app's temporary read-only mount at /Volumes/OpenFOAM-v2606 while it runs.
 set -euo pipefail
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
-MU_HOME="${MU_HOME:-$HOME/Library/Application Support/Mu}"
+MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
 MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
 MU_LINK_DIR="${MU_LINK_DIR:-$HOME/.local/bin}"
 VERSION=""; SEED=""; SET_DEFAULT=0; FORCE=0; TESTS=1
@@ -136,7 +136,7 @@ done < "$T/.apps.tsv"
 # ---------------------------------------------------------------- pip layer (main env)
 say "pip layer (main env)"
 TTC="$(awk -F'"' '/^\[text-to-cad\]/{s=1} s && /^repo/{r=$2} s && /^commit/{c=$2} END{print r"/archive/"c".zip"}' "$T/recipe/toolchain/pins.toml")"
-# local paths go to pip as percent-encoded file:// URLs ("Application Support" has a space)
+# local paths go to pip as percent-encoded file:// URLs (safe if MU_HOME contains spaces)
 furl() { "$PY" -c 'import sys, pathlib; print(pathlib.Path(sys.argv[1]).as_uri())' "$1"; }
 RECIPE_URL="$(furl "$T/recipe")"; APPS_URL="$(furl "$T/apps")"
 subst() { sed -e "s|{MU_RECIPE_URL}|$RECIPE_URL|g" -e "s|{MU_APPS_URL}|$APPS_URL|g" -e "s|{TEXT_TO_CAD_ARCHIVE}|$TTC|g" "$1"; }

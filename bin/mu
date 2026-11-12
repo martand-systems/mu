@@ -2,7 +2,7 @@
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH).
 # Picks the toolchain version: $MU_VERSION, else the nearest mu.toml ([mu] version), else $MU_HOME/default.
 set -euo pipefail
-MU_HOME="${MU_HOME:-$HOME/Library/Application Support/Mu}"
+MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
 export MU_HOME
 v="${MU_VERSION:-}"
 if [ -z "$v" ]; then
