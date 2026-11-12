@@ -29,8 +29,11 @@ export GMSH_HOME="$MU_STATE/home"
 export TMPDIR="$MU_STATE/tmp/"
 
 # text-to-cad (cad): state, cache, engine socket; no telemetry, no self-update
-export CAD_STATE_DIR="$MU_STATE/cad/state" CAD_CACHE_DIR="$MU_STATE/cad/cache"
-export CAD_ENGINE_DIR="$MU_STATE/cad/engine" CAD_LAUNCHER_DIR="$MU_STATE/cad/launcher"
+# per toolchain version: text-to-cad keeps one "current" installation in its registry, so versions must not share it
+_MU_CAD="$MU_STATE/cad/$(basename "$MU_TOOLCHAIN")"
+export CAD_STATE_DIR="$_MU_CAD/state" CAD_CACHE_DIR="$_MU_CAD/cache"
+export CAD_ENGINE_DIR="$_MU_CAD/engine" CAD_LAUNCHER_DIR="$_MU_CAD/launcher"
+unset _MU_CAD
 export CAD_TELEMETRY=0 CAD_UPDATE_CHECK=0 DO_NOT_TRACK=1
 
 # activate the env by hand (micromamba's shell hook would write ~/.conda)

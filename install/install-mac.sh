@@ -162,8 +162,9 @@ echo "$T/apps/FreeCAD-1.1.4.app/Contents/Resources/lib" > "$CSP/freecad.pth"
 
 # ---------------------------------------------------------------- text-to-cad registration (inside μ state)
 say "text-to-cad"
-cad doctor -y --no-server >/dev/null 2>&1 || cad doctor -y >/dev/null 2>&1 || true
-cad doctor --check >/dev/null || die "cad doctor --check failed"
+cad doctor -y --no-server > "$T/.cad-doctor.log" 2>&1 || { cat "$T/.cad-doctor.log"; die "cad doctor -y failed"; }
+grep -q "registered" "$T/.cad-doctor.log" || { cat "$T/.cad-doctor.log"; die "text-to-cad did not register this installation"; }
+rm -f "$T/.cad-doctor.log"
 
 # ---------------------------------------------------------------- manifest, dispatcher, PATH link
 "$PY" - "$T" "$VERSION" "$COMMIT" "${DIRTY:+dirty}" <<'PYEOF'

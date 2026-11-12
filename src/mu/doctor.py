@@ -15,6 +15,7 @@ CHECKS = [
     ("gmsh",         ["gmsh", "--version"], "4.15"),
     ("ccx",          ["ccx", "-v"], "2.23"),
     ("cad",          ["cad", "doctor", "--check"], None),
+    ("cad-registry", ["cad", "doctor", "--check"], "registered"),
     ("render-png",   ["render-png", "--help"], None),
     ("vspaero",      ["vspaero", "-help"], None),
     ("pvbatch",      ["pvbatch", "--version"], "6.2.1"),
