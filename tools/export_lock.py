@@ -6,7 +6,7 @@ Writes:
   env.explicit.txt  conda packages (URL + md5), via micromamba
   env.pip.txt       pip-only packages, exact versions; local paths rewritten to placeholders
   cam-venv.pip.txt  pip packages local to the CAM venv (excludes FreeCAD's bundled site-packages)
-Placeholders resolved by the installer: {MU_RECIPE} (this repo), {MU_APPS} (installed apps), {TEXT_TO_CAD_ARCHIVE} (GitHub source archive at the pinned commit). Git URLs become archive URLs so installs need no git.
+Placeholders resolved by the installer: {MU_RECIPE_URL} (this repo), {MU_APPS_URL} (installed apps; file:// URLs, percent-encoded), {TEXT_TO_CAD_ARCHIVE} (GitHub source archive at the pinned commit). Git URLs become archive URLs so installs need no git.
 """
 import argparse, json, re, subprocess, sys, pathlib
 
@@ -30,8 +30,8 @@ def conda_names(prefix):
 def rewrite(line, legacy):
     line = line.replace(f"file://{legacy}/vendor/text-to-cad/packages/cad-server", "{TEXT_TO_CAD_ARCHIVE}#subdirectory=packages/cad-server")
     line = line.replace(f"file://{legacy}/vendor/text-to-cad/packages/cad", "{TEXT_TO_CAD_ARCHIVE}#subdirectory=packages/cad")
-    line = line.replace(f"file://{legacy}/tools/pip-stubs/", "{MU_RECIPE}/toolchain/pip-stubs/")
-    line = line.replace(f"file://{legacy}/apps/", "{MU_APPS}/")
+    line = line.replace(f"file://{legacy}/tools/pip-stubs/", "{MU_RECIPE_URL}/toolchain/pip-stubs/")
+    line = line.replace(f"file://{legacy}/apps/", "{MU_APPS_URL}/")
     line = re.sub(r"git\+https://github.com/([^@ ]+)@([0-9a-f]{40})", r"https://github.com/\1/archive/\2.zip", line)
     if "file://" in line:
         sys.exit(f"unhandled local path in: {line}")

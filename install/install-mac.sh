@@ -136,7 +136,10 @@ done < "$T/.apps.tsv"
 # ---------------------------------------------------------------- pip layer (main env)
 say "pip layer (main env)"
 TTC="$(awk -F'"' '/^\[text-to-cad\]/{s=1} s && /^repo/{r=$2} s && /^commit/{c=$2} END{print r"/archive/"c".zip"}' "$T/recipe/toolchain/pins.toml")"
-subst() { sed -e "s|{MU_RECIPE}|$T/recipe|g" -e "s|{MU_APPS}|$T/apps|g" -e "s|{TEXT_TO_CAD_ARCHIVE}|$TTC|g" "$1"; }
+# local paths go to pip as percent-encoded file:// URLs ("Application Support" has a space)
+furl() { "$PY" -c 'import sys, pathlib; print(pathlib.Path(sys.argv[1]).as_uri())' "$1"; }
+RECIPE_URL="$(furl "$T/recipe")"; APPS_URL="$(furl "$T/apps")"
+subst() { sed -e "s|{MU_RECIPE_URL}|$RECIPE_URL|g" -e "s|{MU_APPS_URL}|$APPS_URL|g" -e "s|{TEXT_TO_CAD_ARCHIVE}|$TTC|g" "$1"; }
 subst "$T/recipe/toolchain/osx-arm64/env.pip.txt" > "$T/.env.pip.txt"
 "$PY" -m pip install -q --no-deps -r "$T/.env.pip.txt"
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
