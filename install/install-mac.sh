@@ -125,7 +125,7 @@ while IFS=$'\t' read -r name file url sha kind item target; do
   else
     mp="$stage/mnt"; mkdir -p "$mp"
     { yes || true; } | hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mp" "$f" >/dev/null
-    src="$(find "$mp" -maxdepth 1 -name "$item" -print -quit)"
+    if [ -e "$mp/$item" ]; then src="$mp/$item"; else src="$(find "$mp" -maxdepth 2 -name "$item" -print -quit)"; fi
     [ -n "$src" ] || { hdiutil detach "$mp" -quiet || true; die "no $item in $file"; }
     ditto "$src" "$T/apps/$target"
     hdiutil detach "$mp" -quiet || hdiutil detach "$mp" -force -quiet
