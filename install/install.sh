@@ -448,7 +448,10 @@ UV="$T/libexec/uv"
 
 export MU_TOOLCHAIN="$T" MU_HOME MU_CACHE MU_INSTALLING=1
 set +u; . "$R/lib/mu-env.sh"; set -u
-export UV_NO_CONFIG=1 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=clone
+# uv links installed files to its cache: APFS clones on macOS; hard links on Linux (ext4 has no clones, and layers are
+# read-only, so shared inodes are safe)
+export UV_NO_CONFIG=1 UV_PYTHON_DOWNLOADS=never
+if [ "$FAMILY" = macos ]; then export UV_LINK_MODE=clone; else export UV_LINK_MODE=hardlink; fi
 # local paths go to the lock files as percent-encoded file:// URLs (safe with spaces in paths)
 furl() { printf 'file://%s' "$(printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/ /%20/g' -e 's/#/%23/g' -e 's/&/%26/g' -e 's/|/%7C/g')"; }
 sed_esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }   # make a string safe as a sed s||| replacement
