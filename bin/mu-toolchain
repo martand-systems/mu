@@ -25,8 +25,10 @@ PYV
             for s in "$MU_TOOLCHAIN/recipe/claude-plugin/skills/"*/; do
               n="$(basename "$s")"; ln -sfn "../../.mu/toolchain/claude-plugin/skills/$n" "$P/.claude/skills/$n"
             done
+            touch "$MU_HOME/projects.txt"; grep -qxF "$P" "$MU_HOME/projects.txt" || echo "$P" >> "$MU_HOME/projects.txt"
             echo "linked $P → μ $(basename "$MU_TOOLCHAIN"): .mu/toolchain, .claude/skills/{$(ls "$MU_TOOLCHAIN/recipe/claude-plugin/skills" | paste -sd, -)}" ;;
   test)     exec python -m mu.bench "$@" ;;
+  gc)       exec python -m mu.gc "$@" ;;
   help|-h|--help)
     cat <<'H'
 μ (mu): Martand engineering toolchain
@@ -40,6 +42,8 @@ PYV
   mu test [names] [--json] [--quick]   run the benchmark suite (known-answer checks)
   mu link                connect this project (mu.toml) to the toolchain for Claude Code:
                          .mu/toolchain (instructions, benchmarks) and .claude/skills (cad, ...)
+  mu gc [--yes]          remove versions and stored apps nothing needs (default, running and project-pinned
+                         versions are kept; dry run without --yes)
   mu version [--json]    installed toolchain version and recipe commit
   mu path                toolchain install folder
 

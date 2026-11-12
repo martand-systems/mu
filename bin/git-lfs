@@ -1,0 +1,4 @@
+#!/bin/bash
+# git-lfs from the default μ toolchain, so plain `git` (any shell) can use LFS. Installed into $MU_HOME/bin.
+MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
+exec "$MU_HOME/toolchains/$(cat "$MU_HOME/default")/env/bin/git-lfs" "$@"
