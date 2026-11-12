@@ -2,7 +2,7 @@
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
 # Manages versions itself (status, versions, install, update, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
-MU_DISPATCHER_REV=3   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=4   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
 MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
@@ -35,7 +35,11 @@ install_running() {
   [ -n "$p" ] || return 0   # being created right now
   ps -p "$p" -o command= 2>/dev/null | grep -q install
 }
-free_mb() { df -m "$HOME" | awk 'NR==2{print $4}'; }
+kb_of() { local t=0 k d; for d in "$@"; do [ -e "$d" ] && { k=$(du -sk "$d" 2>/dev/null | cut -f1); t=$((t + ${k:-0})); }; done; echo "$t"; }
+report_removed() {   # report_removed KB
+  awk -v k="$1" 'BEGIN{ if (k >= 1048576) printf "removed %.1f GB", k/1048576; else printf "removed %d MB", k/1024 }'
+  printf ' (macOS may hold it in Time Machine local snapshots for up to a day before the free space shows)\n'
+}
 
 # resolve the toolchain for this folder -> V, VSRC (what chose it), MU_PROJECT
 resolve() {
@@ -141,6 +145,7 @@ cmd_pin() {
 # layers that installed versions reference (LAYERS; STORE_KEYS from v2026.11.3 pre-releases)
 refs_of() { local v; for v in "$@"; do cat "$TC/$v/LAYERS" "$TC/$v/STORE_KEYS" 2>/dev/null; done | tr '\n' ' '; }
 # prune_store APPLY REFS: remove store layers not in REFS (and leftovers of interrupted builds)
+PRUNED_KB=0
 prune_store() {
   local d k
   [ -d "$MU_HOME/store" ] || return 0
@@ -149,7 +154,7 @@ prune_store() {
     k="$(basename "$d")"
     case " $2 " in *" $k "*) continue ;; esac
     printf '  remove layer   %-34s %s\n' "$k" "$(du -sh "$d" 2>/dev/null | cut -f1 | tr -d ' ')"
-    [ "$1" = 1 ] && { chmod -R u+w "$d" 2>/dev/null || true; rm -rf "$d"; }
+    [ "$1" = 1 ] && { PRUNED_KB=$((PRUNED_KB + $(kb_of "$d"))); chmod -R u+w "$d" 2>/dev/null || true; rm -rf "$d"; }
   done
   return 0
 }
@@ -165,10 +170,10 @@ cmd_remove() {
   [ "$v" != "$(default_version)" ] || die "μ $v is the default. Choose another default first: mu use <version>"
   users="$(pinned_by "$v")"
   [ -z "$users" ] || [ "$force" = 1 ] || die "μ $v is pinned by: $users(run mu pin in those projects, or use --force)"
-  f0=$(free_mb)
+  f0=$(kb_of "$TC/$v")
   remove_version "$v"; printf 'removed μ %s\n' "$v"
   prune_store 1 "$(refs_of $(versions))"
-  printf 'freed %s MB\n' "$(( $(free_mb) - f0 ))"
+  report_removed $((f0 + PRUNED_KB))
 }
 
 cmd_gc() {
@@ -178,17 +183,17 @@ cmd_gc() {
   if P="$(find_project)"; then keep="$keep$(toml_version "$P/mu.toml") "; fi
   for v in $(versions); do case "$keep" in *" $v "*) kept="$kept $v" ;; esac; done
   printf 'keeping:%s  (the default and versions pinned by %s registered project(s))\n' "${kept:- nothing}" "$(projects | wc -l | tr -d ' ')"
-  f0=$(free_mb)
+  f0=0
   for v in $(versions); do
     case "$keep" in *" $v "*) continue ;; esac
     printf '  remove version %-34s %s\n' "$v" "$(du -sh "$TC/$v" 2>/dev/null | cut -f1 | tr -d ' ')"
-    [ "$apply" = 0 ] || remove_version "$v"
+    [ "$apply" = 0 ] || { f0=$((f0 + $(kb_of "$TC/$v"))); remove_version "$v"; }
   done
   prune_store "$apply" "$(refs_of $kept)"
   if [ "$apply" = 1 ]; then
     { ls -t "$MU_HOME/logs"/install-*.log 2>/dev/null || true; } | tail -n +21 | while IFS= read -r l; do rm -f "$l"; done
     if [ -f "$MU_HOME/projects.txt" ]; then projects > "$MU_HOME/projects.txt.tmp"; mv "$MU_HOME/projects.txt.tmp" "$MU_HOME/projects.txt"; fi
-    printf 'freed %s MB\n' "$(( $(free_mb) - f0 ))"
+    report_removed $((f0 + PRUNED_KB))
   else
     printf 'dry run: remove with  mu gc --yes\n'
   fi

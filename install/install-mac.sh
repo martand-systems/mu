@@ -27,7 +27,7 @@
 # outside MU_HOME.
 set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way layers are built changes (forces new layer hashes)
-DISPATCHER_REV=3              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=4              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
