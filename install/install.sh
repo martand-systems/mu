@@ -275,6 +275,7 @@ layer_key() {
   local prefix="$1" extra="$2"; shift 2
   { printf '%s\n%s\n%s\n' "$LAYER_FORMAT" "$extra" "$PLAT"
     for p in "$@"; do
+      [ -e "$R/$p" ] || continue   # optional inputs (e.g. a platform's own pip stubs)
       ( cd "$R" && find "$p" -type f ! -name .DS_Store ! -path '*/__pycache__/*' ! -path '*/build/*' ! -path '*.egg-info/*' \
           | LC_ALL=C sort | while IFS= read -r f; do printf '%s  %s\n' "$(sha256 "$f")" "$f"; done )
     done
@@ -284,7 +285,7 @@ OS=toolchain/$PLAT
 # where OpenVSP's Python packages come from: the app itself (macOS), or the API built for the env's Python (Linux)
 PYAPI=openvsp; [ -z "$(app openvsp-api 1)" ] || PYAPI=openvsp-api
 ENV_KEY="$(layer_key env "$(appkey $PYAPI) mm:$(app micromamba 4) uv:$(app uv 4)" \
-  $OS/env.explicit.txt $OS/env.pip.txt toolchain/pins.toml toolchain/patches toolchain/pip-stubs)"
+  $OS/env.explicit.txt $OS/env.pip.txt toolchain/pins.toml toolchain/patches toolchain/pip-stubs $OS/pip-stubs)"
 CAM_KEY="$(layer_key cam "$(appkey freecad) uv:$(app uv 4)" $OS/cam-venv.pip.txt toolchain/pip-stubs)"
 APP_NAMES="$(awk -F'\t' '$5!="binary" && $5!="tar.bin" && $1!="uv"{print $1}' "$WORK/apps.tsv")"
 LAYERS="$ENV_KEY $CAM_KEY"; for a in $APP_NAMES; do LAYERS="$LAYERS $(appkey "$a")"; done

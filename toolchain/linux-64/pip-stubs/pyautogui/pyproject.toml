@@ -1,0 +1,10 @@
+# Empty placeholder (linux-64): GUI automation (macOS desktop): CHARM declares it but never imports it; nothing to automate on a headless node.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "PyAutoGUI"
+version = "0.9.54"
+description = "placeholder; see toolchain/linux-64/pip-stubs"
+[tool.setuptools]
+packages = []
