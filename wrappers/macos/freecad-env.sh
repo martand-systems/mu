@@ -1,5 +1,7 @@
 # Shared by the FreeCAD wrappers (cam-python, freecad, freecadcmd). Sourced; expects T and S.
 export HOME="$S/home"
+# app layers are read-only: Python bytecode for the bundle's own modules is cached in μ state instead
+export PYTHONPYCACHEPREFIX="$S/pycache"
 export FREECAD_USER_HOME="$S/freecad"
 export FREECAD_USER_DATA="$S/freecad/data"
 export FREECAD_USER_TEMP="$S/tmp"

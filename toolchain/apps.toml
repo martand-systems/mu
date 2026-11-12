@@ -11,6 +11,24 @@ sha256 = "c547639f5caf742236641c362746abb4a3505774753ecd08fe341643670c4c01"
 url    = "https://github.com/mamba-org/micromamba-releases/releases/download/2.10.0-0/micromamba-osx-arm64"
 kind   = "binary"
 
+[uv]
+version = "0.13.7"
+source  = "github.com/astral-sh/uv (installs the Python locks: offline-first, APFS clones from its cache)"
+[uv.osx-arm64]
+file   = "uv-aarch64-apple-darwin.tar.gz"
+sha256 = "81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731"
+url    = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-apple-darwin.tar.gz"
+kind   = "tar"
+source_item = "uv-aarch64-apple-darwin"   # folder in the archive holding the uv binary
+target = "uv"
+[uv.linux-64]
+file   = "uv-x86_64-unknown-linux-gnu.tar.gz"
+sha256 = "c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83"
+url    = "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz"
+kind   = "tar"
+source_item = "uv-x86_64-unknown-linux-gnu"
+target = "uv"
+
 [openvsp]
 version = "3.56.0"
 source  = "openvsp.org (ARM64 / Python 3.13 build; includes VSPAERO 7.2.2 and the Python API)"

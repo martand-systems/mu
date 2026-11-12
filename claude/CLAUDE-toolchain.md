@@ -14,10 +14,14 @@ mu run <tool> [args]             # gmsh, ccx, cad, render-png, vsp, vspaero, pvb
 eval "$(mu env)" && <cmds>       # several commands in one Bash call
 mu doctor                        # check every tool resolves and starts
 mu test [name]                   # benchmark suite: cad-solid, fea-cantilever, aero-vlm-wing, cfd-cavity, slice-print, cam-plate
-mu version                       # toolchain version and recipe commit
+mu version                       # toolchain version, recipe commit, layers
+mu                               # status: version in use, project, link state
 ```
 
-- **Never** install packages into the toolchain, and never run `micromamba activate`, `micromamba shell hook`, text-to-cad's
+- The version comes from the project's `mu.toml`. Don't change it on your own: `mu pin <version>` moves the project
+  to another installed version (ask first, then re-run the benchmarks and the project's validation).
+
+- The toolchain is read-only (sealed layers). **Never** install packages into it, and never run `micromamba activate`, `micromamba shell hook`, text-to-cad's
   installer, `cad setup` or `cad update`. Toolchain changes go into the `mu` repo's recipe and a new μ version.
 - Project files stay in the project repo. Large regenerable solver output goes in `.scratch/` or another gitignored folder.
 

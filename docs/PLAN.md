@@ -139,16 +139,21 @@ network, and no VPN software is installed on the laptop.
 
 | What | Where |
 |---|---|
-| CLI on `PATH` | `/usr/local/bin/mu` (symlink) |
-| Program and toolchain versions (side by side) | `~/Library/Mu/toolchains/<tag>/` (envs, apps, wrappers, plugin) |
+| CLI on `PATH` | `~/.local/bin/mu` (symlink; the installer adds `~/.local/bin` to the shell profile if needed) |
+| Toolchain versions (side by side) | `~/Library/Mu/toolchains/<tag>/` (recipe snapshot, wrappers, plugin, links to layers) |
+| Shared layers (immutable, content-addressed) | `~/Library/Mu/store/`: `env-<hash>`, `cam-<hash>`, `app-<name>-<sha>` |
 | Machine config | `~/Library/Mu/config.toml` (paired nodes, relay URL, defaults) |
 | Secrets (pairing keys, tokens) | macOS Keychain |
 | Caches and downloads | `~/Library/Caches/Mu/` (safe to delete) |
 | Local compute workspaces | `~/Library/Mu/local-compute/` |
 
-- The bundled ParaView, FreeCAD, PrusaSlicer, OpenVSP and OpenFOAM go **inside the toolchain version folder**, not `/Applications`,
+- The bundled ParaView, FreeCAD, PrusaSlicer, OpenVSP and OpenFOAM go into **μ's store**, not `/Applications`,
   so they never clash with copies you install yourself, and several mu versions can coexist.
-- Uninstall: `mu uninstall`, or delete the folders above.
+- **Layers (v2026.11.3).** Each environment and app is a read-only layer named by the hash of everything that
+  goes into it: lock files, pins, the archives it depends on, and a layer-format version. A toolchain version
+  is a recipe snapshot plus symlinks to its layers. A release that doesn't change the locks reuses every layer:
+  it installs in about a second and costs a few MB. `mu gc` removes layers no installed version references.
+- Uninstall a version: `mu remove <version>`. Remove everything: delete the folders above.
 
 **Windows (office PC, compute role):**
 

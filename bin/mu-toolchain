@@ -9,6 +9,8 @@ case "$cmd" in
 import json, sys
 m = json.load(open(sys.argv[1]))
 print(f"μ {m['version']}  (recipe {m['recipe_commit'][:10]}, {m['platform']}, installed {m['installed']})")
+if m.get("layers"):
+    print("layers: " + "  ".join(m["layers"]))
 PYV
             fi ;;
   path)     echo "$MU_TOOLCHAIN" ;;
@@ -28,26 +30,18 @@ PYV
             touch "$MU_HOME/projects.txt"; grep -qxF "$P" "$MU_HOME/projects.txt" || echo "$P" >> "$MU_HOME/projects.txt"
             echo "linked $P → μ $(basename "$MU_TOOLCHAIN"): .mu/toolchain, .claude/skills/{$(ls "$MU_TOOLCHAIN/recipe/claude-plugin/skills" | paste -sd, -)}" ;;
   test)     exec python -m mu.bench "$@" ;;
-  gc)       exec python -m mu.gc "$@" ;;
   help|-h|--help)
     cat <<'H'
-μ (mu): Martand engineering toolchain
-
-  mu run <cmd> [args]    run a command with the toolchain (python, gmsh, ccx, openfoam, pvbatch, vsp,
-                         prusa-slicer, cam-python, render-png, cad, ...)
-  mu shell               interactive shell with the toolchain active
-  mu env                 print shell code to activate in the current shell:  eval "$(mu env)"
+  mu run <cmd> [args]    run a command with this toolchain (python, gmsh, ccx, cad, render-png, openfoam, pvbatch,
+                         vsp, vspaero, prusa-slicer, cam-python, freecad, paraview, ...)
   mu python [args]       the toolchain's Python (build123d, CadQuery, gmsh, PyVista, openvsp, mu.fea)
-  mu doctor [--json]     check that every tool resolves and starts
-  mu test [names] [--json] [--quick]   run the benchmark suite (known-answer checks)
-  mu link                connect this project (mu.toml) to the toolchain for Claude Code:
-                         .mu/toolchain (instructions, benchmarks) and .claude/skills (cad, ...)
-  mu gc [--yes]          remove versions and stored apps nothing needs (default, running and project-pinned
-                         versions are kept; dry run without --yes)
-  mu version [--json]    installed toolchain version and recipe commit
-  mu path                toolchain install folder
-
-The version comes from the nearest mu.toml ([mu] version), else $MU_HOME/default.
+  mu shell               interactive shell with the toolchain active
+  mu env                 shell code to activate it in the current shell:  eval "$(mu env)"
+  mu doctor [--json]     check that every tool starts and reports its pinned version
+  mu test [names] [-v]   run the benchmark suite (known-answer + regression checks, in parallel)
+  mu link                connect this project (mu.toml) for Claude Code: .mu/toolchain and .claude/skills
+  mu version [--json]    toolchain version, recipe commit, layers
+  mu path                toolchain folder
 H
     ;;
   *) echo "mu: unknown command '$cmd' (see mu help)" >&2; exit 2 ;;

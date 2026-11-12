@@ -1,29 +1,268 @@
 #!/bin/bash
-# μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH).
-# Picks the toolchain version: $MU_VERSION, else the nearest mu.toml ([mu] version), else $MU_HOME/default.
+# μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
+# Manages versions itself (status, versions, install, update, use, pin, remove, gc) and hands every other command
+# to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
+MU_DISPATCHER_REV=3   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 MU_HOME="${MU_HOME:-$HOME/Library/Mu}"
+MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
 export MU_HOME
-v="${MU_VERSION:-}"
-if [ -z "$v" ]; then
-  d="$PWD"
-  while [ "$d" != "/" ]; do
-    if [ -f "$d/mu.toml" ]; then
-      v="$(awk '/^\[/{s=($0=="[mu]")} s && $1=="version"{gsub(/"/,"",$3); print $3; exit}' "$d/mu.toml")"
-      export MU_PROJECT="$d"
-      break
-    fi
-    d="$(dirname "$d")"
+TC="$MU_HOME/toolchains"
+DEFAULT_SOURCE="https://github.com/martand-systems/mu.git"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then B=$'\033[1m'; DIM=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; RED=$'\033[31m'; N=$'\033[0m'
+else B=""; DIM=""; G=""; Y=""; RED=""; N=""; fi
+die() { printf '%smu:%s %s\n' "$RED" "$N" "$1" >&2; exit "${2:-1}"; }
+tilde() { printf '%s' "${1/#$HOME/~}"; }
+default_version() { cat "$MU_HOME/default" 2>/dev/null || true; }
+installed() { [ -f "$TC/$1/MANIFEST.json" ]; }
+manifest() { grep -m1 "\"$2\":" "$TC/$1/MANIFEST.json" 2>/dev/null | sed -E 's/^[^:]*: *"?([^"]*)"?,?$/\1/'; }
+# toml_version FILE: [mu] version from a mu.toml (tolerates version="x", comments after the header, CRLF)
+toml_version() {
+  tr -d '\r' < "$1" | awk '
+    /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[mu\][[:space:]]*(#.*)?$/) ; next }
+    s && /^[[:space:]]*version[[:space:]]*=/ { v=$0; sub(/^[^=]*=[[:space:]]*/,"",v); sub(/[[:space:]]*#.*$/,"",v); gsub(/["\047[:space:]]/,"",v); print v; exit }'
+}
+find_project() { local d="$PWD"; while [ "$d" != "/" ]; do [ -f "$d/mu.toml" ] && { echo "$d"; return 0; }; d="$(dirname "$d")"; done; return 1; }
+projects() { [ -f "$MU_HOME/projects.txt" ] && while IFS= read -r p; do [ -f "$p/mu.toml" ] && echo "$p"; done < "$MU_HOME/projects.txt"; return 0; }
+pinned_by() { projects | while IFS= read -r p; do [ "$(toml_version "$p/mu.toml")" = "$1" ] && printf '%s ' "$(basename "$p")"; done; return 0; }
+pinned_versions() { projects | while IFS= read -r p; do toml_version "$p/mu.toml"; done; return 0; }
+valid_version() { case "$1" in ""|.*|*..*|*/*|*[!A-Za-z0-9._-]*) die "invalid version '$1'" 2 ;; esac; }
+versions() { [ -d "$TC" ] && ls "$TC" | sort -t. -k1.2,1n -k2,2n -k3,3n; return 0; }
+install_running() {
+  [ -d "$MU_HOME/.install.lock" ] || return 1
+  local p; p="$(cat "$MU_HOME/.install.lock/pid" 2>/dev/null || true)"
+  [ -n "$p" ] || return 0   # being created right now
+  ps -p "$p" -o command= 2>/dev/null | grep -q install
+}
+free_mb() { df -m "$HOME" | awk 'NR==2{print $4}'; }
+
+# resolve the toolchain for this folder -> V, VSRC (what chose it), MU_PROJECT
+resolve() {
+  V="${MU_VERSION:-}"; VSRC="MU_VERSION"
+  if [ -z "$V" ] && P="$(find_project)"; then
+    export MU_PROJECT="$P"; V="$(toml_version "$P/mu.toml")"; VSRC="mu.toml"
+  fi
+  if [ -z "$V" ] || [ "$V" = "unreleased" ]; then V="$(default_version)"; VSRC="default"; fi
+  [ -n "$V" ] || die "no μ toolchain is installed yet. In a clone of martand-systems/mu, run: ./install.sh" 3
+}
+require_installed() {
+  installed "$1" && return 0
+  [ -n "${MU_INSTALLING:-}" ] && [ -d "$TC/$1/recipe" ] && return 0
+  [ ! -f "$TC/$1/.installing" ] || die "μ $1 is incomplete (its install was interrupted). Reinstall it: mu install $1 --force" 3
+  case "$VSRC" in
+    mu.toml) die "this project uses μ $1, which isn't installed on this computer.
+    install it:                                  mu install $1
+    or move the project to the default ($(default_version)):  mu pin" 3 ;;
+    *) die "μ $1 isn't installed. Installed: $(versions | tr '\n' ' ')" 3 ;;
+  esac
+}
+
+# ---------------------------------------------------------------- releases (git)
+source_url() { cat "$MU_HOME/source" 2>/dev/null || echo "$DEFAULT_SOURCE"; }
+find_git() {
+  local g; for g in $(which -a git 2>/dev/null); do "$g" --version >/dev/null 2>&1 && { echo "$g"; return 0; }; done
+  die "git is needed to download μ releases. Install Apple's command line tools (xcode-select --install), then retry."
+}
+latest_tag() {
+  local git; git="$(find_git)"
+  "$git" ls-remote --tags --refs "$(source_url)" 'v*' 2>/dev/null | awk '{sub("refs/tags/","",$2); print $2}' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -1 || true
+}
+has_flag() { local f="$1"; shift; local a; for a in "$@"; do [ "$a" = "$f" ] && return 0; done; return 1; }
+
+cmd_install() {
+  local v="${1:-latest}"; [ $# -gt 0 ] && shift
+  if [ "$v" = latest ]; then
+    printf 'checking %s for the latest release…\n' "$(source_url)"
+    v="$(latest_tag)"; [ -n "$v" ] || die "no releases found at $(source_url) (no network, or no access to the repo?)"
+  fi
+  valid_version "$v"
+  if installed "$v" && ! has_flag --force "$@"; then
+    printf 'μ %s is already installed.\n' "$v"
+    if has_flag --set-default "$@"; then echo "$v" > "$MU_HOME/default"; printf 'default: μ %s\n' "$v"; fi
+    return 0
+  fi
+  local git src bak rc=0 rev1
+  git="$(find_git)"; mkdir -p "$MU_CACHE/src"; src="$MU_CACHE/src/$v.$$"; rm -rf "$src"
+  printf 'downloading the μ %s recipe…\n' "$v"
+  "$git" -c advice.detachedHead=false clone -q --depth 1 --branch "$v" "$(source_url)" "$src" \
+    || die "could not download μ $v from $(source_url) (does the release exist, and can this account read the repo?)"
+  # an older release's installer may carry an older dispatcher: keep this one if it is newer
+  bak="$MU_CACHE/src/mu-dispatcher.$$"; cp "$MU_HOME/bin/mu" "$bak"
+  if [ -x "$src/install.sh" ]; then "$src/install.sh" --version "$v" "$@" || rc=$?
+  else "$src/install/install-mac.sh" --version "$v" "$@" || rc=$?; fi
+  rev1="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$MU_HOME/bin/mu" | head -1)"
+  [ "${rev1:-0}" -ge "$MU_DISPATCHER_REV" ] || install -m 755 "$bak" "$MU_HOME/bin/mu"
+  rm -rf "$src" "$bak"
+  return $rc
+}
+
+cmd_update() {
+  local cur latest stale=""; cur="$(default_version)"
+  printf 'checking %s for the latest release…\n' "$(source_url)"
+  latest="$(latest_tag)"; [ -n "$latest" ] || die "no releases found at $(source_url) (no network, or no access to the repo?)"
+  if [ "$latest" = "$cur" ] && installed "$latest"; then printf 'μ %s is the latest release. Nothing to do.\n' "$cur"; return 0; fi
+  cmd_install "$latest" --set-default "$@"
+  echo "$latest" > "$MU_HOME/default"
+  stale="$(projects | while IFS= read -r p; do [ "$(toml_version "$p/mu.toml")" = "$latest" ] || printf ' %s' "$(basename "$p")"; done)"
+  printf '\n%sdefault is now μ %s.%s\n' "$B" "$latest" "$N"
+  [ -z "$stale" ] || printf 'Projects pinned to older versions (they keep working):%s\n  move one with: cd <project> && mu pin\n' "$stale"
+}
+
+cmd_use() {
+  [ $# -eq 1 ] || die "usage: mu use <version>" 2
+  valid_version "$1"
+  installed "$1" || die "μ $1 isn't installed. Installed: $(versions | tr '\n' ' ')  (mu install $1)"
+  echo "$1" > "$MU_HOME/default"; printf 'default: μ %s\n' "$1"
+}
+
+cmd_pin() {
+  local P v
+  P="$(find_project)" || die "no mu.toml here or in any parent folder. Create one in the project root:
+    printf '[mu]\\nversion = \"$(default_version)\"\\n' > mu.toml && mu link" 2
+  v="${1:-$(default_version)}"; valid_version "$v"
+  installed "$v" || die "μ $v isn't installed (mu install $v)"
+  if tr -d '\r' < "$P/mu.toml" | grep -Eq '^[[:space:]]*\[mu\][[:space:]]*(#.*)?$'; then
+    tr -d '\r' < "$P/mu.toml" | awk -v v="$v" '
+      /^[[:space:]]*\[/ { if (s && !done) { print "version = \"" v "\""; done=1 } s = ($0 ~ /^[[:space:]]*\[mu\][[:space:]]*(#.*)?$/) }
+      s && /^[[:space:]]*version[[:space:]]*=/ { if (!done) print "version = \"" v "\""; done=1; next }
+      { print }
+      END { if (s && !done) print "version = \"" v "\"" }' > "$P/mu.toml.tmp"
+  else
+    { printf '[mu]\nversion = "%s"\n\n' "$v"; cat "$P/mu.toml"; } > "$P/mu.toml.tmp"
+  fi
+  mv "$P/mu.toml.tmp" "$P/mu.toml"
+  [ "$(toml_version "$P/mu.toml")" = "$v" ] || die "could not set the version in $P/mu.toml: edit [mu] version by hand"
+  printf 'pinned %s to μ %s (mu.toml)\n' "$(tilde "$P")" "$v"
+  MU_VERSION="$v" MU_PROJECT="$P" "$TC/$v/recipe/bin/mu-toolchain" link
+}
+
+# layers that installed versions reference (LAYERS; STORE_KEYS from v2026.11.3 pre-releases)
+refs_of() { local v; for v in "$@"; do cat "$TC/$v/LAYERS" "$TC/$v/STORE_KEYS" 2>/dev/null; done | tr '\n' ' '; }
+# prune_store APPLY REFS: remove store layers not in REFS (and leftovers of interrupted builds)
+prune_store() {
+  local d k
+  [ -d "$MU_HOME/store" ] || return 0
+  for d in "$MU_HOME/store"/* "$MU_HOME/store"/.*.partial "$MU_HOME/store"/.lock-*; do
+    [ -e "$d" ] || continue
+    k="$(basename "$d")"
+    case " $2 " in *" $k "*) continue ;; esac
+    printf '  remove layer   %-34s %s\n' "$k" "$(du -sh "$d" 2>/dev/null | cut -f1 | tr -d ' ')"
+    [ "$1" = 1 ] && { chmod -R u+w "$d" 2>/dev/null || true; rm -rf "$d"; }
   done
-fi
-if [ -z "$v" ] || [ "$v" = "unreleased" ]; then
-  [ -f "$MU_HOME/default" ] || { echo "mu: no toolchain installed (no $MU_HOME/default)" >&2; exit 3; }
-  v="$(cat "$MU_HOME/default")"
-fi
-T="$MU_HOME/toolchains/$v"
-if [ ! -x "$T/recipe/bin/mu-toolchain" ]; then
-  echo "mu: toolchain '$v' is not installed (looked in $T)." >&2
-  echo "    installed: $(ls "$MU_HOME/toolchains" 2>/dev/null | tr '\n' ' ')" >&2
-  exit 3
-fi
-exec "$T/recipe/bin/mu-toolchain" "$@"
+  return 0
+}
+remove_version() { rm -rf "${TC:?}/$1" "$MU_HOME/state/cad/$1" "$MU_HOME/state/bench/install-$1"; }
+
+cmd_remove() {
+  local force=0 v="" a users f0
+  for a in "$@"; do case "$a" in --force) force=1 ;; *) v="$a" ;; esac; done
+  [ -n "$v" ] || die "usage: mu remove <version> [--force]" 2
+  valid_version "$v"
+  [ -d "$TC/$v" ] || die "μ $v isn't installed"
+  ! install_running || die "an install is running; try again when it finishes"
+  [ "$v" != "$(default_version)" ] || die "μ $v is the default. Choose another default first: mu use <version>"
+  users="$(pinned_by "$v")"
+  [ -z "$users" ] || [ "$force" = 1 ] || die "μ $v is pinned by: $users(run mu pin in those projects, or use --force)"
+  f0=$(free_mb)
+  remove_version "$v"; printf 'removed μ %s\n' "$v"
+  prune_store 1 "$(refs_of $(versions))"
+  printf 'freed %s MB\n' "$(( $(free_mb) - f0 ))"
+}
+
+cmd_gc() {
+  local apply=0 keep v P f0 kept=""; [ "${1:-}" = "--yes" ] && apply=1
+  ! install_running || die "an install is running; try again when it finishes"
+  keep=" $(default_version) ${MU_VERSION:-} $(pinned_versions | tr '\n' ' ') "
+  if P="$(find_project)"; then keep="$keep$(toml_version "$P/mu.toml") "; fi
+  for v in $(versions); do case "$keep" in *" $v "*) kept="$kept $v" ;; esac; done
+  printf 'keeping:%s  (the default and versions pinned by %s registered project(s))\n' "${kept:- nothing}" "$(projects | wc -l | tr -d ' ')"
+  f0=$(free_mb)
+  for v in $(versions); do
+    case "$keep" in *" $v "*) continue ;; esac
+    printf '  remove version %-34s %s\n' "$v" "$(du -sh "$TC/$v" 2>/dev/null | cut -f1 | tr -d ' ')"
+    [ "$apply" = 0 ] || remove_version "$v"
+  done
+  prune_store "$apply" "$(refs_of $kept)"
+  if [ "$apply" = 1 ]; then
+    { ls -t "$MU_HOME/logs"/install-*.log 2>/dev/null || true; } | tail -n +21 | while IFS= read -r l; do rm -f "$l"; done
+    if [ -f "$MU_HOME/projects.txt" ]; then projects > "$MU_HOME/projects.txt.tmp"; mv "$MU_HOME/projects.txt.tmp" "$MU_HOME/projects.txt"; fi
+    printf 'freed %s MB\n' "$(( $(free_mb) - f0 ))"
+  else
+    printf 'dry run: remove with  mu gc --yes\n'
+  fi
+}
+
+cmd_versions() {
+  local def v tag users when; def="$(default_version)"
+  [ -n "$(versions)" ] || { echo "no μ versions installed"; return 0; }
+  for v in $(versions); do
+    tag=""; [ "$v" != "$def" ] || tag="${G}default${N}  "
+    users="$(pinned_by "$v")"; [ -z "$users" ] || tag="${tag}${DIM}pinned by ${users}${N}"
+    if installed "$v"; then when="$(manifest "$v" installed | cut -c1-16)"; else when="${Y}incomplete${N}"; fi
+    printf '%s %-14s %-17s %s\n' "$([ "$v" = "$def" ] && echo '*' || echo ' ')" "$v" "$when" "$tag"
+  done
+}
+
+cmd_status() {
+  resolve
+  local T="$TC/$V" others linked
+  printf '%sμ %s%s' "$B" "$V" "$N"
+  case "$VSRC" in default) printf '  %s(default)%s\n' "$DIM" "$N" ;; mu.toml) printf '  %s(pinned by this project)%s\n' "$DIM" "$N" ;; *) printf '  %s(MU_VERSION)%s\n' "$DIM" "$N" ;; esac
+  if installed "$V"; then
+    printf '%s%s · recipe %s · installed %s%s\n' "$DIM" "$(tilde "$T")" "$(manifest "$V" recipe_commit | cut -c1-10)" "$(manifest "$V" installed | cut -c1-16)" "$N"
+  else printf '%snot installed on this computer: mu install %s%s\n' "$Y" "$V" "$N"; fi
+  if [ -n "${MU_PROJECT:-}" ]; then
+    linked="${Y}not linked for Claude Code: run mu link${N}"
+    [ "$(readlink "$MU_PROJECT/.mu/toolchain" 2>/dev/null)" != "$T/recipe" ] || linked="linked for Claude Code"
+    printf '\n%sproject%s %s  %s%s%s · %s\n' "$B" "$N" "$(basename "$MU_PROJECT")" "$DIM" "$(tilde "$MU_PROJECT")" "$N" "$linked"
+  fi
+  others="$(versions | grep -vx "$V" | tr '\n' ' ' || true)"
+  [ -z "$others" ] || printf '%salso installed: %s%s\n' "$DIM" "$others" "$N"
+  cat <<H
+
+  ${B}mu run${N} <tool> [args]   run a tool: python, gmsh, ccx, cad, openfoam, pvbatch, prusa-slicer, cam-python, …
+  ${B}mu doctor${N}              check every tool        ${B}mu test${N}       benchmark suite
+  ${B}mu link${N}                connect this project    ${B}mu versions${N}   installed versions
+  ${B}mu update${N}              install the latest μ    ${B}mu help${N}       all commands
+H
+}
+
+cmd_help() {
+  cat <<H
+${B}μ (mu)${N}: Martand's engineering toolchain
+
+${B}Versions${N}
+  mu                       status: the version this folder uses, its project, common commands
+  mu versions              installed versions, the default, and which projects pin each
+  mu install [V|latest]    download release V and install it (installer options: ./install.sh --help)
+  mu update                install the latest release and make it the default
+  mu use V                 make V the default (used outside projects)
+  mu pin [V]               pin this project (mu.toml) to V (default: the default version) and link it
+  mu remove V [--force]    uninstall V (refuses the default, and versions projects pin unless --force)
+  mu gc [--yes]            remove versions and layers nothing uses (dry run without --yes)
+
+${B}Tools${N} (from the version this folder uses)
+H
+  if [ -n "${MU_VERSION:-}$(default_version)" ] || find_project >/dev/null; then
+    resolve
+    if installed "$V"; then "$TC/$V/recipe/bin/mu-toolchain" help | sed -n '/^  mu /,/^$/p' | grep -v '^$' | grep -v '^  mu gc' | grep -v '^                         (default, running'; else echo "  (μ $V isn't installed)"; fi
+  else echo "  (no toolchain installed yet)"; fi
+  printf '\nThe version comes from $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.\n'
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  "")                     cmd_status ;;
+  help|-h|--help)         cmd_help ;;
+  versions|list|ls)       cmd_versions ;;
+  install)                cmd_install "$@" ;;
+  update|upgrade)         cmd_update "$@" ;;
+  use|default)            cmd_use "$@" ;;
+  pin)                    cmd_pin "$@" ;;
+  remove|uninstall|rm)    cmd_remove "$@" ;;
+  gc)                     cmd_gc "$@" ;;
+  --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
+  *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
+esac
