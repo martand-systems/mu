@@ -1,0 +1,72 @@
+# Full μ install on linux-64, as a user would do it, in a fresh container: plain ubuntu:24.04 and the official
+# Ubuntu 24.04 WSL image (the office PC's target). Runs mu doctor + the benchmark suite; uploads logs and results.
+name: linux-install
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: "ubuntu, wsl or both"
+        default: "both"
+      cache:
+        description: "reuse the download cache (false = a true first install)"
+        default: "true"
+permissions:
+  contents: read
+jobs:
+  install:
+    name: install (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu, wsl]
+    steps:
+      - name: Selected?
+        id: sel
+        run: |
+          i="${{ github.event.inputs.images }}"
+          if [ "$i" = both ] || [ "$i" = "${{ matrix.image }}" ]; then echo run=1 >> "$GITHUB_OUTPUT"; else echo run=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Free disk on the runner
+        if: steps.sel.outputs.run == '1'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h / | tail -1
+      - uses: actions/checkout@v4
+        if: steps.sel.outputs.run == '1'
+      - name: Download cache
+        if: steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
+        uses: actions/cache@v4
+        with:
+          path: mucache
+          key: mucache-linux-64-${{ hashFiles('toolchain/apps.toml', 'toolchain/linux-64/*') }}
+          restore-keys: mucache-linux-64-
+      - name: Container image
+        if: steps.sel.outputs.run == '1'
+        run: |
+          if [ "${{ matrix.image }}" = wsl ]; then
+            curl -fsSL -o wsl.tgz https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz
+            docker import wsl.tgz mu-wsl:24.04 >/dev/null && rm wsl.tgz && echo IMG=mu-wsl:24.04 >> "$GITHUB_ENV"
+          else
+            docker pull -q ubuntu:24.04 && echo IMG=ubuntu:24.04 >> "$GITHUB_ENV"
+          fi
+      - name: Install μ (system step, then as a user)
+        if: steps.sel.outputs.run == '1'
+        run: |
+          mkdir -p out mucache
+          # --privileged: flatpak's sandbox (bubblewrap) needs it inside Docker; WSL2 needs nothing extra
+          docker run --rm --privileged --shm-size=4g -v "$PWD:/w:ro" -v "$PWD/out:/out" -v "$PWD/mucache:/cache" "$IMG" bash /w/tools/s2/ci-install.sh
+      - name: Summary
+        if: always() && steps.sel.outputs.run == '1'
+        run: |
+          { echo "### μ install on ${{ matrix.image }}"; echo '```'
+            grep -hE "✓|✗|ready in|failed" out/install1.txt out/install2.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
+            echo; cat out/timeline.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          sudo chown -R "$(id -u)" mucache out 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sel.outputs.run == '1'
+        with:
+          name: install-${{ matrix.image }}
+          path: out/
+          retention-days: 14

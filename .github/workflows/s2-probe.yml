@@ -1,0 +1,59 @@
+# S2 probes: does every tool have a working headless linux-64 route? Each probe runs in a fresh container:
+# plain ubuntu:24.04, and the official Ubuntu 24.04 WSL image (what the office PC runs). Results are uploaded.
+name: s2-probe
+on:
+  workflow_dispatch:
+    inputs:
+      tools:
+        description: "space-separated subset (default: all)"
+        required: false
+        default: ""
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: ${{ matrix.tool }} (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: [openfoam, paraview, freecad, prusaslicer, openvsp]
+        image: [ubuntu, wsl]
+        exclude:
+          - tool: openvsp
+            image: wsl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Skip unless selected
+        id: sel
+        run: |
+          t="${{ github.event.inputs.tools }}"
+          if [ -z "$t" ] || [[ " $t " == *" ${{ matrix.tool }} "* ]]; then echo run=1 >> "$GITHUB_OUTPUT"; else echo run=0 >> "$GITHUB_OUTPUT"; fi
+      - name: Container image
+        if: steps.sel.outputs.run == '1'
+        run: |
+          if [ "${{ matrix.image }}" = wsl ]; then
+            curl -fsSL -o wsl.tgz https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz
+            sha256sum wsl.tgz
+            docker import wsl.tgz mu-wsl:24.04 >/dev/null && rm wsl.tgz && echo IMG=mu-wsl:24.04 >> "$GITHUB_ENV"
+          else
+            docker pull -q ubuntu:24.04 && echo IMG=ubuntu:24.04 >> "$GITHUB_ENV"
+          fi
+          df -h / | tail -1; nproc; free -g | head -2
+      - name: Probe ${{ matrix.tool }}
+        if: steps.sel.outputs.run == '1'
+        run: |
+          mkdir -p out
+          extra=""; [ "${{ matrix.tool }}" = prusaslicer ] && extra="--privileged"   # bubblewrap needs it inside Docker
+          docker run --rm --shm-size=2g $extra -v "$PWD:/w:ro" -v "$PWD/out:/out" "$IMG" bash /w/tools/s2/probe-${{ matrix.tool }}.sh
+      - name: Summary
+        if: always() && steps.sel.outputs.run == '1'
+        run: |
+          { echo "### ${{ matrix.tool }} on ${{ matrix.image }}"; echo '```'; cat out/results.txt 2>/dev/null; echo; cat out/timeline.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.sel.outputs.run == '1'
+        with:
+          name: probe-${{ matrix.tool }}-${{ matrix.image }}
+          path: out/
+          retention-days: 14
