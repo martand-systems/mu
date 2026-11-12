@@ -5,7 +5,12 @@ MU_TOOLCHAIN="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$MU_TOOLCHAIN/recipe/lib/mu-env.sh"
 cmd="${1:-help}"; [ $# -gt 0 ] && shift
 case "$cmd" in
-  version)  if [ "${1:-}" = "--json" ]; then cat "$MU_TOOLCHAIN/MANIFEST.json"; else python -c 'import json,sys;m=json.load(open(sys.argv[1]));print(f"μ {m[\"version\"]}  (recipe {m[\"recipe_commit\"][:10]}, {m[\"platform\"]}, installed {m[\"installed\"]})")' "$MU_TOOLCHAIN/MANIFEST.json"; fi ;;
+  version)  if [ "${1:-}" = "--json" ]; then cat "$MU_TOOLCHAIN/MANIFEST.json"; else python - "$MU_TOOLCHAIN/MANIFEST.json" <<'PYV'
+import json, sys
+m = json.load(open(sys.argv[1]))
+print(f"μ {m['version']}  (recipe {m['recipe_commit'][:10]}, {m['platform']}, installed {m['installed']})")
+PYV
+            fi ;;
   path)     echo "$MU_TOOLCHAIN" ;;
   env)      printf 'export MU_TOOLCHAIN=%q\n. %q\n' "$MU_TOOLCHAIN" "$MU_TOOLCHAIN/recipe/lib/mu-env.sh" ;;
   run)      [ $# -gt 0 ] || { echo "usage: mu run <command> [args...]" >&2; exit 2; }; exec "$@" ;;
