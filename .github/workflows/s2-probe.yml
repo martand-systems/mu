@@ -8,9 +8,6 @@ on:
         description: "space-separated subset (default: all)"
         required: false
         default: ""
-  push:
-    branches: [s2-linux]
-    paths: ["tools/s2/**", ".github/workflows/s2-probe.yml"]
 permissions:
   contents: read
 jobs:
