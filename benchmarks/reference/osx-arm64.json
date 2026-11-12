@@ -25,11 +25,11 @@
   },
   "nodes_h5": {
    "value": 3872,
-   "rel_tol": 0.02
+   "rel_tol": 0.05
   },
   "nodes_h2.5": {
    "value": 21472,
-   "rel_tol": 0.02
+   "rel_tol": 0.05
   }
  },
  "aero-vlm-wing": {
@@ -71,5 +71,6 @@
    "value": -6.0,
    "rel_tol": 0
   }
- }
+ },
+ "_note_mesh": "fea-cantilever node counts are a mesh fingerprint, not an engineering answer: Gmsh's parallel HXT 3D mesher is not deterministic (M5: run-to-run differences on macOS; up to 2.2% on 2-core CI runners with benchmarks in parallel). They catch a mesher change at +-5%; the physical results (tip deflection, stress, reaction) keep their tight tolerances."
 }
