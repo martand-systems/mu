@@ -20,7 +20,7 @@ CHECKS = [
     ("pvbatch",      ["pvbatch", "--version"], "6.2.1"),
     ("prusa-slicer", ["prusa-slicer", "--help"], "2.9.7"),
     ("cam-python",   ["cam-python", "-c", "import FreeCAD,ocp_freecad_cam,cadquery;print(FreeCAD.Version()[0]+'.'+FreeCAD.Version()[1], cadquery.__version__)"], "2.8"),
-    ("openfoam",     ["openfoam", "-c", "foamVersion"], "2606"),
+    ("openfoam",     ["openfoam", "-c", "echo $WM_PROJECT_VERSION"], "2606"),
     ("git-lfs",      ["git-lfs", "version"], "git-lfs/"),
 ]
 

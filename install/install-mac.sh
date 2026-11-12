@@ -153,6 +153,10 @@ FCPY="$T/apps/FreeCAD-1.1.4.app/Contents/Resources/bin/python"
 HOME="$MU_STATE/home" "$FCPY" -m venv --system-site-packages "$T/cam-venv"
 subst "$T/recipe/toolchain/osx-arm64/cam-venv.pip.txt" > "$T/.cam.pip.txt"
 "$T/cam-venv/bin/python" -m pip install -q --no-deps -r "$T/.cam.pip.txt"
+# FreeCAD's own modules (FreeCAD, Part, Path/CAM) live in the app bundle's lib folder, not in its Python's site-packages
+CSP="$("$T/cam-venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+echo "$T/apps/FreeCAD-1.1.4.app/Contents/Resources/lib" > "$CSP/freecad.pth"
+"$T/bin/cam-python" -c 'import FreeCAD, ocp_freecad_cam' || die "CAM env cannot import FreeCAD / ocp_freecad_cam"
 
 # ---------------------------------------------------------------- text-to-cad registration (inside μ state)
 say "text-to-cad"
