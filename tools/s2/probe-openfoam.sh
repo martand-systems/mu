@@ -1,8 +1,7 @@
 #!/bin/bash
 # S2 probe: OpenFOAM v2606 from ESI's noble .debs, unpacked without root into a read-only store; serial + MPI cavity.
 . /w/tools/s2/common.sh
-apt_install ca-certificates curl openmpi-bin libopenmpi3t64 libfftw3-double3 libgmp10 libmpfr6 libgomp1 \
-  libhdf5-openmpi-103-1t64 libscotch-7.0 libptscotch-7.0 libreadline8t64 zlib1g
+apt_install $APT_LIST dbus
 B=https://dl.openfoam.com/repos/deb/dists/noble/main/pool/2606_0
 mkdir -p /dl /store/of
 fetch $B/binary-amd64/openfoam2606_2606.0~rc2-1_amd64.deb /dl/of.deb ef129961af180427090ff04938845c54a21419376474baa371559bad31e19a26

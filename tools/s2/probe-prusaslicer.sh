@@ -3,7 +3,7 @@
 . /w/tools/s2/common.sh
 APP_COMMIT=22caa5995fef8170cbed1d404f993996e5552e47159391666a7b096a85d8f641
 RT_COMMIT=4337a389125f814785bd83f4ace01da5b6baa80fdcf5a9c81e60dcd03896c067
-apt_install ca-certificates curl flatpak
+apt_install $APT_LIST dbus
 cat > /home/mu/ps.sh <<EOS
 set -euo pipefail
 export FLATPAK_USER_DIR=/home/mu/store/flatpak
@@ -22,6 +22,6 @@ echo layers=\$(grep -c "^;LAYER_CHANGE" /home/mu/plate.gcode) lines=\$(wc -l < /
 EOS
 chown mu /home/mu/ps.sh
 log "flatpak install (pinned commits) + slice as user mu"
-as_user bash /home/mu/ps.sh 2>&1 | tee "$OUT/prusaslicer.txt"
+as_user dbus-run-session -- bash /home/mu/ps.sh 2>&1 | tee "$OUT/prusaslicer.txt"
 grep -q "filament used" "$OUT/prusaslicer.txt" && res prusaslicer ok
 log done

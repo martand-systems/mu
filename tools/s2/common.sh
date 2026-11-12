@@ -12,4 +12,6 @@ fetch() {  # fetch URL FILE SHA256
 }
 as_user() { runuser -u mu -- env HOME=/home/mu "$@"; }   # WSL distros run tools as a normal user
 id mu >/dev/null 2>&1 || useradd -m -s /bin/bash mu
+# the policy under test: μ's declared Ubuntu package list (toolchain/linux-64/apt.txt)
+APT_LIST="$(grep -v '^#' /w/toolchain/linux-64/apt.txt | sed 's/#.*//' | tr '\n' ' ')"
 log "container: $(. /etc/os-release; echo "$PRETTY_NAME") $(uname -m), $(nproc) cpus, $(free -g | awk '/Mem/{print $2}') GB"

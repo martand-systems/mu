@@ -1,7 +1,7 @@
 #!/bin/bash
 # S2 probe: FreeCAD 1.1.4 AppImage extracted without FUSE; its Python 3.11 hosts the CAM venv; CAM benchmark job headless.
 . /w/tools/s2/common.sh
-apt_install ca-certificates curl
+apt_install $APT_LIST dbus
 mkdir -p /dl /store
 fetch https://github.com/FreeCAD/FreeCAD/releases/download/1.1.4/FreeCAD_1.1.4-Linux-x86_64-py311.AppImage /dl/fc.AppImage f6dc6ba676e5ac96a565ebc8d657232f94c6158e85b4352141bd1a46f6b43434
 log "extract (--appimage-extract, no FUSE)"; chmod +x /dl/fc.AppImage; (cd /store && /dl/fc.AppImage --appimage-extract >/dev/null); rm /dl/fc.AppImage

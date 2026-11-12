@@ -4,7 +4,7 @@
 #  B) the Python API built from the 3.56.0 source against conda-forge Python 3.13.18 (the main env's Python),
 #     headless (VSP_NO_GRAPHICS); then the aero-vlm-wing benchmark with it. Timed: decides build-on-device vs prebuilt.
 . /w/tools/s2/common.sh
-apt_install ca-certificates curl libgomp1 libxml2 libcminpack1 bzip2 \
+apt_install $APT_LIST \
   build-essential cmake swig libxml2-dev libcminpack-dev libglm-dev libeigen3-dev patchelf
 mkdir -p /dl /store/vsp
 fetch https://openvsp.org/zips/old/linux/OpenVSP-3.56.0-Ubuntu-24.04_amd64.deb /dl/vsp.deb 9ed933fc20fe305b2d543823fd30a6e1db3628ce19c86d6915fd0d5cba3a2744

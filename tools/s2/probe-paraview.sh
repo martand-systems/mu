@@ -1,7 +1,7 @@
 #!/bin/bash
 # S2 probe: ParaView 6.2.1 Linux tarball, pvbatch headless (OSMesa), no display, no GPU.
 . /w/tools/s2/common.sh
-apt_install ca-certificates curl libgomp1 libpciaccess0
+apt_install $APT_LIST dbus
 mkdir -p /dl /store
 fetch https://www.paraview.org/files/v6.2/ParaView-6.2.1-MPI-Linux-Python3.12-x86_64.tar.gz /dl/pv.tgz 91eab8deadb0314856c8780fb7ccb272515cfc4bac417766103cb658ec8be7f5
 log "unpack"; tar -xzf /dl/pv.tgz -C /store; rm /dl/pv.tgz

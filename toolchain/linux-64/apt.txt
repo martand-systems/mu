@@ -1,0 +1,16 @@
+# Ubuntu 24.04 packages μ needs on linux-64 (installed by `sudo ./install.sh --system`, or by ./install.sh through sudo).
+# Everything else installs without root into μ's store. The official WSL image already has most of these.
+# installer
+ca-certificates curl git unzip bzip2 xz-utils zstd procps file
+# OpenFOAM v2606 (ESI .debs, unpacked into the store) runtime: Open MPI 4.1, scotch, FFTW
+openmpi-bin libopenmpi3t64 libfftw3-double3 libgmp10 libmpfr6 libgomp1 libhdf5-openmpi-103-1t64 libscotch-7.0 libptscotch-7.0 libreadline8t64 zlib1g
+# GL / X client libraries: OCP wheels (CAM env) link libGL; ParaView's OSMesa path and OCCT renders load X11 libs
+libgl1 libegl1 libglu1-mesa libgl1-mesa-dri libx11-6 libxext6 libxrender1 libxt6 libsm6 libice6 libxcb1 libxkbcommon0 libxi6 libxrandr2 libxcursor1 libxinerama1 libxfixes3 libxdamage1 libdbus-1-3 libfontconfig1 libfreetype6 fonts-dejavu-core
+# ParaView 6.2.1 tarball (bundled MPICH)
+libpciaccess0
+# OpenVSP 3.56.0 (vspaero, vspscript)
+libxml2 libcminpack1
+# PrusaSlicer 2.9.7 (Flathub, pinned commits)
+flatpak
+# text-to-cad stills (OCCT on Linux is GLX-only)
+xvfb
