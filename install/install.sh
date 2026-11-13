@@ -140,6 +140,8 @@ fail() {
   fi
   # a generic "command failed" in the main shell usually follows a subshell's specific reason
   case "$*" in "command failed"*) [ -s "$WORK/lasterr" ] && set -- "$(cat "$WORK/lasterr")" ;; esac
+  # for mu autoupdate: the stage that failed (preflight, doctor, bench, ...) and why
+  [ -z "${MU_INSTALL_RESULT:-}" ] || printf '%s\t%s\n' "${STAGE_KEY:-preflight}" "$(printf '%s' "$*" | tr '\n\t' '  ')" > "$MU_INSTALL_RESULT" 2>/dev/null || true
   spinner_stop
   printf '  %s✗%s %s\n\n' "$RED" "$N" "${STAGE_TITLE:-install}" >&3
   printf '%sμ install failed:%s %s\n' "$B$RED" "$N" "$*" >&4
@@ -687,9 +689,10 @@ rm -f "$T/.installing"
 spinner_stop
 printf '\n  %sμ %s is ready%s in %s s %s· %s of new disk · log %s%s\n' "$B$G" "$VERSION" "$N" "$TOTAL" "$DIM" "$(human "$DISK_MB")" "${LOG/#$HOME/~}" "$N" >&3
 [ -z "$PATH_MSG" ] || printf '  %s!%s %s\n' "$Y" "$N" "$PATH_MSG" >&3
-# auto-update: on by default for a person's install; not for CI or --no-modify-path, and never over an earlier on/off
+# auto-update: on by default for a person's install; not for CI or --no-modify-path, and never over an earlier off
+# (while it says on, this sets the scheduler up again, e.g. after systemd or linger became available)
 if [ "$AUTOUPDATE" = 1 ] && [ "$MODIFY_PATH" = 1 ] && [ "${MU_NO_AUTOUPDATE:-}" != 1 ] && [ "${CI:-}" != true ] \
-   && [ ! -f "$MU_HOME/autoupdate.conf" ]; then
+   && ! grep -Eqs '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*off' "$MU_HOME/autoupdate.conf"; then
   au_rc=0; "$MU_HOME/bin/mu" autoupdate on --quiet > "$WORK/autoupdate.txt" 2>&5 || au_rc=$?
   au_line="$(head -1 "$WORK/autoupdate.txt")"; [ -n "$au_line" ] || au_line="auto-update could not be turned on (see the log): mu autoupdate on"
   if [ "$au_rc" = 0 ]; then printf '  %s\n' "$au_line" >&3; else printf '  %s!%s %s\n' "$Y" "$N" "$au_line" >&3; fi

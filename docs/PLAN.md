@@ -323,8 +323,9 @@ The installer:
 - BIOS restores power after a power cut.
 - Windows Update automatic restart is allowed; the agent comes back through the startup task.
 - μ keeps itself on the latest release with `mu autoupdate` (§9): a systemd user timer for the agent user. That user
-  never logs in, so the timer needs linger, set once as root: `sudo ./install.sh --system --user mu`. The agent holds
-  `state/busy` while jobs run, and updates wait for it.
+  never logs in, so the timer needs linger, set once as root: `sudo ./install.sh --system --user mu`; then install as
+  `mu` (`sudo -iu mu`), which turns the timer on. The agent creates `state/busy` before it resolves a toolchain
+  version for a job and removes it when the queue is empty: updates (install, switch, cleanup) wait for it.
 
 **Performance:**
 - Workspaces are on the WSL ext4 disk (`/srv/mu/jobs`), never on `/mnt/c`.
@@ -615,10 +616,13 @@ It's included in every project as the `org/` submodule. Updating it is a deliber
   source. It installs that tag the way `mu update` does, so the installer gate (doctor and benchmarks) applies, and
   makes it the default only if the gate passed. A release that fails keeps the old default, is reported in `mu`, and is
   tried at most 3 times. A newer tag resets the count. The run waits on battery (macOS), below `min_free_gb`, while an
-  install is running, and while `state/busy` exists. After a switch it removes old versions, keeping the previous
-  default for rollback and every version a registered project pins. It never touches `mu.toml`: moving a project to a
-  new version stays an explicit, reviewed `mu upgrade`. The schedule is a LaunchAgent on macOS and a systemd user timer on
-  Linux. The installer turns it on by default, except in CI and with `--no-modify-path` or `--no-autoupdate`.
+  install is running, and while `state/busy` exists, and a check that waited is retried hourly. Only failures of the
+  release count (its checks, a hang past `max_hours`, a stop mid-install); network, lock and missing-package problems
+  don't. A failed release's installer never leaves its `mu` dispatcher behind. After a switch it removes old versions,
+  keeping the previous default for rollback and every version a registered project pins. It never touches `mu.toml`:
+  moving a project to a new version stays an explicit, reviewed `mu upgrade`. The schedule is an hourly LaunchAgent on
+  macOS and an hourly systemd user timer on Linux; the run checks once a day. The installer turns it on by default,
+  except in CI and with `--no-modify-path` or `--no-autoupdate`.
 - **Version scheme:** `vYYYY.MM.patch`.
 
 ---
