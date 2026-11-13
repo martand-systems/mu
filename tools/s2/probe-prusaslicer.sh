@@ -42,17 +42,26 @@ as_user ostree --repo=/home/mu/cache/flatpak/repo refs | tee -a "$OUT/results.tx
 log "warm cache: fetch again (must not pull)"
 r0=$(rx); u "fp_fetch $RTREF $RT_COMMIT \$URL \$KEY; fp_fetch $REF $APP_COMMIT \$URL \$KEY"; res warm_fetch_rx_bytes $(( $(rx) - r0 ))
 
-for n in 1 2; do
-  log "offline deploy #$n (unshare -n: no network at all)"
-  t=$SECONDS
-  unshare -n runuser -u mu -- env HOME=/home/mu dbus-run-session -- bash -c \
-    ". /home/mu/lib.sh; fp_deploy /home/mu/store/l$n/prusaslicer-flatpak \$URL \$KEY $RTREF@$RT_COMMIT $REF@$APP_COMMIT" 2>&1 | tail -15 | tee "$OUT/deploy$n.txt"
-  [ "${PIPESTATUS[0]}" = 0 ] || { res deploy$n fail; exit 1; }
-  chmod -R a-w /home/mu/store/l$n
+deploy() {   # deploy N [unshare -n]: build layer N from the cache (as the installer does), sealed
+  local n="$1"; shift; t=$SECONDS
+  "$@" runuser -u mu -- env HOME=/home/mu dbus-run-session -- bash -c \
+    ". /home/mu/lib.sh; fp_deploy /home/mu/store/l$n/prusaslicer-flatpak \$URL \$KEY $RTREF@$RT_COMMIT $REF@$APP_COMMIT && fp_seal /home/mu/store/l$n" \
+    > "$OUT/deploy$n.txt" 2>&1; rc=$?
+  tail -8 "$OUT/deploy$n.txt"
+  [ "$rc" = 0 ] || { res deploy$n fail; exit 1; }
   res deploy${n}_s $((SECONDS - t)); res layer${n}_MB "$(du -sm /home/mu/store/l$n | cut -f1)"
-done
+}
+for n in 1 2; do log "offline deploy #$n (unshare -n: no network at all)"; deploy $n unshare -n; done
 res cache_plus_layers_MB "$(du -smc /home/mu/cache /home/mu/store/l1 /home/mu/store/l2 | tail -1 | cut -f1)"
+log "the cache is intact after building and sealing two layers"
+as_user ostree --repo=/home/mu/cache/flatpak/repo fsck --quiet && res cache_fsck ok
 FLATPAK_USER_DIR=/home/mu/store/l1/prusaslicer-flatpak as_user flatpak --user list --columns=ref,commit | tee -a "$OUT/results.txt"
+log "damage one object in the cache: deploy #3 repairs it (downloads it again)"
+obj="$(find /home/mu/cache/flatpak/repo/objects -name '*.file' -size +100k | head -1)"
+chmod u+w "$obj"; printf 'x' >> "$obj"
+deploy 3
+grep -q "repairing the cache" "$OUT/deploy3.txt" && res repair ok
+as_user ostree --repo=/home/mu/cache/flatpak/repo fsck --quiet && res cache_fsck_after_repair ok
 
 log "slice offline from layer 1"
 mkdir -p /home/mu/ps-data && chown mu /home/mu/ps-data

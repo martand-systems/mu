@@ -318,7 +318,9 @@ detach_under() {
     case "$m" in "$1"/*) hdiutil detach "$m" -quiet 2>/dev/null || hdiutil detach "$m" -force -quiet 2>/dev/null || true ;; esac
   done
 }
-unseal_rm() { [ -e "$1" ] || return 0; detach_under "$1"; chmod -R u+w "$1" 2>/dev/null || true; rm -rf "${1:?}"; }
+# (only directories need to be writable to delete; files keep their modes: a flatpak layer's files are hard links shared
+# with the download cache)
+unseal_rm() { [ -e "$1" ] || return 0; detach_under "$1"; find "$1" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true; rm -rf "${1:?}"; }
 detach_under "$STORE"
 for d in "$STORE"/.*.partial; do [ -e "$d" ] && unseal_rm "$d"; done
 if [ "$REBUILD" = 1 ]; then
@@ -435,7 +437,7 @@ flatpak_layer() {
   fp_deploy "$L/$(app "$1" 7)" "$url" "$fkey" "$rt" "$ref@$commit"
   printf 'app=%s\nref=%s\ncommit=%s\nruntime=%s\nformat=%s\nbuilt=%s\n' "$name" "$ref" "$commit" "$rt" "$FLATPAK_FORMAT" \
     "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
-  seal "$L"
+  fp_seal "$L"
 }
 
 # tools needed to build: micromamba and uv (small, pinned binaries)

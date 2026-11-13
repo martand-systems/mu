@@ -189,7 +189,7 @@ prune_store() {
     k="$(basename "$d")"
     case " $2 " in *" $k "*) continue ;; esac
     printf '  remove layer   %-34s %s\n' "$k" "$(du -sh "$d" 2>/dev/null | cut -f1 | tr -d ' ')"
-    [ "$1" = 1 ] && { PRUNED_KB=$((PRUNED_KB + $(kb_of "$d"))); chmod -R u+w "$d" 2>/dev/null || true; rm -rf "$d"; }
+    [ "$1" = 1 ] && { PRUNED_KB=$((PRUNED_KB + $(kb_of "$d"))); find "$d" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true; rm -rf "$d"; }
   done
   return 0
 }

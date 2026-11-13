@@ -115,7 +115,8 @@ _fp_pull() {
 }
 
 # fp_deploy DIR URL KEY REF@COMMIT...: a flatpak installation at DIR (FLATPAK_USER_DIR) holding exactly these commits,
-# built from the cache with no network. Every REF@COMMIT must be cached (fp_fetch).
+# built from the cache with no network. Every REF@COMMIT must be cached (fp_fetch). If an object in the cache fails its
+# checksum, the cache is repaired (the damaged objects deleted, the commit downloaded again) and the import retried.
 fp_deploy() {
   local dir="$1" url="$2" key="$3" C r ref commit refs=""
   shift 3
@@ -127,9 +128,15 @@ fp_deploy() {
   for r in "$@"; do
     ref="${r%@*}"; commit="${r##*@}"
     fp_cached "$C" "$ref" "$commit" || fail "flatpak: $ref@${commit:0:12} is not in the cache"
-    # --untrusted: re-verify the checksum of every object read from the cache
-    ostree --repo="$dir/repo" pull-local --untrusted "$C" "$commit" \
-      || fail "flatpak: $ref@${commit:0:12} in the cache is damaged (delete $C and re-run)"
+    # --untrusted: every object read from the cache is checksummed again (objects are hard-linked when the cache and
+    # the store share a filesystem, so the layer costs almost no extra disk)
+    if ! ostree --repo="$dir/repo" pull-local --untrusted "$C" "$commit"; then
+      echo "flatpak: $ref@${commit:0:12} failed its checksum check in the cache: repairing the cache"
+      _fp_repair "$ref" "$commit" || fail "flatpak: could not repair the download cache $C (delete it and re-run)"
+      fp_fetch "$ref" "$commit" "$url" "$key"
+      ostree --repo="$dir/repo" pull-local --untrusted "$C" "$commit" \
+        || fail "flatpak: $ref@${commit:0:12} is still damaged after downloading it again (delete $C and re-run)"
+    fi
     mkdir -p "$dir/repo/refs/remotes/$FP_REMOTE/$(dirname "$ref")"
     echo "$commit" > "$dir/repo/refs/remotes/$FP_REMOTE/$ref"
     refs="$refs $ref"
@@ -142,3 +149,15 @@ fp_deploy() {
     [ "$(FLATPAK_USER_DIR="$dir" fp --user info --show-commit "$ref")" = "$commit" ] || fail "$ref is not at the pinned commit"
   done
 }
+
+# _fp_repair REF COMMIT: delete the cache's damaged objects (ostree fsck marks the commits that used them partial) and
+# forget REF@COMMIT, so that fp_fetch downloads what is missing
+_fp_repair() {
+  ( exec 9>"$MU_CACHE/flatpak.lock"; flock -w 14400 9 || exit 1
+    ostree --repo="$MU_CACHE/flatpak/repo" fsck --delete --quiet || true
+    ostree --repo="$MU_CACHE/flatpak/repo" refs --delete "mu/$1/$2" )
+}
+
+# fp_seal DIR: make a flatpak layer read-only. Directories only: its files are hard links shared with the download
+# cache, and their modes are part of each object's checksum. (Inside the sandbox the app's files are mounted read-only.)
+fp_seal() { find "$1" -type d -exec chmod a-w {} +; }
