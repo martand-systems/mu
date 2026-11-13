@@ -717,6 +717,9 @@ def cmd_compute_add(a):
                             os.path.join(tmpd, "id_ed25519")], capture_output=True, stdin=subprocess.DEVNULL)
         if p.returncode != 0:
             raise MuError(proto.EXIT_ERROR, "keygen", "ssh-keygen failed: %s" % p.stderr.decode(errors="replace"), "")
+        # explicit modes: a default ACL on the folder (seen on CI runners) can leave the key 0644, which ssh refuses
+        os.chmod(os.path.join(tmpd, "id_ed25519"), 0o600)
+        os.chmod(os.path.join(tmpd, "id_ed25519.pub"), 0o644)
         durable.write_durable(os.path.join(tmpd, "known_hosts"), "mu-%s %s %s\n" % (name, ktype, kb64), 0o600)
         durable.write_durable(os.path.join(tmpd, "ssh_config"), ssh_config_text(name), 0o600)
         conf = {"name": name, "relay_url": a.relay.rstrip("/"), "relay_fingerprint": a.relay_fingerprint,

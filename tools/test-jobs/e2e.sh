@@ -53,11 +53,11 @@ WCFG="$WSH/compute/office-pc/ssh_config"; WCP="$WSH/run/office-pc.sock"
 WSF=""; DF=""   # the workstation's fault (MU_JOBS_FAULT) and the dispatcher's (MU_DISPATCH_FAULT)
 WCWD=/home/ws/proj
 ws() {   # the workstation: `mu ...` as ws, in $WCWD
-  sudo -u ws -H env MU_POLL_S=1 MU_JOBS_FAULT="$WSF" MU_DISPATCH_FAULT="$DF" sh -c 'cd "$0" && exec "$@"' "$WCWD" \
+  sudo -u ws -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_POLL_S=1 MU_JOBS_FAULT="$WSF" MU_DISPATCH_FAULT="$DF" sh -c 'cd "$0" && exec "$@"' "$WCWD" \
     "$WSH/bin/mu" "$@"
 }
-asws() { sudo -u ws -H env MU_JOBS_FAULT="$WSF" "$@"; }
-asmu() { sudo -u mu -H env XDG_RUNTIME_DIR="/run/user/$MU_UID" "$@"; }
+asws() { sudo -u ws -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_JOBS_FAULT="$WSF" "$@"; }
+asmu() { sudo -u mu -H env -u XDG_CONFIG_HOME XDG_RUNTIME_DIR="/run/user/$MU_UID" "$@"; }
 mu_node() { asmu "$NODEH/bin/mu" "$@"; }
 close_master() { asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O exit mu-office-pc >/dev/null 2>&1 || true; }
 wssh() { asws ssh -F "$WCFG" -o ControlPath=none "$@"; }
