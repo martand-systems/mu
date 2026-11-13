@@ -94,7 +94,7 @@ spinner_start() {
     frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); i=0; dl=""
     while :; do
       if [ $((i % 8)) = 0 ]; then
-        kb=$(du -skc "$MU_CACHE"/downloads/*.part 2>/dev/null | tail -1 | cut -f1)
+        kb=$(du -skc "$MU_CACHE"/downloads/*.part "$MU_CACHE"/downloads/*.part.[0-9][0-9] 2>/dev/null | tail -1 | cut -f1)
         if [ "${kb:-0}" -gt 1024 ]; then dl=" · ↓ $((kb / 1024)) MB"; else dl=""; fi
       fi
       printf '%s  %s %-20s %s%s%s%s  %ss' "$CLR" "${frames[$((i % 10))]}" "$STAGE_TITLE" "$DIM" \
@@ -141,6 +141,8 @@ cleanup() {
   spinner_stop
   [ "$TTY" = 1 ] && printf '\033[?25h' >&3
   if [ -n "${JOBS:-}" ]; then
+    # background jobs ignore SIGINT: stop their trees, children first (a download's range workers also stop each
+    # other's curl on TERM; their partial files stay in the cache for the next run)
     for e in $JOBS; do kill_tree "${e#*:}"; done
     sleep 0.5; detach_under "$STORE"
   fi
@@ -151,18 +153,8 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 [ "$TTY" = 1 ] && printf '\033[?25l' >&3   # hide the cursor while the spinner runs
 
-# Explain a failed download in plain words (captive portals and HTTPS-intercepting proxies are the usual cause)
-net_hint() {
-  local out; out="$(curl -sSI --max-time 10 "$1" 2>&1 >/dev/null || true)"
-  case "$out" in
-    *certificate*|*SSL*|*ssl*) echo "the network is intercepting HTTPS (captive portal, proxy or filtering VPN): sign in to the network or switch networks, then re-run" ;;
-    *resolve*) echo "no internet connection (DNS lookup failed)" ;;
-    *timed\ out*|*Timeout*) echo "the connection timed out (offline or very slow network)" ;;
-    *) echo "${out:-download failed}" ;;
-  esac
-}
-if command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$1" | cut -d' ' -f1; }; sha256_stdin() { sha256sum | cut -d' ' -f1; }
-else sha256() { /usr/bin/openssl dgst -sha256 -r "$1" | cut -d' ' -f1; }; sha256_stdin() { /usr/bin/openssl dgst -sha256 -r | cut -d' ' -f1; }; fi
+# downloads: fetch (resumable, parallel byte ranges for large files), sha256, sha256_stdin, net_hint
+. "$RECIPE/install/download.sh"
 clone_tree() { if [ "$FAMILY" = macos ]; then cp -cR "$1" "$2" 2>/dev/null || ditto "$1" "$2"; else cp -a --reflink=auto "$1" "$2"; fi; }
 free_gb() { df -Pk "$1" | awk 'NR==2{print int($4/1048576)}'; }
 used_mb() { df -Pk "$1" | awk 'NR==2{print int($3/1024)}'; }
@@ -324,22 +316,8 @@ ok "$OSNAME · $avail_gb GB free · $((n_layers - n_missing)) of $n_layers layer
 printf '  %sinstalling μ %s%s %s→ %s%s\n' "$B" "$VERSION" "$N" "$DIM" "${T/#$HOME/~}" "$N" >&3
 
 # ================================================================ downloads
-# fetch NAME URL SHA256 -> prints the cached path. Downloads once (resumable), verifies SHA-256, can reuse a seed folder.
-fetch() {
-  local name="$1" url="$2" sha="$3" dest="$MU_CACHE/downloads/$1"
-  if [ -f "$dest" ] && [ "$(sha256 "$dest")" = "$sha" ]; then echo "$dest"; return 0; fi
-  if [ -n "$SEED" ] && [ -f "$SEED/$name" ] && [ "$(sha256 "$SEED/$name")" = "$sha" ]; then
-    cp "$SEED/$name" "$dest"; echo "$dest"; return 0
-  fi
-  echo "downloading $name" >&2
-  if ! curl -fL --retry 4 --retry-delay 2 --connect-timeout 20 -C - -sS -o "$dest.part" "$url" >&2; then
-    rm -f "$dest.part"   # a stale partial file can make the resume itself fail: try once more from scratch
-    curl -fL --retry 2 --connect-timeout 20 -sS -o "$dest.part" "$url" >&2 || fail "download failed: $url ($(net_hint "$url"))"
-  fi
-  local got; got="$(sha256 "$dest.part")"
-  [ "$got" = "$sha" ] || { rm -f "$dest.part"; fail "SHA-256 mismatch for $name: got $got, expected $sha"; }
-  mv "$dest.part" "$dest"; echo "$dest"
-}
+# fetch NAME URL SHA256 -> prints the cached path (install/download.sh). Downloads once (resumed after failures; large
+# files as parallel byte ranges), verifies SHA-256, can reuse a seed folder.
 
 # app_layer NAME: unpack an app into the store (atomic: build in .partial, then rename). Kinds:
 #   zip, tar (any tar compression), deb (one or more .debs, dpkg-deb -x, no root), appimage (--appimage-extract, no
@@ -461,6 +439,8 @@ subst() { sed -e "s|{MU_RECIPE_URL}|$(sed_esc "$(furl "$R")")|g" -e "s|{MU_APPS_
 # uvi PYTHON REQS: install a Python lock (no resolution: every pin is exact). PyPI pins carry SHA-256 hashes and
 # install with --require-hashes; URL/path pins (commit-pinned archives, files from pinned apps) install after them.
 # Offline first, so an install with warm caches never touches the network; falls back to fetching what is missing.
+# On a cold cache the offline attempt fails with a long "requirements are unsatisfiable" report: expected, and marked
+# as such in the log so that it is not mistaken for the real error (a real failure is the online attempt's output).
 uvi() {
   local py="$1" reqs="$2" part flags
   grep -e '--hash=' "$reqs" > "$reqs.hashed" || true
@@ -468,9 +448,16 @@ uvi() {
   for part in hashed plain; do
     [ -s "$reqs.$part" ] || continue
     flags="--no-deps --compile-bytecode"; [ "$part" = hashed ] && flags="$flags --require-hashes"
-    "$UV" pip install --python "$py" $flags --offline -r "$reqs.$part" \
-    || { echo "(some Python packages are not cached; fetching)"; "$UV" pip install --python "$py" $flags -r "$reqs.$part" \
-         || fail "Python packages could not be installed ($(net_hint https://pypi.org/simple/))"; }
+    # its lines are indented and tagged, so that none can pass for the job's "error: " line (see wait_job)
+    echo "--- uv: offline attempt ($(basename "$reqs").$part, cached packages only; failing here is expected on a cold cache)"
+    if "$UV" pip install --python "$py" $flags --offline -r "$reqs.$part" 2>&1 | sed 's/^/    (offline) /'; then
+      echo "--- uv: offline attempt installed everything"
+    else
+      echo "--- uv: end of the expected offline failure above (some packages are not cached yet); online install:"
+      "$UV" pip install --python "$py" $flags -r "$reqs.$part" \
+        || fail "Python packages could not be installed ($(net_hint https://pypi.org/simple/))"
+      echo "--- uv: online install done"
+    fi
   done
 }
 
