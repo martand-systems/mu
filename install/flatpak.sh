@@ -139,8 +139,8 @@ fp_deploy() {
   ostree --repo="$dir/repo" remote add --set=gpg-verify=true --gpg-import="$key" "$FP_REMOTE" "$url"
   for i in 1 2 3; do
     res="$(_fp_import "$dir" "$@" || true)"
+    [ "$res" != ok ] && [ "$i" -lt 3 ] || break
     case "$res" in
-      ok) break ;;
       "missing "*) r="${res#missing }"
         echo "flatpak: ${r%@*}@$(printf '%.12s' "${r##*@}") is no longer in the cache (pruned by mu gc?): downloading it again"
         fp_fetch "${r%@*}" "${r##*@}" "$url" "$key" ;;
@@ -152,7 +152,11 @@ fp_deploy() {
       *) fail "flatpak: $res" ;;
     esac
   done
-  [ "$res" = ok ] || fail "flatpak: could not import from the download cache $(fp_cache) (${res}; delete it and re-run)"
+  case "$res" in
+    ok) ;;
+    "") fail "flatpak: the import from the download cache was interrupted" ;;
+    *) fail "flatpak: could not import from the download cache $(fp_cache) ($res, three times; delete it and re-run)" ;;
+  esac
   # own inodes: copy the objects that pull-local hard-linked from the cache (see the header)
   if [ -n "$(find "$dir/repo/objects" -type f -links +1 -print -quit)" ]; then
     rm -rf "$dir/repo/objects.copy"
