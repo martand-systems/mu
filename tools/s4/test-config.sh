@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Tests for relay/gen-credentials.sh and relay/entrypoint.sh that need no Docker and no chisel: what the credential
 # tool writes, what the entrypoint turns it into, and that the entrypoint refuses every malformed input instead of
-# starting chisel with it. The rules' effect on a real chisel server is tested by run.sh (rows X1-X14).
+# starting chisel with it. The rules' effect on a real chisel server is tested by run.sh (rows X1-X17).
 #
 #   tools/s4/test-config.sh        exit 0 only if every line says ok
+#
+# One check only bites on a Mac: "an upper-case name" is refused everywhere, but it is the Mac's bash 3.2 in a
+# UTF-8 locale that would accept it without the scripts' LC_ALL=C. CI runs this file on macOS too for that reason,
+# once more with that line taken out (it must then fail). The entrypoint's own LC_ALL line cannot be tested from
+# here: E() below starts it with an empty environment.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -44,6 +49,9 @@ refused_g "a name used twice" add-client workstation office-pc 7001
 refused_g "a compute port used twice" add-client compute other 7001
 refused_g "a port outside 7001-7999" add-client workstation x 8080
 refused_g "a port that is not a number" add-client compute x 70a1
+refused_g "a compute port with a leading zero (the same port to chisel)" add-client compute other 07001
+refused_g "a new compute port with a leading zero" add-client compute other 07003
+refused_g "a workstation port with a leading zero" add-client workstation x 7001+07002
 refused_g "an unknown role" add-client admin x 7001
 refused_g "two ports for a compute node" add-client compute x 7003+7004
 refused_g "a trailing +" add-client workstation x 7001+
@@ -102,6 +110,10 @@ refused_e "a short password" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:short:7001"
 refused_e "an empty password" RELAY_KEY="$K" RELAY_CLIENTS="compute:a::7001"
 refused_e "the same compute port twice" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,compute:b:$P:7001"
 refused_e "the same name twice" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,workstation:a:$P:7001"
+refused_e "the same compute port twice, once with a leading zero" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,compute:b:$P:07001"
+refused_e "a compute port with a leading zero" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:07001"
+refused_e "a workstation port with a leading zero" RELAY_KEY="$K" RELAY_CLIENTS="workstation:a:$P:7001+07002"
+refused_e "a port of zeros" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:00000"
 refused_e "the relay's own port 8080" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:8080"
 refused_e "a workstation port outside the range" RELAY_KEY="$K" RELAY_CLIENTS="workstation:a:$P:7001+22"
 refused_e "an unknown role" RELAY_KEY="$K" RELAY_CLIENTS="admin:a:$P:7001"

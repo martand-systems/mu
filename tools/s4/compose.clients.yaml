@@ -22,15 +22,25 @@ services:
     container_name: s4-compute
     command: [compute]
     env_file: ["${S4_WORK:?}/env/compute.env"]
-    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-200}"}
+    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-100}"}
     networks: [office]
   workstation:
     <<: *client
     container_name: s4-ws
     command: [workstation]
     env_file: ["${S4_WORK:?}/env/workstation.env"]
-    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-200}"}
+    # S4_WS_MAX_RETRY is only set by run.sh's S4_BREAK=noretry (a workstation that never reconnects)
+    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-100}", S4_MAX_RETRY: "${S4_WS_MAX_RETRY:-}"}
     networks: [home]
+  # The compute node coming back while the relay still holds its old, dead session (run.sh row R8): a second
+  # container with the same credentials, started while the first one is frozen.
+  compute-twin:
+    <<: *client
+    container_name: s4-compute-twin
+    command: [compute]
+    env_file: ["${S4_WORK:?}/env/compute.env"]
+    environment: {S4_BLOB_MB: "1"}
+    networks: [office]
 
   # A second pair on a second relay with every keepalive off: a tunnel that carries no bytes at all while idle.
   compute-silent:
@@ -45,7 +55,8 @@ services:
     container_name: s4-ws-silent
     command: [workstation]
     env_file: ["${S4_WORK:?}/env/workstation-silent.env"]
-    environment: {S4_BLOB_MB: "1", S4_KEEPALIVE: "0s"}
+    # S4_SILENT_URL and S4_SILENT_HOSTNAME are only set by run.sh's S4_BREAK=idle (this client through the killer hop)
+    environment: {S4_BLOB_MB: "1", S4_KEEPALIVE: "0s", S4_CONNECT_URL: "${S4_SILENT_URL:-}", S4_HOSTNAME: "${S4_SILENT_HOSTNAME:-}"}
     networks: [home]
 
   # A hop that cuts connections idle for 45 s, and two workstations that go through it: one silent (must be
@@ -82,7 +93,8 @@ services:
     networks: [home]
 
   # A neighbour on dokploy-network, like the other services on the server. Starting and stopping it makes Traefik
-  # rebuild its configuration; it is also where "can a neighbour reach a compute node's port?" is asked from.
+  # rebuild its configuration; it is also where "can a neighbour reach a compute node's port?" is asked from, and
+  # a second client address for the connection limit (it reaches Traefik on the overlay network, with its own IP).
   noise:
     <<: *client
     container_name: s4-noise

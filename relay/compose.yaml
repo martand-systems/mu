@@ -1,9 +1,10 @@
 # μ relay, Stage A (docs/PLAN.md §7): chisel behind the server's Dokploy-managed Traefik.
 #
-# Deployed by Dokploy as a Compose service from this folder (steps in README.md). Dokploy adds the Traefik labels and
-# the dokploy-network attachment from its Domains screen (host relay.martand.systems, container port 8080, HTTPS),
-# so this file has no labels, no published ports and no volumes. The two secrets come from Dokploy's Environment
-# tab, which Dokploy writes to relay/.env for the ${...} below; they are never in git.
+# Deployed by Dokploy as a Compose service from this folder (steps in README.md). Dokploy adds the routing labels
+# and the dokploy-network attachment from its Domains screen (host relay.martand.systems, container port 8080,
+# HTTPS), so this file has no routers, no published ports and no volumes. Its one label defines a Traefik
+# middleware, which the Domains entry names. The two secrets come from Dokploy's Environment tab, which Dokploy
+# writes to relay/.env for the ${...} below; they are never in git.
 #
 # tools/s4 runs this file unchanged behind a Traefik configured the way Dokploy configures it (CI: s4-relay).
 services:
@@ -18,6 +19,13 @@ services:
       RELAY_KEEPALIVE: "${RELAY_KEEPALIVE:-25s}"
     expose:
       - "8080"            # internal only; Traefik reaches it on dokploy-network
+    labels:
+      # At most 32 connections at a time from one client address. chisel keeps a connection that never logs in
+      # open for ever, so without a limit one machine can fill the relay's memory with them. Traefik answers 429
+      # above the limit. It only applies once the Domains entry in Dokploy lists the middleware
+      # mu-relay-inflight@docker (README.md §2); Dokploy keeps these labels and adds its own.
+      - traefik.http.middlewares.mu-relay-inflight.inflightreq.amount=32
+      - traefik.http.middlewares.mu-relay-inflight.inflightreq.sourcecriterion.ipstrategy.depth=0
     user: "65532:65532"
     read_only: true
     tmpfs:
@@ -39,7 +47,8 @@ services:
       timeout: 5s
       retries: 3
       # Traefik does not route to a container whose health is still "starting". Without these two lines the first
-      # probe would run 30 s after start and every deploy would answer 404 for that long (needs Docker Engine 25+).
+      # probe would run 30 s after start and every deploy would answer 404 for that long. With start_period alone
+      # Docker probes every 5 s until the first success. start_interval needs Docker Engine 25+.
       start_period: 15s
       start_interval: 1s
     logging:

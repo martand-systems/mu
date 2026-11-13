@@ -14,14 +14,21 @@
 #   the relay         relay/compose.yaml as it is in git, started with Dokploy's own `docker compose` line, plus
 #                     the labels and network Dokploy adds from its Domains screen (dokploy-inject.yaml.tmpl) and
 #                     an env file written the way Dokploy writes relay/.env
-#   a second relay    the same, with every keepalive off and the slow health check (two negative controls)
+#   a second relay    the same, with every keepalive off, the slow health check and no middleware in its Domains
+#                     entry (three negative controls)
 #   clients           containers outside dokploy-network that reach the relay only through the published 443
 #
 # relay.martand.systems resolves to this machine inside the client containers only. Nothing here contacts the
 # real server, and the script refuses to run on a machine that looks like a Dokploy host.
 #
-# Settings: TRAEFIK_VERSION (3.6.25), S4_IDLE seconds (240), S4_BLOB_MB (100), S4_WORK (.scratch/s4),
-# S4_BREAK=port (deliberately wrong container port: the run must fail; used by CI to test this script).
+# Settings: TRAEFIK_VERSION (3.6.25), S4_IDLE seconds (240, at least 60), S4_BLOB_MB (100), S4_WORK (.scratch/s4).
+#
+# S4_BREAK breaks one thing on purpose. The run must then fail in the rows that test it, and only there; CI runs
+# each one to test this script. A broken run stops after the group of rows the fault belongs to.
+#   port     the wrong container port in Dokploy's labels             -> A1
+#   acl      the relay without its access rules (break-acl.yaml)      -> X6 X7 X8 X16 X17
+#   idle     the keepalive-off workstation goes through the hop that cuts idle connections   -> I2
+#   noretry  the workstation's chisel client does not reconnect       -> R1
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,12 +38,21 @@ TRAEFIK_VERSION="${TRAEFIK_VERSION:-3.6.25}"
 IDLE="${S4_IDLE:-240}"
 MB="${S4_BLOB_MB:-100}"
 BREAK="${S4_BREAK:-}"
+case "$BREAK" in ''|port|acl|idle|noretry) ;; *) echo "run.sh: S4_BREAK must be port, acl, idle or noretry" >&2; exit 2 ;; esac
+case "$IDLE" in ''|*[!0-9]*) echo "run.sh: S4_IDLE must be a number of seconds" >&2; exit 2 ;; esac
+# Under 60 s the hop that cuts after 45 s idle has not cut yet, and its control (I3) would fail for no reason.
+[ "$IDLE" -ge 60 ] || { echo "run.sh: S4_IDLE must be at least 60" >&2; exit 2; }
 HOST=relay.martand.systems
 HOST_SILENT=relay-silent.s4.test
+MIDDLEWARE=mu-relay-inflight@docker         # what the owner types into the Domains entry (relay/README.md §2)
 APP=mu-relay-ci0001;        ROUTER="$APP-1"          # <appName> and <appName>-<uniqueConfigKey>, as Dokploy names them
 APP_SILENT=mu-relay-ci0002; ROUTER_SILENT="$APP_SILENT-2"
 OFFICE_NET=s4-clients_office
 export S4_WORK="$WORK" S4_BLOB_MB="$MB"
+[ "$BREAK" != idle ] || export S4_SILENT_URL=https://killer:443 S4_SILENT_HOSTNAME="$HOST_SILENT"
+[ "$BREAK" != noretry ] || export S4_WS_MAX_RETRY=0
+MAIN_FILES=(-f relay/compose.yaml -f "$WORK/inject-main.yaml")
+[ "$BREAK" != acl ] || MAIN_FILES+=(-f tools/s4/break-acl.yaml)
 N_FAIL=0
 
 # ---------------------------------------------------------------------------------------------------- helpers
@@ -59,7 +75,7 @@ check() {  # check ID WHAT MEASURED 'CONDITION'   PASS if the condition holds. T
 }
 
 dc_main()   { ( cd "$ROOT" && env -i PATH="$PATH" HOME="$HOME" docker compose -p "$APP" --env-file relay/.env \
-                  -f relay/compose.yaml -f "$WORK/inject-main.yaml" "$@" ); }
+                  "${MAIN_FILES[@]}" "$@" ); }
 dc_silent() { ( cd "$ROOT" && env -i PATH="$PATH" HOME="$HOME" docker compose -p "$APP_SILENT" --env-file "$WORK/relay-silent.env" \
                   -f relay/compose.yaml -f "$WORK/inject-silent.yaml" -f tools/s4/slow-health.yaml "$@" ); }
 dc_clients() { docker compose -f "$S4/compose.clients.yaml" "$@"; }
@@ -112,6 +128,17 @@ adhoc() {  # adhoc NAME SECONDS AUTH FINGERPRINT REMOTE   one chisel client atte
 adhoc_connected() { grep -q 'client: Connected' "$WORK/out/adhoc-$1.log"; }
 adhoc_says()      { grep -qi "$2" "$WORK/out/adhoc-$1.log"; }
 adhoc_last()      { grep 'client: Connected\|client: Connection error' "$WORK/out/adhoc-$1.log" | tail -n 1 | sed -e 's/^[0-9/]* [0-9:]* client: //' -e 's/^Connection error: //' | cut -c1-100; }
+rawchan() {  # rawchan NAME AUTH DECLARED TARGET...   a client that is not chisel's (client/rawchan/main.go)
+  local name="$1" auth="$2"; shift 2
+  docker exec -e AUTH="$auth" s4-probe timeout 150 rawchan "https://$HOST" /certs/ca.crt "$FP" "$@" > "$WORK/out/rawchan-$name.log" 2>&1
+  true
+}
+rawchan_line()   { grep "^channel $2 " "$WORK/out/rawchan-$1.log" | cut -d' ' -f3- | cut -c1-70; }       # what happened to that target
+rawchan_denied() { grep -q '^config accepted$' "$WORK/out/rawchan-$1.log" && grep -q "^channel $2 REJECTED .*access denied" "$WORK/out/rawchan-$1.log"; }
+rawchan_opened() { grep -c '^channel .* OPENED' "$WORK/out/rawchan-$1.log"; }
+flood() {  # flood HOSTNAME COUNT HOLD_SECONDS   from the neighbour container, straight to Traefik on dokploy-network
+  docker exec s4-noise python3 /s4/ws_flood.py dokploy-traefik 443 /certs/ca.crt "$1" "$2" "$3" 2>&1
+}
 
 collect() {
   mkdir -p "$WORK/logs"
@@ -175,8 +202,9 @@ dokploy_env() {  # dokploy_env APPNAME CREDENTIAL_FILE [KEY=VALUE...]   the env 
   # is not root, so the line points at this user's Docker configuration instead.
   printf 'DOCKER_CONFIG="%s"\n' "${DOCKER_CONFIG:-$HOME/.docker}"
 }
-inject() {  # inject HOST ROUTER PORT   Dokploy's labels and networks for that Domains entry
-  sed -e "s/@HOST@/$1/g" -e "s/@ROUTER@/$2/g" -e "s/@PORT@/$3/g" "$S4/dokploy-inject.yaml.tmpl"
+inject() {  # inject HOST ROUTER PORT [MIDDLEWARES]   Dokploy's labels and networks for that Domains entry
+  if [ -n "${4:-}" ]; then sed -e "s/@HOST@/$1/g" -e "s/@ROUTER@/$2/g" -e "s/@PORT@/$3/g" -e "s/@MIDDLEWARES@/$4/g" "$S4/dokploy-inject.yaml.tmpl"
+  else sed -e "s/@HOST@/$1/g" -e "s/@ROUTER@/$2/g" -e "s/@PORT@/$3/g" -e '/^ *- .*@MIDDLEWARES@/d' -e 's/@MIDDLEWARES@/none/' "$S4/dokploy-inject.yaml.tmpl"; fi
 }
 
 # ------------------------------------------------------------------------------------------------------ set-up
@@ -203,8 +231,8 @@ setup() {
   dokploy_env "$APP" "$WORK/cred/main.env" > "$ROOT/relay/.env"
   dokploy_env "$APP_SILENT" "$WORK/cred/silent.env" RELAY_KEEPALIVE=0s > "$WORK/relay-silent.env"
   local port=8080; [ "$BREAK" != port ] || port=8081
-  inject "$HOST" "$ROUTER" "$port" > "$WORK/inject-main.yaml"
-  inject "$HOST_SILENT" "$ROUTER_SILENT" 8080 > "$WORK/inject-silent.yaml"
+  inject "$HOST" "$ROUTER" "$port" "$MIDDLEWARE" > "$WORK/inject-main.yaml"
+  inject "$HOST_SILENT" "$ROUTER_SILENT" 8080 > "$WORK/inject-silent.yaml"     # the second relay's router has no middleware
 
   # As Dokploy's server set-up does: a one-node swarm and an attachable overlay network.
   if [ "$(docker info -f '{{.Swarm.LocalNodeState}}' 2>/dev/null)" != active ]; then
@@ -293,9 +321,9 @@ test_routing() {
   wait "$silent_pid"
   if [ "$(json "$WORK/out/route-silent.json" ok)" = True ]; then
     t="$(python3 -c 'import sys; print("%.1f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$(json "$WORK/out/route-silent.json" t)" "$(started_at "$RELAY_SILENT")")"
-    check A6 "control: without start_interval the relay is not routed for about 30 s" "$t s; before that: $(json "$WORK/out/route-silent.json" before)" 'ge "$t" 25'
+    check A6 "control: with no start period in the health check (Docker's first probe after 30 s) the relay is not routed until then" "$t s; before that: $(json "$WORK/out/route-silent.json" before)" 'ge "$t" 25'
   else
-    abort A6 "control: without start_interval the relay is not routed for about 30 s" "never in 90 s; answers: $(json "$WORK/out/route-silent.json" before)"
+    abort A6 "control: with no start period in the health check (Docker's first probe after 30 s) the relay is not routed until then" "never in 90 s; answers: $(json "$WORK/out/route-silent.json" before)"
   fi
 }
 
@@ -339,7 +367,9 @@ test_tunnels() {
   got="$(echo "$line" | sed -n 's/.*"sha256": "\([0-9a-f]*\)".*/\1/p')"; bytes="$(echo "$line" | sed -n 's/.*"bytes": \([0-9]*\).*/\1/p')"
   check D4 "control: one flipped bit in the upload is noticed" "$bytes bytes, SHA-256 $( [ "$got" = "$want" ] && echo equal || echo differs )" \
     '[[ $bytes == $((MB * 1048576)) && ${#got} == 64 && $got != "$want" ]]'
-  row INFO D5 "Relay container after the transfers (limits: 256 MiB, 0.5 CPU)" "$(docker stats --no-stream --format 'memory {{.MemUsage}}, {{.PIDs}} processes' "$RELAY" 2>/dev/null)"
+  local peak; peak="$(docker exec "$RELAY" cat /sys/fs/cgroup/memory.peak 2>/dev/null)"
+  row INFO D5 "Relay container's memory: the highest it has been, and now, after the transfers (limits: 256 MiB, 0.5 CPU)" \
+    "peak $(awk -v b="${peak:-0}" 'BEGIN { if (b > 0) printf "%.1f MiB", b / 1048576; else printf "not readable" }'); $(docker stats --no-stream --format 'now {{.MemUsage}}, {{.PIDs}} processes' "$RELAY" 2>/dev/null)"
 }
 
 test_access() {
@@ -382,13 +412,51 @@ test_access() {
   leaks="$(docker logs "$RELAY" 2>&1 | grep -c -F -e "${C_AUTH#*:}" -e "${W_AUTH#*:}" -e "$(val "$WORK/cred/main.env" RELAY_KEY)")"
   users="$(docker logs "$RELAY" 2>&1 | grep -c 'office-pc')"
   environ="$(docker exec "$RELAY" sh -c "tr '\\0' '\\n' < /proc/1/environ | grep -c '^RELAY_'")"
-  check X12 "No password or key in the relay's log; chisel's environment has no RELAY_ variable" "$leaks secret lines among $(docker logs "$RELAY" 2>&1 | wc -l | tr -d ' ') ($users name the client); $environ variables" \
+  check X12 "No password or key in the relay's log; no client password in chisel's environment (the key is there, by design)" "$leaks secret lines among $(docker logs "$RELAY" 2>&1 | wc -l | tr -d ' ') ($users name the client); $environ RELAY_ variables" \
     '[[ $leaks == 0 && $users -ge 1 && $environ == 0 ]]'
   out="$(docker logs "$RELAY" 2>&1 | sed -n 's/.*server: Fingerprint //p' | head -n 1)"
   check X13 "gen-credentials.sh computes the fingerprint chisel prints" "$( [ "$out" = "$FP" ] && echo equal || echo "chisel $out, script $FP" )" '[[ -n $FP && $out == "$FP" ]]'
   out="$(docker inspect -f 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}} capdrop={{.HostConfig.CapDrop}} memory={{.HostConfig.Memory}} nanocpus={{.HostConfig.NanoCpus}} pids={{.HostConfig.PidsLimit}} published={{len .HostConfig.PortBindings}} mounts={{len .Mounts}}' "$RELAY")"
   check X14 "compose.yaml's limits are applied by plain docker compose" "$out" \
     '[[ $out == "readonly=true user=65532:65532 capdrop=[ALL] memory=268435456 nanocpus=500000000 pids=256 published=0 mounts=0" ]]'
+
+  # chisel's own client never asks for a tunnel it did not declare, so X6-X8 show that the relay checks the
+  # declaration. A client written to cheat declares what it may have and then asks for channels to other places.
+  rawchan ws "$W_AUTH" 127.0.0.1:7001:127.0.0.1:7001 127.0.0.1:7001 dokploy-traefik:8080 127.0.0.1:8080 127.0.0.1:7002
+  out="$(rawchan_line ws 127.0.0.1:7001)"
+  check X15 "control: a client that is not chisel's logs in as the workstation and opens a channel to its compute port" "$out" \
+    '[[ $out == "OPENED HTTP/1."*" 200 OK | pong $NONCE" ]]'
+  check X16 "The same session then asks for channels to Traefik's API, the relay's own port and another compute port: each refused" \
+    "$(rawchan_line ws dokploy-traefik:8080) / $(rawchan_line ws 127.0.0.1:8080) / $(rawchan_line ws 127.0.0.1:7002)" \
+    'rawchan_denied ws dokploy-traefik:8080 && rawchan_denied ws 127.0.0.1:8080 && rawchan_denied ws 127.0.0.1:7002 && [[ $(rawchan_opened ws) == 1 ]]'
+  rawchan compute "$C_AUTH" - 127.0.0.1:7001 dokploy-traefik:8080 127.0.0.1:8080
+  check X17 "With the compute node's credentials and nothing declared: no channel at all, not even to its own port" \
+    "$(rawchan_line compute 127.0.0.1:7001) / $(rawchan_line compute dokploy-traefik:8080) / $(rawchan_line compute 127.0.0.1:8080)" \
+    'rawchan_denied compute 127.0.0.1:7001 && rawchan_denied compute dokploy-traefik:8080 && rawchan_denied compute 127.0.0.1:8080 && [[ $(rawchan_opened compute) == 0 ]]'
+}
+
+test_limit() {
+  local limit n out before pid i
+  limit="$(sed -n 's/^ *- traefik\.http\.middlewares\.mu-relay-inflight\.inflightreq\.amount=\([0-9]*\)$/\1/p' "$ROOT/relay/compose.yaml")"
+  n=$(( ${limit:-0} + 8 ))
+  say "Connection limit (compose.yaml's middleware, named in the Domains entry): $limit at a time from one address"
+  # chisel keeps a connection that never logs in open for ever. The neighbour container opens $n of them, straight
+  # to Traefik on dokploy-network, so Traefik sees them all come from one address that no other client has.
+  out="$(flood "$HOST_SILENT" "$n" 1)"
+  check L1 "control: $n connections that never log in, from one address, to the second relay (no middleware in its Domains entry): all accepted" "$out" \
+    '[[ $out == "{\"101\": $n}" ]]'
+  before="$(conns s4-compute) $(conns s4-ws)"
+  flood "$HOST" "$n" 25 > "$WORK/out/flood-main.json" & pid=$!
+  for i in $(seq 1 100); do [ -s "$WORK/out/flood-main.json" ] && break; sleep 0.3; done
+  out="$(cat "$WORK/out/flood-main.json")"
+  check L2 "The same to the relay: $limit are accepted, the other 8 get 429" "$out" '[[ -n $limit && $out == "{\"101\": $limit, \"429\": 8}" ]]'
+  out="$(probe python3 /s4/ws_probe.py "$HOST" 443 /certs/ca.crt chisel-v3 2>&1 | sed -n 's/.*"status_line": "\([^"]*\)".*/\1/p')"
+  check L3 "While those $limit are held open, a client at another address still connects, and the tunnels are untouched" \
+    "new connection: $out; connects/disconnects: compute and workstation $(conns s4-compute) $(conns s4-ws)" \
+    '[[ $out == "HTTP/1.1 101 Switching Protocols" && "$(conns s4-compute) $(conns s4-ws)" == "$before" && $(ping_via s4-ws) == "pong $NONCE" ]]'
+  wait "$pid"
+  out="$(flood "$HOST" 1 0)"
+  check L4 "After they are closed the same address connects again" "$out" '[[ $out == "{\"101\": 1}" ]]'
 }
 
 test_idle() {
@@ -425,16 +493,22 @@ test_idle() {
 
 test_reconnect() {
   say "Reconnects (clients run with --max-retry-interval 15s and CHISEL_WS_TIMEOUT=10s)"
-  local t0 t p before after old
+  local t0 t p before after old rc twin refused
 
-  t0="$(now)"; dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
-  wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"
-  check R1 "Relay container recreated (a redeploy): the tunnel works again (limit 25 s)" "$t s from the start of the redeploy; workstation connects/disconnects $(conns s4-ws)" \
-    '[[ $p == "pong $NONCE" ]] && lt "$t" 25'
+  # --force-recreate: Dokploy's own `up -d --build` leaves a container alone when neither the image nor the
+  # environment changed. The row needs the relay to be a new container, and checks that it is.
+  docker logs "$RELAY" > "$WORK/logs/relay-before-redeploy.log" 2>&1
+  old="$RELAY"; before="$(nlog s4-ws 'client: Disconnected')"
+  t0="$(now)"; dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; rc=$?; RELAY="$(dc_main ps -q mu-relay)"
+  wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"; after="$(nlog s4-ws 'client: Disconnected')"
+  check R1 "Relay container recreated (a redeploy): a new container, the tunnel dropped and works again (limit 25 s)" \
+    "$t s from the start of the redeploy; container $( [ -n "$RELAY" ] && [ "$RELAY" != "$old" ] && echo replaced || echo "not replaced (compose exit $rc)" ); workstation disconnects $before -> $after" \
+    '[[ $rc == 0 && -n $RELAY && $RELAY != "$old" && $after -gt $before && $p == "pong $NONCE" ]] && lt "$t" 25'
   # The same redeploy seen by a workstation without CHISEL_WS_TIMEOUT: its first retry reaches Traefik while it
   # still routes to the removed container, and waits for Traefik's 30 s dial timeout. Not asserted (it is a race).
   wait_ping s4-ws-ka-cut "pong $NONCE" 90
   row INFO R1b "The same redeploy for a client with chisel's default 45 s handshake timeout" "$(since "$t0") s; $(docker logs s4-ws-ka-cut 2>&1 | grep -c 'bad handshake') failed handshake(s)"
+  [ "$BREAK" != noretry ] || return 0
 
   dc_main stop >> "$WORK/logs/compose.log" 2>&1; sleep 20; p="$(ping_via s4-ws)"
   check R2 "control: with the relay stopped for 20 s the workstation's request fails, and the host answers 404" \
@@ -453,7 +527,7 @@ test_reconnect() {
   wait_code changed 30 nonce_changed "$old"
   NONCE="$(nonce s4-compute)"
   wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"
-  check R5 "Compute container restarted (the PC rebooting): the workstation reaches the new process (limit 45 s)" "$t s" \
+  check R5 "Compute container restarted cleanly (its chisel client closes the session first): the workstation reaches the new process (limit 45 s)" "$t s" \
     '[[ -n $NONCE && $NONCE != "$old" && $p == "pong $NONCE" ]] && lt "$t" 45'
 
   # The link vanishes without a close (power cut, cable, NAT state lost): nobody is told, only the keepalive notices.
@@ -463,6 +537,24 @@ test_reconnect() {
   t0="$(now)"; docker network connect "$OFFICE_NET" s4-compute
   wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"
   check R7 "Network back: the compute node reconnects by itself and the tunnel works (limit 45 s)" "$t s" '[[ $p == "pong $NONCE" ]] && lt "$t" 45'
+
+  # The compute end dies without a close and is back before the relay has noticed (a PC that loses power and boots
+  # fast, a WSL VM that is killed and started again). The relay still holds the dead session and its port, for up
+  # to 50 s (a 25 s ping interval and a 25 s reply timeout). Here: the first container is frozen, and a second one
+  # with the same credentials starts at once.
+  docker pause s4-compute >/dev/null; t0="$(now)"
+  dc_clients up -d compute-twin >> "$WORK/logs/compose.log" 2>&1
+  wait_log s4-compute-twin 'client: Connecting' 30; twin="$(nonce s4-compute-twin)"
+  wait_ping s4-ws "pong $twin" 120; t="$(since "$t0")"; p="$(ping_via s4-ws)"; refused="$(nlog s4-compute-twin 'cannot listen')"
+  check R8 "Compute end gone without a close and back at once: refused while the relay holds the dead session, then connected (limit 75 s)" \
+    "$t s; refused $refused time(s) (\"Server cannot listen\") first" \
+    '[[ -n $twin && $twin != "$NONCE" && $p == "pong $twin" && $refused -ge 1 ]] && lt "$t" 75'
+  docker logs s4-compute-twin > "$WORK/logs/s4-compute-twin.log" 2>&1
+  docker rm -f s4-compute-twin >/dev/null 2>&1
+  t0="$(now)"; docker unpause s4-compute >/dev/null
+  wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"
+  check R9 "The first container thawed, the second gone: it finds its session dead and takes its port back (limit 45 s)" "$t s" \
+    '[[ $p == "pong $NONCE" ]] && lt "$t" 45'
 }
 
 # -------------------------------------------------------------------------------------------------------- main
@@ -478,9 +570,15 @@ setup
 test_routing
 test_tunnels
 test_access
+[ "$BREAK" != acl ] || finish
+test_limit
 test_idle
+[ "$BREAK" != idle ] || finish
 test_reconnect
+[ "$BREAK" != noretry ] || finish
+# Traefik logs at ERROR, as Dokploy leaves it. A failed ACME order, or a router or middleware it cannot build, is
+# logged there. A 502 or 504 answered for the relay is not (Traefik logs those at DEBUG): R1b is where one shows.
 n="$(docker logs dokploy-traefik 2>&1 | grep -c .)"
-check Z1 "Traefik logged nothing in the whole run (its default level, ERROR, as Dokploy leaves it): no ACME attempt, no proxy error" "$n lines" '[[ $n == 0 ]]'
+check Z1 "Traefik logged no line at its ERROR level in the whole run: no ACME attempt, no router or middleware it could not build" "$n lines" '[[ $n == 0 ]]'
 row INFO Z2 "Whole run" "$(since "$T_RUN") s"
 finish

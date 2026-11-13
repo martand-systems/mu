@@ -37,6 +37,9 @@ case "$KEEPALIVE" in *[!0-9sm]*|'') fail "RELAY_KEEPALIVE must look like 25s or 
 
 check_port() {  # $1 = entry number, $2 = port
   case "$2" in ''|*[!0-9]*) fail "client $1: port '$2' is not a number" ;; esac
+  # No leading zero: chisel would listen on 7001 for "07001", while the rules and the duplicate check below compare
+  # the text. Two compute clients would then share one port.
+  case "$2" in 0*) fail "client $1: port '$2' has a leading zero" ;; esac
   [ "${#2}" -le 5 ] && [ "$2" -ge "$PORT_MIN" ] && [ "$2" -le "$PORT_MAX" ] ||
     fail "client $1: port $2 is outside $PORT_MIN-$PORT_MAX"
 }

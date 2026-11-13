@@ -80,6 +80,7 @@ check_name() {
 }
 check_port() {
   case "$1" in ''|*[!0-9]*) die "port '$1' is not a number" ;; esac
+  case "$1" in 0*) die "port '$1' has a leading zero" ;; esac   # "07001" is port 7001 to chisel: see the entrypoint
   [ "${#1}" -le 5 ] && [ "$1" -ge "$PORT_MIN" ] && [ "$1" -le "$PORT_MAX" ] || die "port $1 is outside $PORT_MIN-$PORT_MAX"
 }
 entry_of() {  # prints NAME's entry, or nothing

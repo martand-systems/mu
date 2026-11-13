@@ -9,10 +9,11 @@
 #
 # Settings come from relay/gen-credentials.sh (RELAY_URL, RELAY_FINGERPRINT, RELAY_USER, RELAY_PASSWORD,
 # RELAY_PORTS) plus S4_KEEPALIVE (default 25s, chisel's default), S4_WS_TIMEOUT (default 10s, the production
-# setting; chisel's own default is 45s), and S4_CONNECT_URL + S4_HOSTNAME to reach the relay through the killer hop.
+# setting; chisel's own default is 45s), S4_CONNECT_URL + S4_HOSTNAME to reach the relay through the killer hop,
+# and S4_MAX_RETRY (chisel's --max-retry-count; unset = retry for ever, the production setting).
 set -eu
 role="${1:-}"
-MB="${S4_BLOB_MB:-200}"
+MB="${S4_BLOB_MB:-100}"
 
 case "$role" in
   compute)
@@ -41,4 +42,5 @@ export CHISEL_WS_TIMEOUT="${S4_WS_TIMEOUT:-10s}"
 set -- --tls-ca /certs/ca.crt --fingerprint "$RELAY_FINGERPRINT" \
   --keepalive "${S4_KEEPALIVE:-25s}" --max-retry-interval 15s
 [ -z "${S4_HOSTNAME:-}" ] || set -- "$@" --hostname "$S4_HOSTNAME"
+[ -z "${S4_MAX_RETRY:-}" ] || set -- "$@" --max-retry-count "$S4_MAX_RETRY"
 exec chisel client "$@" "${S4_CONNECT_URL:-$RELAY_URL}" "$remote"

@@ -1,10 +1,11 @@
 # What Dokploy adds to relay/compose.yaml at deploy time for this Domains entry (addDomainToCompose and
 # createDomainLabels in Dokploy's packages/server/src/utils/docker/domain.ts):
 #   Service Name mu-relay, Host @HOST@, Path /, Container Port 8080, HTTPS on,
-#   Certificate Provider Let's Encrypt, no custom entrypoint, no middlewares.
+#   Certificate Provider Let's Encrypt, no custom entrypoint, Middlewares @MIDDLEWARES@.
 # Dokploy rewrites the file itself; here the same keys are a Compose override, so relay/compose.yaml is tested
 # byte for byte as it is in git. @ROUTER@ is <appName>-<uniqueConfigKey>, e.g. mu-relay-a1b2c3-57; @PORT@ is the
-# Container Port (8080).
+# Container Port (8080). Dokploy puts the Domains entry's middlewares on the websecure router only; run.sh removes
+# that line for the second relay, whose Domains entry has none.
 services:
   mu-relay:
     labels:
@@ -18,6 +19,7 @@ services:
       - traefik.http.routers.@ROUTER@-websecure.entrypoints=websecure
       - traefik.http.services.@ROUTER@-websecure.loadbalancer.server.port=@PORT@
       - traefik.http.routers.@ROUTER@-websecure.service=@ROUTER@-websecure
+      - traefik.http.routers.@ROUTER@-websecure.middlewares=@MIDDLEWARES@
       - traefik.http.routers.@ROUTER@-websecure.tls.certresolver=letsencrypt
       - traefik.enable=true
     networks:
