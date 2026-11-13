@@ -8,8 +8,8 @@
 #   probe        does nothing; the test driver runs curl, chisel and the probe scripts in it with `docker exec`
 #
 # Settings come from relay/gen-credentials.sh (RELAY_URL, RELAY_FINGERPRINT, RELAY_USER, RELAY_PASSWORD,
-# RELAY_PORTS) plus S4_KEEPALIVE (default 25s, chisel's default), and S4_CONNECT_URL + S4_HOSTNAME to reach the
-# relay through the killer hop.
+# RELAY_PORTS) plus S4_KEEPALIVE (default 25s, chisel's default), S4_WS_TIMEOUT (default 10s, the production
+# setting; chisel's own default is 45s), and S4_CONNECT_URL + S4_HOSTNAME to reach the relay through the killer hop.
 set -eu
 role="${1:-}"
 MB="${S4_BLOB_MB:-200}"
@@ -37,6 +37,7 @@ esac
 # The password goes in through AUTH, not --auth, so it is not in the process list. The server certificate is
 # verified against the test CA (--tls-ca) and the relay's key against the pinned fingerprint.
 export AUTH="$RELAY_USER:$RELAY_PASSWORD"
+export CHISEL_WS_TIMEOUT="${S4_WS_TIMEOUT:-10s}"
 set -- --tls-ca /certs/ca.crt --fingerprint "$RELAY_FINGERPRINT" \
   --keepalive "${S4_KEEPALIVE:-25s}" --max-retry-interval 15s
 [ -z "${S4_HOSTNAME:-}" ] || set -- "$@" --hostname "$S4_HOSTNAME"

@@ -49,7 +49,8 @@ services:
     networks: [home]
 
   # A hop that cuts connections idle for 45 s, and two workstations that go through it: one silent (must be
-  # cut: the negative control for the idle test), one with the 25 s keepalive (must survive).
+  # cut: the negative control for the idle test), one with the 25 s keepalive (must survive). The second one also
+  # keeps chisel's default handshake timeout, to show what CHISEL_WS_TIMEOUT=10s changes after a redeploy.
   killer:
     <<: *client
     container_name: s4-killer
@@ -69,7 +70,7 @@ services:
     container_name: s4-ws-ka-cut
     command: [workstation]
     env_file: ["${S4_WORK:?}/env/workstation.env"]
-    environment: {S4_BLOB_MB: "1", S4_CONNECT_URL: "https://killer:443", S4_HOSTNAME: relay.martand.systems}
+    environment: {S4_BLOB_MB: "1", S4_WS_TIMEOUT: "45s", S4_CONNECT_URL: "https://killer:443", S4_HOSTNAME: relay.martand.systems}
     networks: [home]
     depends_on: [killer]
 

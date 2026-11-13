@@ -103,11 +103,11 @@ print_client() {  # $1 = entry
     echo
     echo "# chisel client for $name (keep --fingerprint; never use --tls-skip-verify):"
     if [ "$role" = compute ]; then
-      echo "#   chisel client --fingerprint <RELAY_FINGERPRINT> --auth $name:<RELAY_PASSWORD> --max-retry-interval 15s \\"
-      echo "#     $URL R:127.0.0.1:$ports:127.0.0.1:<agent port on this machine>"
+      echo "#   AUTH='$name:<RELAY_PASSWORD>' CHISEL_WS_TIMEOUT=10s chisel client --fingerprint '<RELAY_FINGERPRINT>' \\"
+      echo "#     --keepalive 25s --max-retry-interval 15s $URL R:127.0.0.1:$ports:127.0.0.1:<agent port on this machine>"
     else
-      echo "#   chisel client --fingerprint <RELAY_FINGERPRINT> --auth $name:<RELAY_PASSWORD> --max-retry-interval 15s \\"
-      echo "#     $URL 127.0.0.1:<local port>:127.0.0.1:<one of $ports>"
+      echo "#   AUTH='$name:<RELAY_PASSWORD>' CHISEL_WS_TIMEOUT=10s chisel client --fingerprint '<RELAY_FINGERPRINT>' \\"
+      echo "#     --keepalive 25s --max-retry-interval 15s $URL 127.0.0.1:<local port>:127.0.0.1:<one of $ports>"
     fi
   } >&2
 }

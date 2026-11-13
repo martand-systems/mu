@@ -111,7 +111,7 @@ adhoc() {  # adhoc NAME SECONDS AUTH FINGERPRINT REMOTE   one chisel client atte
 }
 adhoc_connected() { grep -q 'client: Connected' "$WORK/out/adhoc-$1.log"; }
 adhoc_says()      { grep -qi "$2" "$WORK/out/adhoc-$1.log"; }
-adhoc_last()      { grep -v 'TLS verification\|Connecting to\|Give up\|Listening' "$WORK/out/adhoc-$1.log" | tail -n 1 | sed 's/^[0-9/]* [0-9:]* client: //' | cut -c1-90; }
+adhoc_last()      { grep 'client: Connected\|client: Connection error' "$WORK/out/adhoc-$1.log" | tail -n 1 | sed -e 's/^[0-9/]* [0-9:]* client: //' -e 's/^Connection error: //' | cut -c1-100; }
 
 collect() {
   mkdir -p "$WORK/logs"
@@ -259,7 +259,7 @@ test_routing() {
   fi
 
   local out rc
-  out="$(probe curl -s -m 5 --cacert /certs/ca.crt -w ' %{http_code}' "https://$HOST/health")"
+  out="$(probe curl -s -m 5 --cacert /certs/ca.crt -w ' %{http_code}' "https://$HOST/health" | tr -d '\n')"
   check A2 "https://$HOST/health, certificate verified" "$out" '[[ $out == "OK 200" ]]'
   probe curl -s -m 5 -o /dev/null "https://$HOST/health"; rc=$?
   check A3 "control: curl without the test CA refuses the certificate" "curl exit $rc (60 = certificate not trusted)" '[[ $rc == 60 ]]'
@@ -424,13 +424,17 @@ test_idle() {
 }
 
 test_reconnect() {
-  say "Reconnects (clients run with --max-retry-interval 15s)"
+  say "Reconnects (clients run with --max-retry-interval 15s and CHISEL_WS_TIMEOUT=10s)"
   local t0 t p before after old
 
   t0="$(now)"; dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
   wait_ping s4-ws "pong $NONCE" 90; t="$(since "$t0")"; p="$(ping_via s4-ws)"
-  check R1 "Relay container recreated (a redeploy): the tunnel works again (limit 60 s)" "$t s from the start of the redeploy; workstation connects/disconnects $(conns s4-ws)" \
-    '[[ $p == "pong $NONCE" ]] && lt "$t" 60'
+  check R1 "Relay container recreated (a redeploy): the tunnel works again (limit 25 s)" "$t s from the start of the redeploy; workstation connects/disconnects $(conns s4-ws)" \
+    '[[ $p == "pong $NONCE" ]] && lt "$t" 25'
+  # The same redeploy seen by a workstation without CHISEL_WS_TIMEOUT: its first retry reaches Traefik while it
+  # still routes to the removed container, and waits for Traefik's 30 s dial timeout. Not asserted (it is a race).
+  wait_ping s4-ws-ka-cut "pong $NONCE" 90
+  row INFO R1b "The same redeploy for a client with chisel's default 45 s handshake timeout" "$(since "$t0") s; $(docker logs s4-ws-ka-cut 2>&1 | grep -c 'bad handshake') failed handshake(s)"
 
   dc_main stop >> "$WORK/logs/compose.log" 2>&1; sleep 20; p="$(ping_via s4-ws)"
   check R2 "control: with the relay stopped for 20 s the workstation's request fails, and the host answers 404" \
@@ -476,5 +480,7 @@ test_tunnels
 test_access
 test_idle
 test_reconnect
-row INFO Z1 "Whole run" "$(since "$T_RUN") s"
+n="$(docker logs dokploy-traefik 2>&1 | grep -c .)"
+check Z1 "Traefik logged nothing in the whole run (its default level, ERROR, as Dokploy leaves it): no ACME attempt, no proxy error" "$n lines" '[[ $n == 0 ]]'
+row INFO Z2 "Whole run" "$(since "$T_RUN") s"
 finish

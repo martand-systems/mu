@@ -81,7 +81,7 @@ never use `--tls-skip-verify`.
 Office PC (in the `mu-compute` distro, as `mu`), exposing an agent on its `127.0.0.1:<agent port>`:
 
 ```sh
-AUTH='office-pc:<RELAY_PASSWORD>' chisel client --fingerprint '<RELAY_FINGERPRINT>' \
+AUTH='office-pc:<RELAY_PASSWORD>' CHISEL_WS_TIMEOUT=10s chisel client --fingerprint '<RELAY_FINGERPRINT>' \
   --keepalive 25s --max-retry-interval 15s \
   https://relay.martand.systems R:127.0.0.1:7001:127.0.0.1:<agent port>
 ```
@@ -89,14 +89,19 @@ AUTH='office-pc:<RELAY_PASSWORD>' chisel client --fingerprint '<RELAY_FINGERPRIN
 Mac, making the agent reachable on its own `127.0.0.1:7001`:
 
 ```sh
-AUTH='avi-mac:<RELAY_PASSWORD>' chisel client --fingerprint '<RELAY_FINGERPRINT>' \
+AUTH='avi-mac:<RELAY_PASSWORD>' CHISEL_WS_TIMEOUT=10s chisel client --fingerprint '<RELAY_FINGERPRINT>' \
   --keepalive 25s --max-retry-interval 15s \
   https://relay.martand.systems 127.0.0.1:7001:127.0.0.1:7001
 ```
 
-Keep `--keepalive 25s` (it is what keeps NAT and carrier idle timers from cutting the tunnel, and what notices a
-dead link) and `--max-retry-interval 15s` (chisel's default is 5 minutes, which is how long the PC could stay
-unreachable after a relay redeploy).
+Keep all three settings:
+
+- `--keepalive 25s` keeps NAT and carrier idle timers from cutting the tunnel, and is what notices a dead link.
+- `--max-retry-interval 15s`: chisel's default is 5 minutes, which is how long the PC could stay unreachable after
+  an outage.
+- `CHISEL_WS_TIMEOUT=10s`: after a redeploy Traefik routes to the removed container for about 2 s more, and a
+  reconnect attempt that lands there waits for Traefik's 30 s dial timeout. With chisel's default (45 s) the tunnel
+  is back after 33 s; with 10 s it is back after about 13 s.
 
 The traffic inside the tunnel is plain TCP between the two loopbacks: the agent's own TLS and token (PLAN §7.2)
 go on top of it.
