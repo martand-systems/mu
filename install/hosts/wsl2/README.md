@@ -115,9 +115,9 @@ VM off, so no cached data is lost.
 | `/home/mu/mu` | the clone, once the key works. An existing clone is never touched again: μ updates itself |
 | `/usr/local/sbin/mu-wsl2-distro` | the script itself, so you can run `wsl -d mu-compute -u root -- mu-wsl2-distro status` |
 
-μ's own units should set `TimeoutStopSec=5`, and the relay agent (S4) should write its state atomically (temp file,
-fsync, rename, fsync the directory) and re-run any job whose result was not durably written. The clean-stop marker
-above is what the agent reads to report an unclean stop.
+μ's own units should set `TimeoutStopSec=5`, and the job layer (`docs/PLAN.md` §6.4a) should write its state
+atomically (temp file, fsync, rename, fsync the directory) and re-run any job whose result was not durably written.
+The clean-stop marker above is what it reads to report an unclean stop.
 
 ## GitHub access: the one manual step
 
@@ -211,10 +211,12 @@ without fsync, like most tools do. Each test ends with `status`. Three checks de
 
 ## Known limits
 
-- **Not yet run on the PC:** both scripts, the hook's compile, `test-stop`, and steps 2–5 above. The pure functions
-  are tested on macOS by `tools/test-wsl2-host/run.sh`. That covers the `wsl.conf`/`.wslconfig` merges, heartbeat
-  analysis, the task definition and its comparison, quoting, the PowerShell 5.1 syntax check, and a C# 5 compile of
-  the hook.
+- **Run on the office PC so far (2026-11-14):** both scripts are installed there, the hook compiled, every `status`
+  check passes, and `test-stop` (step 2 above) gives a clean stop in 1.5 s. **Not yet run on the PC:** steps 3–5
+  above, that is the baseline restart without the hook, the restarts with it, and the first real Windows Update
+  restart. The pure functions are tested on macOS by `tools/test-wsl2-host/run.sh`. That covers the
+  `wsl.conf`/`.wslconfig` merges, heartbeat analysis, the task definition and its comparison, quoting, the PowerShell
+  5.1 syntax check, and a C# 5 compile of the hook.
 - **Who started WSL decides when it ends.** WSL keeps one session per Windows user, created by the first `wsl.exe`
   call when none exists and tied to the Windows session of that caller. If you sign in and run `wsl` before the
   startup task has run (or after a WSL update restarted WSL), signing out later stops the distro. The watchdog

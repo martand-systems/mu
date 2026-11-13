@@ -10,9 +10,14 @@ in `mu.toml`.
 - **Roles:** `workstation` (Claude Code, projects, viewers), `compute` (solvers), `full` (both, works offline)
 - **Compute:** Linux. On Windows it runs in WSL2 through a host adapter (ADR-001). macOS has a native local build
 - **Remote compute:** through the relay at `relay.martand.systems`, deployed by Dokploy from `relay/`
+  ([`relay/README.md`](relay/README.md)). The relay is up. Jobs on a remote node are not possible yet: the job
+  layer is being built (see [Status](#status))
 - **Builds:** on the device, from the locked recipe in `toolchain/`. No image registry
+- **Machines today:** an M1 MacBook (16 GB; `full`) and the office PC (Intel Core Ultra 7 265K, 20 cores, 31 GB,
+  NVIDIA RTX 5060, Windows 11 with WSL2; `compute`). Both run v2026.11.6 with auto-update on
 
-The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md).
+The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md). What was measured, spike by spike, is in
+[`docs/verification/`](docs/verification/).
 
 ## Install
 
@@ -28,8 +33,9 @@ The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md).
 libraries, flatpak, build tools for OpenVSP's Python API). It's the only step that needs root. If you skip it, the installer
 asks for sudo when something is missing. Everything else installs per user in `~/.local/share/mu`.
 
-**Windows 11 compute node** (a WSL2 distro that runs with nobody signed in and stops cleanly at a restart):
-`install/hosts/wsl2/mu-wsl2-host.ps1`, see [`install/hosts/wsl2/README.md`](install/hosts/wsl2/README.md).
+**Windows 11 compute node** (a WSL2 distro that runs with nobody signed in and is stopped cleanly before Windows
+shuts down): `install/hosts/wsl2/mu-wsl2-host.ps1` with `install`, `status`, `uninstall` and `test-stop`, see
+[`install/hosts/wsl2/README.md`](install/hosts/wsl2/README.md). Add `-InstallMu` to install μ inside the distro too.
 
 That's it. The installer builds the full toolchain from the locked recipe, checks every tool (`mu doctor`) and runs the
 benchmark suite. It puts `mu` on your PATH (`~/.local/bin`, added to your shell profile if needed). Options:
@@ -66,7 +72,7 @@ checks that they are.
     mu gc --yes             remove versions and layers nothing uses
     mu help                 everything
 
-A project pins its version in `mu.toml` (`[mu] version = "v2026.11.3"`). `mu` picks that version inside the project,
+A project pins its version in `mu.toml` (`[mu] version = "v2026.11.6"`). `mu` picks that version inside the project,
 so projects on different versions coexist.
 
 ## Updates
@@ -132,12 +138,43 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
 
 ## Status
 
+As of 2026-11-14. The current release is **v2026.11.6**. (The tag `v2026.11.5` was pushed by mistake on the
+v2026.11.4 commit and is left in place; it is not a release.)
+
+There are four spikes, S1 to S4, and no S5: they tested the plan's assumptions, and all four have run. What remains
+is building, in the phases P0 to P8 of [`docs/PLAN.md`](docs/PLAN.md) §13.
+
+| Spike | State |
+|---|---|
+| S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain |
+| S2: linux-64 provisioning | Done: every tool runs headless on Ubuntu 24.04 (plain and WSL images) with the macOS results |
+| S3: WSL2 compute node | Done: the office PC's distro ran 2 h 01 min after a reboot with nobody signed in. The host scripts that add a clean stop before shutdown are installed there and `test-stop` passes. Still to do on the PC: the restart tests and the first Windows Update restart |
+| S4: relay | Passes; the PC end is the remaining check. Passed in CI behind replicas of Dokploy's Traefik, deployed on 2026-11-14, and passed against the real server with both ends on the laptop |
+
 | Phase | State |
 |---|---|
-| Plan | v5 (`docs/PLAN.md`) |
-| S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain (`docs/verification/`) |
-| S2: linux-64 provisioning | Every tool runs headless on Ubuntu 24.04 (plain and WSL images); see `docs/verification/` |
-| S3: WSL2 compute node | Done: the office PC's distro runs after a reboot with nobody signed in; install passes doctor and benchmarks there (`docs/verification/`) |
-| S4: relay | chisel relay (`relay/`) passes behind replicas of Dokploy's Traefik in CI; deploy and the real-server check are next (`docs/verification/`) |
+| P0 prerequisites, P1 macOS install, P3 Linux recipe | Done |
+| P2 Claude Code plugin and project format | Partly: `mu.toml` pins, `mu pin`, `mu link` and the `cad` skill exist. The rest of the plugin, `mu new`, `mu context` and `mu check` are not built |
+| P4 job layer | In progress on branch `job-layer`: OpenSSH inside the relay tunnel (`mu compute …`, `mu submit / status / log / fetch / cancel`), tested in CI. Design: `docs/design/job-layer.md`, which arrives with it |
+| P5 Windows compute node | Mostly done ([`install/hosts/wsl2/`](install/hosts/wsl2/README.md)). The restart tests, and the job layer's pieces on the PC, are pending |
+| P6 relay | Deployed ([`relay/`](relay/README.md)). The tunnel clients and pairing come with P4 |
+| P7 org profile and JATAYU migration | Partly: the `jatayu` repo runs on μ and reproduces its baseline on the laptop. Not yet on the office PC |
+| P8 hardening | Not started |
+
+**Next:** finish the job layer, set up its node side on the office PC in one visit (with the pending restart
+tests), then run the first remote job, `fea-cantilever` on `office-pc`. The list is in `docs/PLAN.md` §13.
+
+## Known issues
+
+Queued for the next release:
+
+- **The installer asks for sudo even when the user is not a sudoer.** This happens on Linux when a release needs an
+  Ubuntu package that is not installed yet. v2026.11.6 added `ostree`, and on the office PC it had to be installed as
+  root by hand. Until it is fixed: run `sudo ./install.sh --system` from an admin account first (on the WSL node,
+  as root: `wsl -d mu-compute -u root`).
+- **`mu gc` prints a note about macOS Time Machine on Linux.** The note is harmless there.
+- **The install-time `mu autoupdate on` failed once on the office PC, and systemctl's error was not shown.** Running
+  `mu autoupdate on` by hand afterwards worked. If an install ends with "auto-update could not be turned on", run it
+  by hand.
 
 `legacy/` holds the hand-built toolchain's activation script, setup report and instructions. They're the reference that the recipe has to reproduce.
