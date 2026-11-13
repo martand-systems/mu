@@ -117,7 +117,11 @@ setup() {
   authorize
   row PASS S3 "mu compute add (file store on Linux), key authorised on the node" "$(printf '%s' "$out" | jget key_fingerprint)"
   newproj "$WCWD" v2026.11.6
-  wait_up 60 || { row FAIL S4 "first hello through the relay" "$(ws compute status office-pc --json 2>&1)"; return 1; }
+  if ! wait_up 60; then
+    { sudo ls -la "$WSH/compute/office-pc"; sudo cat /etc/mu/authorized_keys/mu; wssh -vv mu-office-pc hello protocol=1 < /dev/null; } \
+      > "$WORK/logs/s4-debug.log" 2>&1; tail -40 "$WORK/logs/s4-debug.log"
+    row FAIL S4 "first hello through the relay" "$(ws compute status office-pc --json 2>&1)"; return 1
+  fi
   row PASS S4 "first hello through the relay" "$(ws compute status office-pc --json | jget rtt_s) s"
 }
 PUB() { sudo cat "$WSH/compute/office-pc/id_ed25519.pub" | cut -d' ' -f1,2; }
