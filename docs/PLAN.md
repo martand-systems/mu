@@ -783,6 +783,9 @@ specs are written at the start of each phase, and the early spikes below are wha
 | S3 WSL2 on the office PC: import Ubuntu, systemd service, starts after a reboot with nobody logged in, memory setting applies | The always-on compute node is feasible | Use a Windows service wrapper that keeps `wsl.exe` running |
 | S4 chisel through Dokploy's Traefik on `relay.martand.systems` (after the DNS record): a reverse tunnel from one client, a forward from another, a long idle period, reconnect | The relay design works with this Traefik | Try frp over WebSocket. Last resort: a high port |
 
+**Spike status (2026-11-13):** S1, S2 and S3 passed, with records in `docs/verification/`. S3 found that a Windows
+restart powers the WSL VM off without a Linux shutdown; the WSL2 host scripts add a clean stop before shutdown. S4 is next.
+
 **Before P1 starts:** answer open items 2 and 3 above (name, shared libraries), or accept the defaults.
 
 ---

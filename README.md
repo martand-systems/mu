@@ -134,6 +134,7 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
 | Plan | v5 (`docs/PLAN.md`) |
 | S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain (`docs/verification/`) |
 | S2: linux-64 provisioning | Every tool runs headless on Ubuntu 24.04 (plain and WSL images); see `docs/verification/` |
-| S3–S4 | Not started |
+| S3: WSL2 compute node | Done: the office PC's distro runs after a reboot with nobody signed in; install passes doctor and benchmarks there (`docs/verification/`) |
+| S4: relay | Not started |
 
 `legacy/` holds the hand-built toolchain's activation script, setup report and instructions. They're the reference that the recipe has to reproduce.
