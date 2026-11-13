@@ -79,6 +79,7 @@ ClientAliveInterval 30
 ClientAliveCountMax 3
 LogLevel VERBOSE
 C
+install -d -m 755 /run/sshd   # sshd -t needs its privilege separation folder (the unit's RuntimeDirectory makes it later)
 /usr/sbin/sshd -t -f /etc/mu/sshd_config.new
 mv /etc/mu/sshd_config.new /etc/mu/sshd_config; chmod 644 /etc/mu/sshd_config
 cat > /etc/systemd/system/mu-sshd.service <<'U'

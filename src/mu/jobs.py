@@ -362,7 +362,7 @@ class Conn:
                 return self.run(request, data, timeout, retry=False)
             raise MuError(proto.EXIT_UNREACHABLE, "timeout", "no answer from %s within %d s (%s)" % (
                 self.name, timeout, st[1] if st else "no tunnel status"), "retry; mu compute status %s" % self.name)
-        st = read_status(status)
+        st = settle(status, rc, err, muxed)
         _unlink(status)
         if rc == 255 and muxed and st is None and retry:
             # a master that died with its link: end it and repeat the call once on a new connection
@@ -427,7 +427,7 @@ class Conn:
         rc = p.wait()
         t.join(5)
         err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
-        st = read_status(status)
+        st = settle(status, rc, err, muxed)
         _unlink(status)
         return rc, err, st, muxed
 
@@ -437,6 +437,21 @@ def _unlink(p):
         os.unlink(p)
     except OSError:
         pass
+
+
+def settle(path, rc, err, muxed):
+    """The proxy's verdict for a call that ended. chisel can exit on its own (a refused credential or fingerprint) and
+    ssh then ends before the proxy has read chisel's last line: when ssh failed on a new connection and the file says
+    no more than "starting" or "ok", wait up to 2 s for the proxy to write the reason."""
+    st = read_status(path)
+    if rc != 255 or muxed or "HOST IDENTIFICATION HAS CHANGED" in err or "Host key verification failed" in err \
+            or "Permission denied (publickey" in err:
+        return st
+    end = time.time() + 2.0
+    while (st is None or st[0] in ("starting", "ok")) and time.time() < end:
+        time.sleep(0.1)
+        st = read_status(path)
+    return st
 
 
 def read_status(path):
@@ -478,6 +493,8 @@ def classify_255(conf, err, st, muxed):
         code = proto.EXIT_REFUSED if st[0] == "refused" else proto.EXIT_UNREACHABLE
         raise MuError(code, st[1], msg.format(n=n, u=u, p=p, url=url) + " [%s]" % st[1],
                       hint.format(n=n, u=u, p=p, url=url), reason=st[1], node=n)
+    if st and st[0] == "starting":
+        st = ("ok", "started", st[2], st[3])   # the proxy ran; chisel said nothing that decides
     if st and st[0] == "error":
         raise MuError(proto.EXIT_ERROR, st[1], st[3] or st[1], "mu compute status %s" % n, node=n)
     if "REMOTE HOST IDENTIFICATION HAS CHANGED" in err or "Host key verification failed" in err:
@@ -570,8 +587,8 @@ def cmd_proxy(name):
     verdict = [None]
 
     def status(cls, reason, line=""):
-        if (verdict[0] is not None and verdict[0][0] != "ok") or not status_path:
-            return   # the first failure decides; "ok connected" is replaced by a later failure
+        if (verdict[0] is not None and verdict[0][0] not in ("ok", "starting")) or not status_path:
+            return   # the first failure decides; "starting" and "ok connected" are replaced by a later failure
         verdict[0] = (cls, reason)
         try:
             if not os.path.exists(status_path):   # the call that made it is over (a ControlPersist master)
@@ -595,6 +612,7 @@ def cmd_proxy(name):
         pass
     log = open(logpath, "ab", buffering=0)
     os.dup2(log.fileno(), 2)   # nothing of ours or chisel's reaches ssh's stderr (or a caller's pipe)
+    status("starting", "started")   # the caller can tell "the proxy ran" from "ssh could not start it"
     try:
         conf = load_node(name)
         password = read_secret(conf, conf["_dir"])
@@ -973,9 +991,9 @@ def push(conn, root, project_id, snap, job_id):
                                                             "mu-%s:%s.git" % (conn.name, repo), "%s:refs/mu/snap/%s" % (snap, job_id)]
     muxed = conn.muxed()
     p = subprocess.run(args, cwd=root, env=env, capture_output=True, stdin=subprocess.DEVNULL)
-    st = read_status(status)
-    _unlink(status)
     err = p.stderr.decode("utf-8", "replace")
+    st = settle(status, 255 if p.returncode and "Could not read from remote" in err else 0, err, muxed)
+    _unlink(status)
     if p.returncode == 0:
         return
     if "pack exceeds maximum allowed size" in err:

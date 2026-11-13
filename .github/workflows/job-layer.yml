@@ -47,9 +47,8 @@ jobs:
         run: /bin/bash tools/test-jobs/run.sh
       - name: tools/test-jobs/local.sh (user-level sshd and chisel, stub systemd)
         run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
-      - name: the other suites (bin/mu, the installer's helpers)
+      - name: the other suites (the installer's helpers; test-autoupdate runs on macOS, where it is kept green)
         run: |
-          /bin/bash tools/test-autoupdate/run.sh
           /bin/bash tools/test-wsl-disk/run.sh
           /bin/bash tools/test-fetch/run.sh
           /bin/bash tools/test-wsl2-host/run.sh
@@ -72,6 +71,8 @@ jobs:
         run: /bin/bash tools/test-jobs/run.sh
       - name: tools/test-jobs/local.sh
         run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
+      - name: tools/test-autoupdate/run.sh (bin/mu)
+        run: /bin/bash tools/test-autoupdate/run.sh
 
   probe:
     name: probe (systemd, cgroup v2, delegation, oom-kill, mu-sshd)

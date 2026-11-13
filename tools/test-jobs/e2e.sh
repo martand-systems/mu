@@ -79,8 +79,17 @@ relay_ctr() { docker ps -aq --filter label=com.docker.compose.project=mu-relay-c
 wait_up() {   # until the node answers through the relay (the tunnel reconnects every 15 s at most)
   local i; for i in $(seq 1 ${1:-90}); do ws compute status office-pc --json >/dev/null 2>&1 && return 0; close_master; sleep 1; done; return 1
 }
-newproj() {   # newproj DIR PIN: a git project of ws with mu.toml and a commit
-  asws sh -c 'rm -rf "$0" && mkdir -p "$0" && cd "$0" && git init -q && printf "[mu]\nversion = \"%s\"\n[compute]\noutputs = [\"results/*.json\"]\n" "$1" > mu.toml && printf "import os,sys\nos.makedirs(\"results\", exist_ok=True)\nopen(\"results/out.json\",\"w\").write(\"{\\\"ok\\\": 1}\\n\")\nprint(\"job ran\", sys.argv[1:])\n" > job.py && git add -A && git commit -qm first' "$1" "$2"
+newproj() {   # newproj DIR PIN: a git project of ws with mu.toml, job.py and a commit
+  [ -f /tmp/mu-e2e-job.py ] || cat > /tmp/mu-e2e-job.py <<'PYJ'
+import os, sys
+os.makedirs("results", exist_ok=True)
+open("results/out.json", "w").write('{"ok": 1}\n')
+print("job ran", sys.argv[1:])
+PYJ
+  chmod 644 /tmp/mu-e2e-job.py
+  asws sh -c 'rm -rf "$0" && mkdir -p "$0" && cd "$0" && git init -q && cp /tmp/mu-e2e-job.py job.py &&
+    printf "[mu]\nversion = \"%s\"\n[compute]\noutputs = [\"results/*.json\"]\n" "$1" > mu.toml &&
+    git add -A && git commit -qm first' "$1" "$2"
 }
 
 # ================================================================================================== set-up
