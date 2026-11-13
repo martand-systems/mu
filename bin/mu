@@ -196,7 +196,8 @@ prune_store() {
 # prune_cache APPLY VERSIONS: remove from the download cache the flatpak commits none of VERSIONS pins (Linux: the
 # repository of the download-only flatpak installation $MU_CACHE/flatpak, where a ref mu/<flatpak ref>/<commit> keeps
 # each commit; a version lists its commits in toolchains/<v>/CACHE_REFS), then the objects no remaining ref reaches.
-# Skipped while an install holds the cache's lock. Other downloads in $MU_CACHE are not pruned (all of it is safe to delete; it is downloaded again).
+# Skipped while an install holds the cache's lock. Other downloads in $MU_CACHE are not pruned (all of it is safe to
+# delete; it is downloaded again).
 prune_cache() {
   local repo="$MU_CACHE/flatpak/repo" keep r c ref n=0 k0 k1
   [ -f "$repo/config" ] && command -v ostree >/dev/null 2>&1 || return 0
