@@ -57,7 +57,7 @@ log "the cache is intact after building and sealing two layers"
 as_user ostree --repo=/home/mu/cache/flatpak/repo fsck --quiet && res cache_fsck ok
 FLATPAK_USER_DIR=/home/mu/store/l1/prusaslicer-flatpak as_user flatpak --user list --columns=ref,active | tee -a "$OUT/results.txt"
 log "damage one object in the cache: deploy #3 repairs it (downloads it again)"
-obj="$(find /home/mu/cache/flatpak/repo/objects -name '*.file' -size +100k | head -1)"
+obj="$(find /home/mu/cache/flatpak/repo/objects -name '*.file' -size +100k -print -quit)"
 chmod u+w "$obj"; printf 'x' >> "$obj"
 deploy 3
 grep -q "repairing the cache" "$OUT/deploy3.txt" && res repair ok
