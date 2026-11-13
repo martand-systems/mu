@@ -28,6 +28,9 @@ The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md).
 libraries, flatpak, build tools for OpenVSP's Python API). It's the only step that needs root. If you skip it, the installer
 asks for sudo when something is missing. Everything else installs per user in `~/.local/share/mu`.
 
+**Windows 11 compute node** (a WSL2 distro that runs with nobody signed in and stops cleanly at a restart):
+`install/hosts/wsl2/mu-wsl2-host.ps1`, see [`install/hosts/wsl2/README.md`](install/hosts/wsl2/README.md).
+
 That's it. The installer builds the full toolchain from the locked recipe, checks every tool (`mu doctor`) and runs the
 benchmark suite. It puts `mu` on your PATH (`~/.local/bin`, added to your shell profile if needed). Options:
 `./install.sh --help`.
