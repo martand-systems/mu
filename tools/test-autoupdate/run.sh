@@ -250,8 +250,11 @@ mu autoupdate set min_free_gb 12 >/dev/null
 out="$(MU_WSL=1 WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$STUBS/reg.exe" MU_PROC_MOUNTS="$ROOT/mounts" mu autoupdate run)"
 eq "WSL: installer not called" "$(calls)" 0
 has "WSL: skipped, naming the Windows drive" "$out" "5 GB free on C: (WSL disk), auto-update waits for 12 GB"
-out="$(MU_WSL=0 mu autoupdate run)"
-eq "not WSL (same df): installs" "$(def)" v2026.11.5
+# no answer from Windows (interop off): C: is only a guess, so it is reported but not enforced (the VHD is checked)
+out="$(MU_WSL=1 WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$STUBS/no-reg.exe" MU_PROC_MOUNTS="$ROOT/mounts" mu autoupdate run)"
+has "WSL, interop off: the guessed drive is reported (in the run's log)" "$(cat "$(ls -t "$MU_HOME"/logs/autoupdate-[0-9]*.log | head -1)")" \
+  "note: 5 GB free on C: if the WSL disk is there (no answer from Windows"
+eq "WSL, interop off: installs (the guess is not enforced)" "$(def)" v2026.11.5
 rm -f "$STUBS/df" "$STUBS/reg.exe"
 mu autoupdate set min_free_gb 0 >/dev/null
 

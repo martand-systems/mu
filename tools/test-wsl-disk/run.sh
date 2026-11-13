@@ -63,15 +63,21 @@ printf '%s\n%s\n' "$ROOT_LINE" "$D_LINE" > "$TD/mounts-noc"
 printf '%s\n' "$ROOT_LINE" > "$TD/mounts-none"
 
 cat > "$TD/case.sh" <<'EOS'
-# runs one case: env sets the stubs; prints mu_disk_free's output with the tab shown as |
+# runs one case as the installer does: set -E, errexit, pipefail and an ERR trap (inherited by $(...)), so any helper
+# that returns non-zero shows up. Prints GB|WHERE|NOTE_GB|NOTE.
+set -Eeuo pipefail
+trap 'echo "ERR trap: line $LINENO: $BASH_COMMAND"; exit 1' ERR
 . "$TD/block.sh"
-df() {   # df -Pk PATH with sizes from VHD_GB, C_GB, D_GB, E_GB
+df() {   # df -Pk PATH with sizes from VHD_GB, C_GB, D_GB, E_GB; DF_FAIL=PATTERN: an I/O error for matching paths
   local g
+  case "$2" in ${DF_FAIL:-//none//}) echo "df: $2: Input/output error" >&2; return 1 ;; esac
   case "$2" in */mnt/c*) g=$C_GB ;; */mnt/d*) g=$D_GB ;; */mnt/e*) g=$E_GB ;; *) g=$VHD_GB ;; esac
   printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfake 999999999 1 %s 1%% %s\n' "$((g * 1048576 + 1000))" "$2"
 }
-[ "${TAB_IFS:-}" != 1 ] || IFS="$(printf '\t')"   # a caller that changed IFS (e.g. IFS=TAB read ... <<< "$(mu_disk_free)")
-mu_disk_free "$1" | tr '\t' '|'
+[ "${TAB_IFS:-}" != 1 ] || IFS="$(printf '\t')"   # a caller that changed IFS
+MU_FREE_GB=stale; MU_FREE_NOTE=stale
+mu_disk_free "$1"
+printf '%s|%s|%s|%s\n' "$MU_FREE_GB" "$MU_FREE_WHERE" "$MU_FREE_NOTE_GB" "$MU_FREE_NOTE"
 EOS
 
 PASS=0; FAILN=0
@@ -84,24 +90,37 @@ for B in $BASHES; do
     if [ "$got" = "$want" ]; then PASS=$((PASS + 1)); echo "ok    $name"
     else FAILN=$((FAILN + 1)); echo "FAIL  $name"; echo "      expected: [$want]"; echo "      got:      [$got]"; fi
   }
-  t "not WSL: df as it is"                      "934|"                    MU_WSL=0
-  t "WSL, distro found (CRLF): its drive C:"    "130|C: (WSL disk)"       WSL_DISTRO_NAME=Ubuntu-24.04
-  t "WSL, \\\\?\\D:\\ base path: D:"            "410|D: (WSL disk)"       WSL_DISTRO_NAME=mu-compute
-  t "WSL, UTF-16LE output with BOM"             "410|D: (WSL disk)"       WSL_DISTRO_NAME=mu-compute MU_WSL_REG="$TD/bin/utf16.exe"
-  t "WSL, UTF-16LE, other distro"               "130|C: (WSL disk)"       WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/utf16.exe"
-  t "WSL, no distro name (env -i): least free"  "130|C: (WSL disk)"       MU_WSL=1
-  t "WSL, no distro name, D: fuller"            "60|D: (WSL disk)"        MU_WSL=1 D_GB=60
-  t "WSL, unknown distro name: least free"      "60|D: (WSL disk)"        WSL_DISTRO_NAME=Other D_GB=60
-  t "WSL, lower-case drive letter, mount with a space" "77|E: (WSL disk)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/e.exe"
-  t "WSL, VHD nearly full: VHD limits"          "20|the WSL virtual disk (at its size limit)" WSL_DISTRO_NAME=Ubuntu-24.04 VHD_GB=20
-  t "WSL, interop off: C: assumed"              "130|C: (WSL disk, assumed)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/nointerop.exe"
-  t "WSL, no reg.exe at all: C: assumed"        "130|C: (WSL disk, assumed)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG=/nonexistent/reg.exe
-  t "WSL, reg error: C: assumed"                "130|C: (WSL disk, assumed)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/nokey.exe"
-  t "WSL, UNC base path: C: assumed"            "130|C: (WSL disk, assumed)" WSL_DISTRO_NAME=Debian MU_WSL_REG="$TD/bin/unc.exe"
-  t "WSL, no interop, no C: mount: VHD only"    "934|the WSL virtual disk (Windows drive not found)" WSL_DISTRO_NAME=x MU_WSL_REG=/nonexistent MU_PROC_MOUNTS="$TD/mounts-noc"
-  t "WSL, drive not mounted: VHD only"          "934|the WSL virtual disk (Windows drive not found)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_PROC_MOUNTS="$TD/mounts-none"
-  t "caller's IFS is a tab"                    "60|D: (WSL disk)"        MU_WSL=1 D_GB=60 TAB_IFS=1
-  t "WSL, MU_HOME not created yet: parent dir"  "130|C: (WSL disk)"       WSL_DISTRO_NAME=Ubuntu-24.04
+  NI="no answer from Windows (reg.exe), so C: is assumed"
+  t "not WSL: df as it is"                      "934|||"                   MU_WSL=0
+  t "WSL, distro found (CRLF): its drive C:"    "130|C: (WSL disk)||"      WSL_DISTRO_NAME=Ubuntu-24.04
+  t "WSL, \\\\?\\D:\\ base path: D:"            "410|D: (WSL disk)||"      WSL_DISTRO_NAME=mu-compute
+  t "WSL, UTF-16LE output with BOM"             "410|D: (WSL disk)||"      WSL_DISTRO_NAME=mu-compute MU_WSL_REG="$TD/bin/utf16.exe"
+  t "WSL, UTF-16LE, other distro"               "130|C: (WSL disk)||"      WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/utf16.exe"
+  t "WSL, VHD nearly full: VHD limits"          "20|the WSL virtual disk (at its size limit)||" WSL_DISTRO_NAME=Ubuntu-24.04 VHD_GB=20
+  t "WSL, distro on D:, C: nearly full: C: ignored" "410|D: (WSL disk)||"  WSL_DISTRO_NAME=mu-compute C_GB=6
+  t "WSL, lower-case drive letter, mount with a space" "77|E: (WSL disk)||" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/e.exe"
+  t "WSL, one distro, no distro name: its drive is sure" "77|E: (WSL disk)||" MU_WSL=1 MU_WSL_REG="$TD/bin/e.exe"
+  # not confirmed: only the VHD is enforced; the guessed drive is reported (when it is the smaller figure)
+  t "WSL, no distro name, two drives: VHD checked, least free noted" \
+    "934|the WSL virtual disk|130|130 GB free on C: if the WSL disk is there (WSL_DISTRO_NAME is not set; the least free of C: D:)" MU_WSL=1
+  t "WSL, no distro name, D: fuller"            "934|the WSL virtual disk|60|60 GB free on D: if the WSL disk is there (WSL_DISTRO_NAME is not set; the least free of C: D:)" MU_WSL=1 D_GB=60
+  t "WSL, unknown distro name"                  "934|the WSL virtual disk|60|60 GB free on D: if the WSL disk is there (no distro named Other in the registry; the least free of C: D:)" WSL_DISTRO_NAME=Other D_GB=60
+  t "WSL, interop off, C: nearly full: not enforced" "934|the WSL virtual disk|6|6 GB free on C: if the WSL disk is there ($NI)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/nointerop.exe" C_GB=6
+  t "WSL, no reg.exe at all: C: assumed"        "934|the WSL virtual disk|130|130 GB free on C: if the WSL disk is there ($NI)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG=/nonexistent/reg.exe
+  t "WSL, reg error: C: assumed"                "934|the WSL virtual disk|130|130 GB free on C: if the WSL disk is there ($NI)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$TD/bin/nokey.exe"
+  t "WSL, UNC base path: C: assumed"            "934|the WSL virtual disk|130|130 GB free on C: if the WSL disk is there (its folder has no drive letter, so C: is assumed)" WSL_DISTRO_NAME=Debian MU_WSL_REG="$TD/bin/unc.exe"
+  t "WSL, assumed C: larger than the VHD: no note" "100|the WSL virtual disk||" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG=/nonexistent VHD_GB=100
+  t "WSL, no interop, no C: mount: VHD only"    "934|the WSL virtual disk (Windows drive not found)||" WSL_DISTRO_NAME=x MU_WSL_REG=/nonexistent MU_PROC_MOUNTS="$TD/mounts-noc"
+  t "WSL, drive not mounted: VHD only"          "934|the WSL virtual disk (Windows drive not found)||" WSL_DISTRO_NAME=Ubuntu-24.04 MU_PROC_MOUNTS="$TD/mounts-none"
+  t "WSL, no /proc/mounts at all: VHD only"     "934|the WSL virtual disk (Windows drive not found)||" WSL_DISTRO_NAME=Ubuntu-24.04 MU_PROC_MOUNTS="$TD/nonexistent"
+  # df failing (a drive gone away: Input/output error) skips that drive and never trips the ERR trap
+  t "WSL, df fails on the distro's drive"       "410|the WSL virtual disk (Windows drive not found)||" WSL_DISTRO_NAME=mu-compute DF_FAIL='*/mnt/d*' VHD_GB=410
+  t "WSL, no distro name, df fails on D:"       "934|the WSL virtual disk|130|130 GB free on C: if the WSL disk is there (WSL_DISTRO_NAME is not set; the least free of C: D:)" MU_WSL=1 DF_FAIL='*/mnt/d*'
+  t "df fails on the VHD too"                   "|the WSL virtual disk (Windows drive not found)||" WSL_DISTRO_NAME=Ubuntu-24.04 DF_FAIL='*'
+  t "df fails, sure drive known: drive figure"  "130|C: (WSL disk)||"      WSL_DISTRO_NAME=Ubuntu-24.04 DF_FAIL='*/mu/*'
+  t "not WSL, df fails: empty"                  "|||"                      MU_WSL=0 DF_FAIL='*'
+  t "caller's IFS is a tab"                     "934|the WSL virtual disk|60|60 GB free on D: if the WSL disk is there (WSL_DISTRO_NAME is not set; the least free of C: D:)" MU_WSL=1 D_GB=60 TAB_IFS=1
+  t "WSL, MU_HOME not created yet: parent dir"  "130|C: (WSL disk)||"      WSL_DISTRO_NAME=Ubuntu-24.04
 done
 echo; echo "$PASS passed, $FAILN failed"
 [ "$FAILN" = 0 ]

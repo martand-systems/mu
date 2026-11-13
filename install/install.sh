@@ -308,6 +308,8 @@ LAYERS="$ENV_KEY $CAM_KEY"; for a in $APP_NAMES; do LAYERS="$LAYERS $(appkey "$a
 printf '%s\n' $LAYERS > "$T/LAYERS"   # written early: `mu gc` never removes layers an install is using
 # download-cache entries this version pins (mu gc keeps them while the version is installed): "flatpak REF@COMMIT"
 awk -F'\t' '$5 == "flatpak" { print "flatpak " $2 "@" $4; if ($10 != "") print "flatpak " $10 }' "$WORK/apps.tsv" > "$T/CACHE_REFS"
+# the download cache is shared by every MU_HOME: record this one in it, so mu gc in another keeps these pins too
+[ ! -s "$T/CACHE_REFS" ] || fp_register
 have_layer() { [ -f "$STORE/$1/.mu-layer" ]; }
 # layers are read-only once built: nothing (a tool's bytecode cache, a stray pip install) can change a shared layer
 seal() { chmod -R a-w "$1"; }
@@ -318,8 +320,7 @@ detach_under() {
     case "$m" in "$1"/*) hdiutil detach "$m" -quiet 2>/dev/null || hdiutil detach "$m" -force -quiet 2>/dev/null || true ;; esac
   done
 }
-# (only directories need to be writable to delete; files keep their modes: a flatpak layer's files are hard links shared
-# with the download cache)
+# (only directories need to be writable to delete: file modes are never changed)
 unseal_rm() { [ -e "$1" ] || return 0; detach_under "$1"; find "$1" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true; rm -rf "${1:?}"; }
 detach_under "$STORE"
 for d in "$STORE"/.*.partial; do [ -e "$d" ] && unseal_rm "$d"; done
@@ -333,14 +334,21 @@ if [ "$REBUILD" = 1 ]; then
 fi
 MISSING=""; for k in $LAYERS; do have_layer "$k" || MISSING="$MISSING $k"; done
 
-avail_gb="$(mu_disk_free "$MU_HOME")"; disk_where="${avail_gb#*$(printf '\t')}"; avail_gb="${avail_gb%%$(printf '\t')*}"
+mu_disk_free "$MU_HOME"; avail_gb="$MU_FREE_GB"; disk_where="$MU_FREE_WHERE"
 need_gb=1
 case "$MISSING" in *env-*) need_gb=$((need_gb + 6)) ;; esac
 case "$MISSING" in *cam-*) need_gb=$((need_gb + 2)) ;; esac
 case "$MISSING" in *app-*) need_gb=$((need_gb + 9)) ;; esac
-[ "$avail_gb" -ge "$need_gb" ] || fail "need about $need_gb GB free on this disk (have $avail_gb GB${disk_where:+ on $disk_where})"
+[ -z "$avail_gb" ] || [ "$avail_gb" -ge "$need_gb" ] \
+  || fail "need about $need_gb GB free on this disk (have $avail_gb GB${disk_where:+ on $disk_where})"
 n_missing=$(echo $MISSING | wc -w | tr -d ' '); n_layers=$(echo $LAYERS | wc -w | tr -d ' ')
-ok "$OSNAME · $avail_gb GB free${disk_where:+ on $disk_where} · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
+ok "$OSNAME · ${avail_gb:-?} GB free${disk_where:+ on $disk_where} · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
+# WSL, Windows drive not confirmed: its figure is shown, and warned about when low, but never enforced (install/disk.sh)
+if [ -n "$MU_FREE_NOTE" ]; then
+  printf '  note: %s\n' "$MU_FREE_NOTE" >&5
+  if [ "$MU_FREE_NOTE_GB" -ge "$need_gb" ]; then printf '    %s%s%s\n' "$DIM" "$MU_FREE_NOTE" "$N" >&3
+  else printf '  %s!%s %s; this install needs about %s GB\n' "$Y" "$N" "$MU_FREE_NOTE" "$need_gb" >&3; fi
+fi
 printf '  %sinstalling μ %s%s %s→ %s%s\n' "$B" "$VERSION" "$N" "$DIM" "${T/#$HOME/~}" "$N" >&3
 
 # ================================================================ downloads
@@ -423,7 +431,8 @@ build_layer() {
 
 # flatpak_layer NAME (Linux): a private flatpak installation holding exactly the app and its runtime at their pinned
 # commits (install/flatpak.sh). Each commit is downloaded once per machine into the download cache, then the layer is
-# built from the cache with no network. Built at its final path; complete when .mu-layer exists.
+# built from the cache with no network, as a copy (no inode shared with the cache). Built at its final path; complete
+# when .mu-layer exists.
 flatpak_layer() {
   local name="$1" ref url commit rt key L fkey="$R/toolchain/$PLAT/flathub.gpg"
   ref="$(app "$1" 2)"; url="$(app "$1" 3)"; commit="$(app "$1" 4)"; rt="$(app "$1" 10)"; key="$(appkey "$1")"
@@ -437,7 +446,7 @@ flatpak_layer() {
   fp_deploy "$L/$(app "$1" 7)" "$url" "$fkey" "$rt" "$ref@$commit"
   printf 'app=%s\nref=%s\ncommit=%s\nruntime=%s\nformat=%s\nbuilt=%s\n' "$name" "$ref" "$commit" "$rt" "$FLATPAK_FORMAT" \
     "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
-  fp_seal "$L"
+  seal "$L"   # its own copy of every file (fp_deploy), so the cache's file modes are not touched
 }
 
 # tools needed to build: micromamba and uv (small, pinned binaries)

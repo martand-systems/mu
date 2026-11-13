@@ -4,6 +4,7 @@
 #
 #   fp_fetch REF COMMIT URL KEY            puts that commit into the download cache (once per machine)
 #   fp_deploy DIR URL KEY REF@COMMIT...    builds a flatpak installation at DIR from the cache, with no network
+#   fp_register                            records MU_HOME in the cache, so mu gc in any MU_HOME keeps its pins
 #   fp ARGS                                flatpak with a session D-Bus
 #
 # Download cache: $MU_CACHE/flatpak, a flatpak installation used only to download (its repo/ is an OSTree repository).
@@ -14,16 +15,26 @@
 # (a SHA-256 over the commit, which names its file tree by hash, which names every file by hash: a Merkle tree) verifies
 # every object pulled. An interrupted pull resumes (fetched objects are kept; the commit stays marked partial until it is
 # complete). A ref mu/REF/COMMIT, written last, marks a complete commit: then the network is never used again for it.
-# One download at a time per cache (flock), so two installs never fetch the same commit twice. mu gc deletes the refs no
-# installed version pins, then the objects no ref reaches (ostree prune).
 #
-# Layer: a private flatpak installation. Its repository (bare-user-only, flatpak's own mode for a user installation)
-# imports the pinned commits from the cache with every object's checksum verified again (pull-local --untrusted), then
-# flatpak deploys them from that repository (install --no-pull) and the deployed commits are compared with the pins.
-# Only the app and its runtime are installed (--no-related): the extensions flatpak would add on its own (translations,
-# GL drivers, codecs) are not needed by the headless CLI and are not pinned, so they would make the layer depend on
-# the day it was built. The layer is a copy, not hard links into the cache: sealing a layer (chmod a-w) would change
-# modes that are part of a bare-user-only object's checksum, and deleting the cache must never touch a layer.
+# Locking ($MU_CACHE/flatpak.lock, flock): a download holds it exclusively (two installs never fetch the same commit
+# twice); an import into a layer holds it shared; mu gc prunes only when it gets it exclusively, at once (else it skips).
+# MU_CACHE is shared by every MU_HOME of the user, so each installer records its MU_HOME in $MU_CACHE/flatpak/homes/, and
+# mu gc (in any MU_HOME) keeps every commit that some installed version of any recorded MU_HOME pins
+# (toolchains/*/CACHE_REFS), deletes the other mu/ refs, then the objects no ref reaches (ostree prune).
+#
+# Layer: a private flatpak installation, built with no network. Its repository (bare-user-only, flatpak's own mode for a
+# user installation) imports the pinned commits from the cache with every object's checksum verified again (pull-local
+# --untrusted); flatpak deploys them from that repository (install --no-pull) and the deployed commits are compared with
+# the pins. Only the app and its runtime are installed (--no-related): the extensions flatpak would add on its own
+# (translations, GL drivers, codecs) are not needed by the headless CLI and are not pinned, so they would make the layer
+# depend on the day it was built.
+# The layer is a copy that shares no inode with the cache: on one filesystem pull-local hard-links the cache's objects,
+# so the layer's objects are then copied (cp --reflink=auto: shared extents where the filesystem can, copy-on-write, so
+# still independent). With hard links a write into any one file would change the cache and every other layer at once,
+# and the cache's file modes would be the layer's: a bare-user-only object's mode is part of its checksum, so sealing a
+# hard-linked layer (chmod a-w) corrupts the cache. As a copy, the layer is sealed like every other layer (seal: chmod -R
+# a-w), a damaged cache is repaired without touching any layer, and deleting the cache or a layer never affects the other.
+# The price is disk: a layer costs its full size (1.3 GB for PrusaSlicer) on top of the cache, as before the cache.
 # All ostree commands here are local (no network).
 
 FP_REMOTE=flathub
@@ -115,49 +126,81 @@ _fp_pull() {
 }
 
 # fp_deploy DIR URL KEY REF@COMMIT...: a flatpak installation at DIR (FLATPAK_USER_DIR) holding exactly these commits,
-# built from the cache with no network. Every REF@COMMIT must be cached (fp_fetch). If an object in the cache fails its
-# checksum, the cache is repaired (the damaged objects deleted, the commit downloaded again) and the import retried.
+# built from the cache with no network. Each REF@COMMIT is normally cached already (fp_fetch). If one is missing (mu gc
+# in another MU_HOME pruned it before this install recorded its pins) it is downloaded again; if an object in the cache
+# fails its checksum, the cache is repaired (the damaged objects deleted, the commit downloaded again). Then the import
+# is retried.
 fp_deploy() {
-  local dir="$1" url="$2" key="$3" C r ref commit refs=""
+  local dir="$1" url="$2" key="$3" res="" i r
   shift 3
-  C="$(fp_cache)"
   mkdir -p "$dir"
   ostree init --mode=bare-user-only --repo="$dir/repo" || fail "could not create the flatpak repository in $dir"
   # the same Flathub remote a normal installation has (this installation is sealed: it never pulls)
   ostree --repo="$dir/repo" remote add --set=gpg-verify=true --gpg-import="$key" "$FP_REMOTE" "$url"
-  for r in "$@"; do
-    ref="${r%@*}"; commit="${r##*@}"
-    fp_cached "$C" "$ref" "$commit" || fail "flatpak: $ref@${commit:0:12} is not in the cache"
-    # --untrusted: every object read from the cache is checksummed again (objects are hard-linked when the cache and
-    # the store share a filesystem, so the layer costs almost no extra disk)
-    if ! ostree --repo="$dir/repo" pull-local --untrusted "$C" "$commit"; then
-      echo "flatpak: $ref@${commit:0:12} failed its checksum check in the cache: repairing the cache"
-      _fp_repair "$ref" "$commit" || fail "flatpak: could not repair the download cache $C (delete it and re-run)"
-      fp_fetch "$ref" "$commit" "$url" "$key"
-      ostree --repo="$dir/repo" pull-local --untrusted "$C" "$commit" \
-        || fail "flatpak: $ref@${commit:0:12} is still damaged after downloading it again (delete $C and re-run)"
-    fi
-    mkdir -p "$dir/repo/refs/remotes/$FP_REMOTE/$(dirname "$ref")"
-    echo "$commit" > "$dir/repo/refs/remotes/$FP_REMOTE/$ref"
-    refs="$refs $ref"
+  for i in 1 2 3; do
+    res="$(_fp_import "$dir" "$@" || true)"
+    case "$res" in
+      ok) break ;;
+      "missing "*) r="${res#missing }"
+        echo "flatpak: ${r%@*}@$(printf '%.12s' "${r##*@}") is no longer in the cache (pruned by mu gc?): downloading it again"
+        fp_fetch "${r%@*}" "${r##*@}" "$url" "$key" ;;
+      "damaged "*) r="${res#damaged }"
+        echo "flatpak: ${r%@*}@$(printf '%.12s' "${r##*@}") failed its checksum check in the cache: repairing the cache"
+        _fp_repair "${r%@*}" "${r##*@}" || fail "flatpak: could not repair the download cache $(fp_cache) (delete it and re-run)"
+        fp_fetch "${r%@*}" "${r##*@}" "$url" "$key" ;;
+      "") fail "flatpak: the import from the download cache was interrupted" ;;
+      *) fail "flatpak: $res" ;;
+    esac
   done
-  # shellcheck disable=SC2086
-  FLATPAK_USER_DIR="$dir" fp --user install -y --noninteractive --no-pull --no-related "$FP_REMOTE" $refs \
-    || fail "flatpak could not install$refs from the cache"
+  [ "$res" = ok ] || fail "flatpak: could not import from the download cache $(fp_cache) (${res}; delete it and re-run)"
+  # own inodes: copy the objects that pull-local hard-linked from the cache (see the header)
+  if [ -n "$(find "$dir/repo/objects" -type f -links +1 -print -quit)" ]; then
+    rm -rf "$dir/repo/objects.copy"
+    cp -a --reflink=auto "$dir/repo/objects" "$dir/repo/objects.copy" || fail "flatpak: could not copy the layer's objects"
+    rm -rf "$dir/repo/objects"; mv "$dir/repo/objects.copy" "$dir/repo/objects"
+  fi
   for r in "$@"; do
-    ref="${r%@*}"; commit="${r##*@}"
-    [ "$(FLATPAK_USER_DIR="$dir" fp --user info --show-commit "$ref")" = "$commit" ] || fail "$ref is not at the pinned commit"
+    mkdir -p "$dir/repo/refs/remotes/$FP_REMOTE/$(dirname "${r%@*}")"
+    echo "${r##*@}" > "$dir/repo/refs/remotes/$FP_REMOTE/${r%@*}"
+  done
+  # shellcheck disable=SC2046
+  FLATPAK_USER_DIR="$dir" fp --user install -y --noninteractive --no-pull --no-related "$FP_REMOTE" $(for r in "$@"; do echo "${r%@*}"; done) \
+    || fail "flatpak could not install from the cache: $*"
+  for r in "$@"; do
+    [ "$(FLATPAK_USER_DIR="$dir" fp --user info --show-commit "${r%@*}")" = "${r##*@}" ] || fail "${r%@*} is not at the pinned commit"
   done
 }
 
+# _fp_import DIR REF@COMMIT...: pull-local each commit from the cache into DIR/repo, holding the cache's lock shared (so
+# mu gc can't prune it meanwhile). In a subshell without the ERR trap; ostree's output goes to stderr (the log), and
+# one result line to stdout: ok, "missing REF@COMMIT", "damaged REF@COMMIT" or a reason.
+_fp_import() {
+  ( trap - ERR; set +e
+    dir="$1"; shift; C="$MU_CACHE/flatpak/repo"
+    exec 9>"$MU_CACHE/flatpak.lock"
+    if ! flock -s -n 9; then
+      echo "waiting for another install's flatpak download" >&2
+      flock -s -w 14400 9 || { echo "timed out waiting for the download cache ($MU_CACHE/flatpak.lock)"; exit 0; }
+    fi
+    for r in "$@"; do
+      fp_cached "$C" "${r%@*}" "${r##*@}" || { echo "missing $r"; exit 0; }
+      ostree --repo="$dir/repo" pull-local --untrusted "$C" "${r##*@}" >&2 || { echo "damaged $r"; exit 0; }
+    done
+    echo ok )
+}
+
 # _fp_repair REF COMMIT: delete the cache's damaged objects (ostree fsck marks the commits that used them partial) and
-# forget REF@COMMIT, so that fp_fetch downloads what is missing
+# forget REF@COMMIT, so that fp_fetch downloads what is missing. Layers are copies: none of them is affected.
 _fp_repair() {
   ( exec 9>"$MU_CACHE/flatpak.lock"; flock -w 14400 9 || exit 1
     ostree --repo="$MU_CACHE/flatpak/repo" fsck --delete --quiet || true
     ostree --repo="$MU_CACHE/flatpak/repo" refs --delete "mu/$1/$2" )
 }
 
-# fp_seal DIR: make a flatpak layer read-only. Directories only: its files are hard links shared with the download
-# cache, and their modes are part of each object's checksum. (Inside the sandbox the app's files are mounted read-only.)
-fp_seal() { find "$1" -type d -exec chmod a-w {} +; }
+# fp_register: record MU_HOME in the cache (one file per MU_HOME, named by a checksum of its path, holding the path)
+fp_register() {
+  local h
+  h="$(cd "$MU_HOME" && pwd -P)"
+  mkdir -p "$MU_CACHE/flatpak/homes"
+  printf '%s\n' "$h" > "$MU_CACHE/flatpak/homes/$(printf '%s' "$h" | cksum | cut -d' ' -f1)"
+}

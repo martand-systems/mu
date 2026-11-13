@@ -47,7 +47,8 @@ step tries offline first.
 **Integrity:** every app archive, conda package and PyPI package is pinned by hash (SHA-256 / MD5). On Linux,
 PrusaSlicer comes from Flathub pinned by OSTree commit (also a SHA-256), downloaded once per machine into
 `~/.cache/mu/flatpak` (flatpak checks Flathub's signature with the key in the recipe) and installed from there with no
-network. Layers are sealed read-only once built, and `mu doctor` checks that they are.
+network, as a copy (the layer shares no file with the cache). Layers are sealed read-only once built, and `mu doctor`
+checks that they are.
 
 ## Use
 

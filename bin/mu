@@ -193,29 +193,63 @@ prune_store() {
   done
   return 0
 }
-# prune_cache APPLY VERSIONS: remove from the download cache the flatpak commits none of VERSIONS pins (Linux: the
-# repository of the download-only flatpak installation $MU_CACHE/flatpak, where a ref mu/<flatpak ref>/<commit> keeps
-# each commit; a version lists its commits in toolchains/<v>/CACHE_REFS), then the objects no remaining ref reaches.
-# Skipped while an install holds the cache's lock. Other downloads in $MU_CACHE are not pruned (all of it is safe to
-# delete; it is downloaded again).
+# prune_cache APPLY VERSIONS: remove from the download cache the flatpak commits nothing pins (Linux: the repository
+# of the download-only flatpak installation $MU_CACHE/flatpak, where a ref mu/<flatpak ref>/<commit> keeps each commit).
+# Kept: the commits VERSIONS pin (toolchains/<v>/CACHE_REFS) and those any installed version of every other MU_HOME
+# pins: MU_CACHE is shared by all of them, and each installer records its MU_HOME in $MU_CACHE/flatpak/homes/ (a record
+# whose MU_HOME no longer exists is dropped). Then the objects no ref reaches are deleted (ostree prune), which also
+# reclaims interrupted downloads, unless a pinned commit is itself half downloaded. The whole prune holds the cache's
+# lock exclusively; if an install is downloading into it or importing from it, nothing is pruned. Other downloads in
+# $MU_CACHE are not pruned (all of it is safe to delete; it is downloaded again).
 prune_cache() {
-  local repo="$MU_CACHE/flatpak/repo" keep r c ref n=0 k0 k1
+  local repo="$MU_CACHE/flatpak/repo" rc=0
   [ -f "$repo/config" ] && command -v ostree >/dev/null 2>&1 || return 0
-  keep=" $(for v in $2; do cat "$TC/$v/CACHE_REFS" 2>/dev/null || true; done | awk '$1 == "flatpak" {print $2}' | tr '\n' ' ') "
+  [ "$1" = 1 ] || { prune_cache_locked 0 "$2"; return 0; }
+  exec 9>"$MU_CACHE/flatpak.lock"
+  if flock -n 9; then prune_cache_locked 1 "$2" || rc=$?; else echo "  (the flatpak download cache is in use by an install: not pruned)"; fi
+  exec 9>&-
+  return "$rc"
+}
+cache_pins() {   # cache_pins APPLY VERSIONS: "REF@COMMIT" lines that must stay in the download cache
+  local v f h me
+  me="$(cd "$MU_HOME" 2>/dev/null && pwd -P || echo "$MU_HOME")"
+  { for v in $2; do cat "$TC/$v/CACHE_REFS" 2>/dev/null || true; done
+    for f in "$MU_CACHE/flatpak/homes"/*; do
+      [ -f "$f" ] || continue
+      h="$(head -1 "$f")"; [ -n "$h" ] && [ "$h" != "$me" ] || continue
+      if [ -d "$h/toolchains" ]; then cat "$h"/toolchains/*/CACHE_REFS 2>/dev/null || true
+      elif [ ! -e "$h" ]; then [ "$1" = 0 ] || rm -f "$f"   # that MU_HOME was deleted
+      fi
+    done; } | awk '$1 == "flatpak" {print $2}'
+}
+prune_cache_locked() {
+  local repo="$MU_CACHE/flatpak/repo" keep r c ref p k0 k1
+  keep=" $(cache_pins "$1" "$2" | tr '\n' ' ') "
   for r in $(ostree --repo="$repo" refs 2>/dev/null | grep '^mu/' || true); do
     c="${r##*/}"; ref="${r#mu/}"; ref="${ref%/*}"
     case "$keep" in *" $ref@$c "*) continue ;; esac
     printf '  remove cached  %-34s %s\n' "$(echo "$ref" | cut -d/ -f2)" "${c:0:12} (flatpak ${ref%%/*})"
-    n=$((n + 1))
     [ "$1" = 1 ] || continue
-    ( exec 9>"$MU_CACHE/flatpak.lock"; flock -n 9 || exit 1; ostree --repo="$repo" refs --delete "$r" ) >/dev/null 2>&1 \
-      || { echo "  (the download cache is in use by an install: kept)"; return 0; }
+    ostree --repo="$repo" refs --delete "$r" >/dev/null 2>&1 || true
   done
-  [ "$1" = 1 ] && [ "$n" -gt 0 ] || return 0
+  [ "$1" = 1 ] || return 0
+  # a download killed after flatpak updated its remote ref (before the installer reset it to the placeholder) leaves
+  # refs/remotes/flathub/<ref> on a real commit, which would keep it forever: back to the placeholder
+  for r in $(ostree --repo="$repo" refs 2>/dev/null | grep '^mu-placeholder/' || true); do
+    c="$(ostree --repo="$repo" rev-parse "$r" 2>/dev/null)" || continue; ref="${r#mu-placeholder/}"
+    [ -f "$repo/refs/remotes/flathub/$ref" ] && [ "$(cat "$repo/refs/remotes/flathub/$ref")" != "$c" ] || continue
+    echo "$c" > "$repo/refs/remotes/flathub/$ref"
+  done
+  # a pinned commit half downloaded: its objects (reachable from no ref yet) are kept for the install that resumes it
+  for p in $keep; do
+    [ -e "$repo/state/${p##*@}.commitpartial" ] || continue
+    echo "  (a pinned flatpak commit is half downloaded: the cache's unused objects are pruned once it is complete)"; return 0
+  done
   k0=$(kb_of "$repo")
-  ( exec 9>"$MU_CACHE/flatpak.lock"; flock -n 9 || exit 1; ostree --repo="$repo" prune --refs-only ) >/dev/null 2>&1 || true
+  ostree --repo="$repo" prune --refs-only >/dev/null 2>&1 || true
   k1=$(kb_of "$repo"); [ "$k1" -le "$k0" ] || k1=$k0
   PRUNED_KB=$((PRUNED_KB + k0 - k1))
+  [ "$k0" = "$k1" ] || printf '  pruned the flatpak download cache: %s MB\n' "$(( (k0 - k1) / 1024 ))"
 }
 remove_version() { rm -rf "${TC:?}/$1" "$MU_HOME/state/cad/$1" "$MU_HOME/state/bench/install-$1"; }
 
@@ -643,25 +677,28 @@ _mu_is_wsl() {
   case "$(uname -r 2>/dev/null)" in *[Mm]icrosoft*) return 0 ;; esac
   return 1
 }
-_mu_kb_free() { df -Pk "$1" 2>/dev/null | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'; }
+# (every helper returns 0, even when df or awk fails: callers run under set -E with an ERR trap)
+_mu_kb_free() { { df -Pk "$1" 2>/dev/null || true; } | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'; }
 # _mu_drive_mount LETTER: where that Windows drive is mounted (drvfs, over 9p or virtiofs), or nothing
 _mu_drive_mount() {
   local l u
   l="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; u="$(printf '%s' "$1" | tr 'a-z' 'A-Z')"
-  awk -v l="$l" -v u="$u" '
-    $3 == "9p" || $3 == "drvfs" || $3 == "virtiofs" {
-      s = substr($1, 1, 2)
-      if (s == u ":" || s == l ":" || index($4, "path=" u ":") || index($4, "path=" l ":") || $2 == "/mnt/" l) { print $2; exit }
-    }' "${MU_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null | sed 's/\\040/ /g'
+  { awk -v l="$l" -v u="$u" '
+      $3 == "9p" || $3 == "drvfs" || $3 == "virtiofs" {
+        s = substr($1, 1, 2)
+        if (s == u ":" || s == l ":" || index($4, "path=" u ":") || index($4, "path=" l ":") || $2 == "/mnt/" l) { print $2; exit }
+      }' "${MU_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null || true; } | sed 's/\\040/ /g'
 }
-# _mu_wsl_drives: the drive letters holding the distro's VHD (one per line; every distro's if this one isn't known)
+# _mu_wsl_drives: one line. "sure L": drive L holds this distro's virtual disk. "unsure L M...": this distro is not
+# among the registered ones by name (no $WSL_DISTRO_NAME), so it is on one of these drives. "nodrive": its BasePath has no
+# drive letter. Nothing: no answer from Windows.
 _mu_wsl_drives() {
   local IFS=" $(printf '\t')
 " reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
   [ -x "$reg" ] || return 0
   command -v timeout >/dev/null 2>&1 && t="timeout 15"
   # reg.exe writes CRLF lines (and UTF-16 in some setups): drop NULs and CRs, then read DistributionName / BasePath
-  # per subkey. BasePath may be \\?\C:\..., C:\..., or a UNC path (no drive letter: ignored).
+  # per subkey. BasePath may be \\?\C:\..., C:\..., or a UNC path (no drive letter).
   { $t "$reg" query "$key" /s 2>/dev/null < /dev/null || true; } | LC_ALL=C tr -d '\000\r' | LC_ALL=C awk -v want="${WSL_DISTRO_NAME:-}" '
     function flush() { if (base != "") { n++; nm[n] = name; b[n] = base }; name = ""; base = "" }
     /^HKEY_/ { flush(); next }
@@ -669,39 +706,58 @@ _mu_wsl_drives() {
     v ~ /^DistributionName[ \t]+REG_SZ[ \t]/ { sub(/^DistributionName[ \t]+REG_SZ[ \t]+/, "", v); name = v }
     v ~ /^BasePath[ \t]+REG_(EXPAND_)?SZ[ \t]/ { sub(/^BasePath[ \t]+REG_(EXPAND_)?SZ[ \t]+/, "", v); base = v }
     END {
-      flush(); m = 0
+      flush(); m = 0; k = 0; out = ""
       for (i = 1; i <= n; i++) if (want != "" && nm[i] == want) m = i
       for (i = 1; i <= n; i++) {
         if (m && i != m) continue
         p = b[i]; if (substr(p, 1, 4) == "\\\\?\\") p = substr(p, 5)
-        d = substr(p, 1, 1)
-        if (substr(p, 2, 1) == ":" && d ~ /^[A-Za-z]$/) print toupper(d)
+        d = toupper(substr(p, 1, 1))
+        if (substr(p, 2, 1) == ":" && d ~ /^[A-Z]$/ && !(d in seen)) { seen[d] = 1; k++; out = out " " d }
       }
-    }' | sort -u
+      if (n == 0) exit
+      if (k == 0) { print "nodrive"; exit }
+      # sure: this distro found by name, or every registered distro is on the one drive
+      print ((m || (want == "" && k == 1)) ? "sure" : "unsure") out
+    }'
 }
+# mu_disk_free DIR: sets MU_FREE_GB (the free GB to check; empty if df failed), MU_FREE_WHERE (where: empty unless WSL)
+# and, when the Windows drive could not be confirmed and has less free space than the virtual disk, MU_FREE_NOTE_GB and
+# MU_FREE_NOTE (that drive's free GB, to show or warn about but not to enforce)
 mu_disk_free() {
-  local d="$1" kb best="" where="" drives l m k assumed="" IFS=" $(printf '\t')
+  local d="$1" kb ans state drives why="" l m k best="" bl="" all="" IFS=" $(printf '\t')
 "   # callers may have changed IFS
+  MU_FREE_GB=""; MU_FREE_WHERE=""; MU_FREE_NOTE=""; MU_FREE_NOTE_GB=""
   while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
   kb="$(_mu_kb_free "$d")"
-  if ! _mu_is_wsl; then
-    [ -z "$kb" ] || printf '%s\t\n' "$((kb / 1048576))"
-    return 0
-  fi
-  drives="$(_mu_wsl_drives)"
-  [ -n "$drives" ] || { drives=C; assumed=", assumed"; }   # no interop: the default location
+  [ -z "$kb" ] || MU_FREE_GB=$((kb / 1048576))
+  _mu_is_wsl || return 0
+  ans="$(_mu_wsl_drives)"; state="${ans%% *}"; drives="${ans#"$state"}"
+  case "$state" in
+    sure) ;;
+    unsure) why="WSL_DISTRO_NAME is not set"; [ -z "${WSL_DISTRO_NAME:-}" ] || why="no distro named $WSL_DISTRO_NAME in the registry" ;;
+    nodrive) state=unsure; drives=C; why="its folder has no drive letter, so C: is assumed" ;;
+    *) state=unsure; drives=C; why="no answer from Windows (reg.exe), so C: is assumed" ;;
+  esac
   for l in $drives; do
+    all="$all $l:"
     m="$(_mu_drive_mount "$l")"; [ -n "$m" ] || continue
     k="$(_mu_kb_free "$m")"; [ -n "$k" ] || continue
-    if [ -z "$best" ] || [ "$k" -lt "$best" ]; then best="$k"; where="$l: (WSL disk$assumed)"; fi
+    if [ -z "$best" ] || [ "$k" -lt "$best" ]; then best="$k"; bl="$l"; fi
   done
-  if [ -z "$best" ]; then
-    [ -z "$kb" ] || printf '%s\tthe WSL virtual disk (Windows drive not found)\n' "$((kb / 1048576))"
+  if [ -z "$best" ]; then MU_FREE_WHERE="the WSL virtual disk (Windows drive not found)"; return 0; fi
+  if [ "$state" = sure ]; then
+    # the smaller of the two; the VHD itself can be the limit (its maximum size is nearly used up)
+    if [ -n "$kb" ] && [ "$kb" -lt "$best" ]; then MU_FREE_WHERE="the WSL virtual disk (at its size limit)"
+    else MU_FREE_GB=$((best / 1048576)); MU_FREE_WHERE="$bl: (WSL disk)"; fi
     return 0
   fi
-  # the VHD itself can be the limit (its maximum size is nearly used up)
-  [ -z "$kb" ] || [ "$kb" -ge "$best" ] || { best="$kb"; where="the WSL virtual disk (at its size limit)"; }
-  printf '%s\t%s\n' "$((best / 1048576))" "$where"
+  # not confirmed: only the virtual disk is checked; the drive's figure is reported when it is the smaller one
+  MU_FREE_WHERE="the WSL virtual disk"
+  [ "$(printf '%s' "$all" | wc -w)" -le 1 ] || why="$why; the least free of$all"
+  if [ -z "$kb" ] || [ "$best" -lt "$kb" ]; then
+    MU_FREE_NOTE_GB=$((best / 1048576)); MU_FREE_NOTE="$MU_FREE_NOTE_GB GB free on $bl: if the WSL disk is there ($why)"
+  fi
+  return 0
 }
 # <<< mu_disk_free
 au_caffeinate() {   # macOS: keep the system awake while PID runs, on AC power only (-s); the battery rule covers the rest
@@ -803,7 +859,8 @@ au_run_body() {
     au_note skipped "μ $latest could not be installed $ec times: not retried until a newer release (or: mu autoupdate run --force)"; au_done; return 0
   fi
   if [ "$force" = 0 ] && au_on_battery; then au_note skipped "on battery power: μ $latest installs on AC power (or: mu autoupdate run --force)"; return 0; fi
-  need="$(au_conf min_free_gb)"; free="$(mu_disk_free "$MU_HOME")"; where="${free#*$(printf '\t')}"; free="${free%%$(printf '\t')*}"
+  need="$(au_conf min_free_gb)"; mu_disk_free "$MU_HOME"; free="$MU_FREE_GB"; where="$MU_FREE_WHERE"
+  [ -z "$MU_FREE_NOTE" ] || echo "note: $MU_FREE_NOTE (not enforced)"
   if [ -z "$free" ]; then echo "could not measure the free disk space; continuing (the installer checks it too)"
   elif [ "$free" -lt "$need" ]; then
     au_note skipped "$free GB free${where:+ on $where}, auto-update waits for $need GB (min_free_gb; mu gc --yes frees space)"; return 0
