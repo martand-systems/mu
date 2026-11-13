@@ -15,6 +15,7 @@ WORK="$ROOT/.scratch/jobs"; S4W="$ROOT/.scratch/s4"
 MODE="${1:-all}"
 [ "${CI:-}" = true ] || { echo "e2e.sh: CI only (it creates users and system services)" >&2; exit 2; }
 mkdir -p "$WORK/logs" "$WORK/out"; : > "$WORK/results.tsv"
+cd /tmp   # commands run as mu and ws cannot enter the checkout
 N_FAIL=0
 row() {   # row RESULT ID WHAT MEASURED
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(printf '%s' "$4" | tr '\t\n' '  ' | cut -c1-400)" >> "$WORK/results.tsv"

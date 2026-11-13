@@ -18,6 +18,7 @@ set -euo pipefail
 [ "${CI:-}" = true ] || { echo "node-setup.sh: CI only (it creates users and system services)" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "node-setup.sh: run as root" >&2; exit 2; }
 REPO="$1"; CHISEL="$2"; CA="$3"; CENV="$4"
+cd /   # the other users cannot enter the checkout
 val() { sed -n "s/^$2=//p" "$1" | tail -n 1; }
 say() { printf '\n== %s\n' "$*"; }
 

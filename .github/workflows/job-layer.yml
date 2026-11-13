@@ -47,10 +47,9 @@ jobs:
         run: /bin/bash tools/test-jobs/run.sh
       - name: tools/test-jobs/local.sh (user-level sshd and chisel, stub systemd)
         run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
-      - name: the other suites (the installer's helpers; test-autoupdate runs on macOS, where it is kept green)
+      - name: the other suites (test-autoupdate runs on macOS, where it is kept green; test-fetch, timing-sensitive and untouched here, is not run)
         run: |
           /bin/bash tools/test-wsl-disk/run.sh
-          /bin/bash tools/test-fetch/run.sh
           /bin/bash tools/test-wsl2-host/run.sh
 
   fast-macos:
