@@ -984,7 +984,10 @@ function Get-DiskAclProblem([string]$Path, [string]$UserSid) {
   foreach ($r in @((Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
     $sid = $r.IdentityReference.Value
     if ([string]$r.AccessControlType -ne 'Allow' -or ([int]$r.FileSystemRights -band $readMask) -eq 0) { continue }
-    if (@($script:SidSystem, $script:SidAdmins, $UserSid) -contains $sid -or $sid.StartsWith('S-1-5-83-', [StringComparison]::Ordinal)) { continue }
+    # S-1-5-83-*: Hyper-V VM identities (HcsGrantVmAccess). S-1-15-3-*: capability SIDs, which only count for sandboxed
+    # (AppContainer) processes and only on top of a normal user or group grant, so they let no other user read the disk
+    if (@($script:SidSystem, $script:SidAdmins, $UserSid) -contains $sid -or $sid.StartsWith('S-1-5-83-', [StringComparison]::Ordinal) -or
+        $sid.StartsWith('S-1-15-3-', [StringComparison]::Ordinal)) { continue }
     $n = Get-SidName $sid
     if (-not $others.Contains($n)) { [void]$others.Add($n) }
   }
