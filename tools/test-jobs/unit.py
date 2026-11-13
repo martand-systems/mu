@@ -523,7 +523,7 @@ def t_snapshot_report():
     git(sub, "init", "-q")
     git(sub, "-c", "user.name=t", "-c", "user.email=t@x", "commit", "-q", "--allow-empty", "-m", "s")
     emb = os.path.join(root, "embedded")
-    shutil.copytree(sub, emb, symlinks=True)
+    git(d, "clone", "-q", sub, emb)   # (not a copy: git's background maintenance may be writing in it)
     lfs = subprocess.run(["git", "lfs", "version"], capture_output=True).returncode == 0
     if lfs:
         git(root, "lfs", "install", "--local")
