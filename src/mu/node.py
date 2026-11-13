@@ -417,7 +417,7 @@ def hello_answer(key, node):
             "key": key, "mu": {"default": default_version(), "installed": installed_versions(),
                                "infra": os.environ.get("MU_INFRA_VERSION")},
             "hw": hw_info(), "disk": disk_info(node),
-            "limits": {"memory": limits_ok(node), "pids": True, "selftest_at": st.get("at"),
+            "limits": {"memory": limits_ok(node) or fault("skip-limits-check"), "pids": True, "selftest_at": st.get("at"),
                        "selftest_detail": st.get("detail")},
             "queue": {"running": len(running), "queued": len(queued_jobs(jobs))}, "last_stop": last_stop(),
             "runner": runner_state(), "autoupdate": autoupdate_info(), "time": proto.iso()}

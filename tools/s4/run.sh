@@ -7,6 +7,7 @@
 #
 #   tools/s4/run.sh         build, test, print the table; exit 0 only if every row passes
 #   tools/s4/run.sh down    remove everything it made
+#   tools/s4/run.sh relay   only Traefik and the relay, left running (used by tools/test-jobs/e2e.sh)
 #
 # The replica (see the files next to this one):
 #   dokploy-traefik   started with Dokploy's own `docker run` line and Dokploy's static config, on a swarm overlay
@@ -242,7 +243,7 @@ setup() {
   docker network create --driver overlay --attachable --label mu.s4=1 dokploy-network >/dev/null || die "network create"
 
   dc_main build || die "the relay image did not build"
-  docker build -q --build-arg RELAY_IMAGE="$APP-mu-relay" -t s4-client "$S4/client" >/dev/null || die "the client image did not build"
+  [ "${1:-}" = relay-only ] || docker build -q --build-arg RELAY_IMAGE="$APP-mu-relay" -t s4-client "$S4/client" >/dev/null || die "the client image did not build"
 
   # Dokploy's createTraefikInstance(), with the config directory under $WORK instead of /etc/dokploy/traefik.
   docker run -d --name dokploy-traefik --restart always --label mu.s4=1 \
@@ -252,7 +253,24 @@ setup() {
     -p 443:443 -p 80:80 -p 443:443/udp "traefik:v$TRAEFIK_VERSION" >/dev/null || die "Traefik did not start"
   docker network connect dokploy-network dokploy-traefik || die "network connect"
 
+  [ "${1:-}" = relay-only ] && return 0
   dc_clients up -d probe noise killer >> "$WORK/logs/compose.log" 2>&1 || die "the probe containers did not start"
+}
+
+# relay: only Traefik and the main relay, left running for another test (tools/test-jobs/e2e.sh). The throw-away
+# credentials are in $WORK/env/compute.env (office-pc, port 7001) and $WORK/env/workstation.env (avi-mac); the test
+# CA is $WORK/certs/ca.crt. Clients on this machine reach https://relay.martand.systems once /etc/hosts sends that name
+# to 127.0.0.1 (the caller's job; this script never touches the host's files).
+relay_only() {
+  down; guard; setup relay-only
+  dc_main up -d --build --remove-orphans >> "$WORK/logs/compose.log" 2>&1 || die "the relay did not start"
+  local i
+  for i in $(seq 1 120); do
+    [ "$(curl -s -m 3 --cacert "$WORK/certs/ca.crt" --resolve "$HOST:443:127.0.0.1" "https://$HOST/health" 2>/dev/null)" = OK ] && {
+      echo "relay up: https://$HOST (Traefik v$TRAEFIK_VERSION), credentials in $WORK/env/"; return 0; }
+    sleep 1
+  done
+  die "the relay did not answer https://$HOST/health within 120 s"
 }
 
 # ------------------------------------------------------------------------------------------------------- tests
@@ -560,8 +578,9 @@ test_reconnect() {
 # -------------------------------------------------------------------------------------------------------- main
 case "${1:-run}" in
   down) down; exit 0 ;;
+  relay) relay_only; exit 0 ;;
   run) ;;
-  *) sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 T_RUN="$(now)"
 down
