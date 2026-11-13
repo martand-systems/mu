@@ -1,0 +1,5 @@
+# Dokploy writes the service's environment (the relay key and the client passwords) to relay/.env, inside this
+# build context. Keep it, and everything the image does not need, out of the context.
+*
+!Dockerfile
+!entrypoint.sh

@@ -1,0 +1,4 @@
+# credentials never go into git (relay/gen-credentials.sh keeps them in ~/.config/mu/relay.env by default)
+.env
+*.env
+!.env.example
