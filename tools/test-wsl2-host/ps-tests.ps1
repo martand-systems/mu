@@ -66,6 +66,7 @@ $changed = @(@('wsl2', 'memory', '23GB'), @('wsl2', 'processors', '20'), @('gene
 eq '.wslconfig: a second run changes nothing' 'False False False' ($changed -join ' ')
 eq '.wslconfig: read a value (names case-insensitive)' '20' (Get-IniValue $l 'WSL2' 'PROCESSORS')
 eq '.wslconfig: a missing value is $null' 'True' ($null -eq (Get-IniValue $l 'wsl2' 'swap'))
+eq '.wslconfig: a repeated key gives the first value (what WSL uses)' '8GB' (Get-IniValue (New-IniLines "[wsl2]`nmemory=8GB`nmemory=16GB`n") 'wsl2' 'memory')
 $e = New-IniLines ''
 [void](Set-IniValue $e 'general' 'instanceIdleTimeout' '-1'); [void](Set-IniValue $e 'wsl2' 'swap' '8GB')
 eq '.wslconfig: from nothing' "[general]`r`ninstanceIdleTimeout=-1`r`n`r`n[wsl2]`r`nswap=8GB`r`n" (ConvertTo-IniText $e)
@@ -155,6 +156,13 @@ eq 'hook log: no preshutdown before this boot' 'warn' ((Get-LastShutdownResult $
 $late = @($clean[0], $clean[1], $clean[2], '2026-11-13T09:21:00.000Z WSLService still StopPending after 80000 ms: giving up (Windows will stop the VM hard)')
 eq 'hook log: gave up' 'fail' ((Get-LastShutdownResult ($late[0..2] + @('2026-11-13T09:20:00.000Z WSLService still StopPending after 80000 ms: giving up (Windows will stop the VM hard)')) $boot)[0])
 eq 'hook log: nothing before this boot' 'info' ((Get-LastShutdownResult @($clean[4]) $boot)[0])
+# whose WSL session a wsl.exe call from here would use
+$svcStart = [datetime]::SpecifyKind([datetime]'2026-11-13 09:20:10', 'Utc')
+eq 'WSL session: WSLService stopped' 'none none' ((Get-WslSessionSource 'Stopped' $null $null 0) + ' ' + (Get-WslSessionSource '' $null $null 0))
+eq 'WSL session: the task ran after WSL started' 'task' (Get-WslSessionSource 'Running' $svcStart $svcStart.AddMinutes(5) 0)
+eq 'WSL session: the task started WSL itself (a moment after its run began)' 'task' (Get-WslSessionSource 'Running' $svcStart $svcStart.AddSeconds(-1) 0)
+eq 'WSL session: WSL restarted after the task last ran' 'unknown' (Get-WslSessionSource 'Running' $svcStart $svcStart.AddMinutes(-3) 0)
+eq 'WSL session: the last run failed, never ran, or WSL is starting' 'unknown unknown unknown' ((Get-WslSessionSource 'Running' $svcStart $svcStart.AddMinutes(1) 1) + ' ' + (Get-WslSessionSource 'Running' $svcStart $null 0x41303) + ' ' + (Get-WslSessionSource 'Start Pending' $svcStart $svcStart.AddMinutes(1) 0))
 eq 'dates: ISO string and DateTime' '2026-11-13T09:20:03Z 2026-11-13T09:20:03Z' ((Format-Utc (ConvertTo-UtcDate '2026-11-13T09:20:03Z')) + ' ' + (Format-Utc (ConvertTo-UtcDate ([datetime]::SpecifyKind([datetime]'2026-11-13 09:20:03', 'Utc')))))
 
 # ---- 3. the shutdown hook's C# (C# 5; compiled here against .NET's reference assemblies, not run)

@@ -344,17 +344,27 @@ static class MuWslShutdown
                     return true;
                 }
                 Log("stopping " + WslServiceName + " (" + st + "): WSL powers its distros off cleanly");
-                if (st != ServiceControllerStatus.StopPending)
-                {
-                    try { sc.Stop(); }
-                    catch (InvalidOperationException e) { Log("stop request failed: " + Inner(e)); }
-                }
+                // A service that is still starting refuses STOP (error 1061): ask again every 2 s until it accepts
+                long lastStop = -2000;
+                bool stopLogged = false;
                 long lastReport = 0;
-                while (sw.ElapsedMilliseconds < WslStopWaitMs)
+                while (true)
                 {
+                    if (st != ServiceControllerStatus.StopPending && sw.ElapsedMilliseconds - lastStop >= 2000)
+                    {
+                        lastStop = sw.ElapsedMilliseconds;
+                        try { sc.Stop(); }
+                        catch (InvalidOperationException e)
+                        {
+                            if (!stopLogged) Log("stop request refused (" + st + "), asking again every 2 s: " + Inner(e));
+                            stopLogged = true;
+                        }
+                    }
+                    if (sw.ElapsedMilliseconds >= WslStopWaitMs) break;
                     Thread.Sleep(500);
                     sc.Refresh();
-                    if (sc.Status == ServiceControllerStatus.Stopped)
+                    st = sc.Status;
+                    if (st == ServiceControllerStatus.Stopped)
                     {
                         Log(WslServiceName + " stopped after " + sw.ElapsedMilliseconds + " ms");
                         return true;
@@ -448,15 +458,16 @@ function ConvertTo-IniText([System.Collections.Generic.List[string]]$Lines) {
   return (($Lines.ToArray()) -join "`r`n") + "`r`n"
 }
 function Get-NormalizedIniValue([string]$Value) { return ($Value -replace '\s', '').ToLowerInvariant() }
-# Get-IniValue: the value of Key in [Section] (names compare case-insensitively), or $null
+# Get-IniValue: the value of Key in [Section] (names compare case-insensitively), or $null. A repeated key gives its
+# first value: WSL uses the first one and warns about the others (configfile.cpp, ConfigKey::Parse)
 function Get-IniValue([System.Collections.Generic.List[string]]$Lines, [string]$Section, [string]$Key) {
-  $cur = $null; $val = $null
+  $cur = $null
   foreach ($l in $Lines) {
     if ($l -match '^\s*\[([^\]]*)\]\s*$') { $cur = $Matches[1].Trim(); continue }
     if ($cur -ne $Section -or $l -match '^\s*[#;]') { continue }
-    if ($l -match '^\s*([^=]+?)\s*=\s*(.*?)\s*$' -and $Matches[1] -eq $Key) { $val = $Matches[2] }
+    if ($l -match '^\s*([^=]+?)\s*=\s*(.*?)\s*$' -and $Matches[1] -eq $Key) { return $Matches[2] }
   }
-  return $val
+  return $null
 }
 # Set-IniValue: sets Key=Value in [Section]; a key already holding this value (ignoring case and spaces) is left as
 # written. A missing key goes after the last non-blank line of the section's first occurrence; a missing section is
@@ -698,11 +709,12 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments) {
   return New-Object PSObject -Property @{ ExitCode = $LASTEXITCODE; Output = @($out) }
 }
 
-# Invoke-Wsl ARGS [-InputBytes BYTES] [-Capture]: runs wsl.exe with an exact command line (UTF-8 output). Without
-# -Capture its output goes straight to this console. Returns ExitCode, Output, Error.
-function Invoke-Wsl([string[]]$Arguments, [byte[]]$InputBytes = $null, [switch]$Capture) {
+# Invoke-Wsl ARGS [-InputBytes BYTES] [-Capture] [-Exe PATH]: runs wsl.exe with an exact command line (UTF-8 output).
+# Without -Capture its output goes straight to this console. Returns ExitCode, Output, Error.
+function Invoke-Wsl([string[]]$Arguments, [byte[]]$InputBytes = $null, [switch]$Capture, [string]$Exe = '') {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $script:WslExe
+  if ($Exe) { $psi.FileName = $Exe }
   $psi.Arguments = (@($Arguments | ForEach-Object { ConvertTo-WinArgument $_ }) -join ' ')
   $psi.UseShellExecute = $false
   $psi.WorkingDirectory = $env:SystemRoot
@@ -758,18 +770,61 @@ function Test-DistroRunning {
   return $false
 }
 
-# Start the distro through the startup task, so that its WSL session comes from session 0 (one started from this
-# signed-in session would end when the user signs out), then wait until it runs
+# WSL keeps one session per Windows user, created by the first wsl.exe call when none exists, and tied to the Windows
+# session of that caller: signing out of that session ends it, and the distro with it. Only a session created from
+# session 0 (the startup task) lasts until WSLService stops. So nothing here may call wsl.exe before the task has.
+# Get-WslSessionSource SERVICESTATE SERVICESTARTUTC TASKLASTRUNUTC TASKRESULT:
+#   'none'     WSLService is stopped: no distro runs (a wsl.exe call would start WSL tied to this sign-in)
+#   'task'     the startup task ran successfully since WSLService started: the session exists and comes from session
+#              0, and a wsl.exe call reuses it
+#   'unknown'  anything else: a wsl.exe call could create the session from here
+function Get-WslSessionSource([string]$ServiceState, $ServiceStartUtc, $TaskLastRunUtc, [int64]$TaskResult) {
+  if ($ServiceState -eq '' -or $ServiceState -eq 'Stopped') { return 'none' }
+  if ($ServiceState -ne 'Running' -or $null -eq $ServiceStartUtc -or $null -eq $TaskLastRunUtc -or $TaskResult -ne 0) { return 'unknown' }
+  # the task's own wsl.exe may have started the service, a moment after its run began
+  if (([datetime]$TaskLastRunUtc) -ge ([datetime]$ServiceStartUtc).AddSeconds(-10)) { return 'task' }
+  return 'unknown'
+}
+function Get-WslSessionState {
+  $state = ''; $start = $null; $last = $null; $res = -1
+  $svc = Get-CimInstance Win32_Service -Filter "Name='WSLService'" -ErrorAction SilentlyContinue
+  if ($svc) {
+    $state = [string]$svc.State
+    if ($svc.ProcessId) {
+      # Win32_Process gives every process's start time, also to a user who is not elevated
+      $p = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$svc.ProcessId)" -ErrorAction SilentlyContinue
+      if ($p -and $p.CreationDate) { $start = ([datetime]$p.CreationDate).ToUniversalTime() }
+    }
+  }
+  try {
+    $info = Get-ScheduledTaskInfo -TaskPath $script:TaskPath -TaskName $script:TaskName -ErrorAction Stop
+    if ($info.LastRunTime) { $last = ([datetime]$info.LastRunTime).ToUniversalTime() }
+    $res = [int64]$info.LastTaskResult
+  } catch { }
+  return (Get-WslSessionSource $state $start $last $res)
+}
+
+# Start the distro through the startup task, so that its WSL session comes from session 0, then wait until it runs.
+# Nothing asks WSL anything from here until the task's run has finished.
 function Start-DistroViaTask([int]$TimeoutSeconds = 120) {
   if (-not (Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName -ErrorAction SilentlyContinue)) { return $false }
+  $busy = ([string](Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName).State -eq 'Running')   # that run counts
+  $t0 = (Get-Date).AddSeconds(-2)
   Start-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName
-  Start-Sleep -Seconds 8   # let the task reach WSL first
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  while ((Get-Date) -lt $deadline) {
+  do {
+    Start-Sleep -Seconds 2
+    $info = Get-ScheduledTaskInfo -TaskPath $script:TaskPath -TaskName $script:TaskName
+    $state = [string](Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName).State
+    $done = ($state -ne 'Running') -and ($busy -or $info.LastRunTime -ge $t0)
+  } while (-not $done -and (Get-Date) -lt $deadline)
+  if (-not $done) { return $false }
+  if ([int64]$info.LastTaskResult -ne 0) { Write-Note ("the startup task's run ended with result 0x{0:X}" -f [int64]$info.LastTaskResult); return $false }
+  while ($true) {
     if (Test-DistroRunning) { return $true }
+    if ((Get-Date) -ge $deadline) { return $false }
     Start-Sleep -Seconds 3
   }
-  return $false
 }
 
 # ============================================================================ state (what to restore on uninstall)
@@ -848,35 +903,95 @@ function Set-PowerSettings {
 }
 
 # ============================================================================ folders (the service exe runs as SYSTEM)
-# SYSTEM and Administrators: full control; Users: read. No inheritance from the drive root, whose default ACL lets
-# every signed-in user modify new folders (a LocalSystem service runs the exe in <MuRoot>\bin).
-function Test-AdminOnlyAcl([string]$Dir) {
-  $acl = Get-Acl -Path $Dir
+# The drive root's default ACL lets every signed-in user create folders in it and modify what they contain, and a
+# folder's creator owns it (and so can change its ACL). <MuRoot> and its folders therefore inherit nothing: SYSTEM and
+# Administrators have full control, Users may read (a LocalSystem service runs the exe in <MuRoot>\bin). <MuRoot>\wsl,
+# which holds the distro's virtual disk (the deploy key, every job file), is not readable by other users at all: only
+# SYSTEM, Administrators and the distro's owner, who needs full control for WSL to grant its VM access to the disk.
+# Each folder's owner must be SYSTEM or Administrators; one created by another user is refused, not taken over.
+$script:SidSystem = 'S-1-5-18'
+$script:SidAdmins = 'S-1-5-32-544'
+$script:SidUsers = 'S-1-5-32-545'
+$script:WriteMask = [int]([System.Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership')
+
+# The managed folders: Path, Name (for status), Full (SIDs with full control), Read (SIDs that may only read),
+# Recurse (reset the ACLs of everything inside too; never for <MuRoot> itself or wsl, where WSL's own entries on the
+# disk file must stay), Why
+function Get-MuDirSpecs {
+  $admin = @($script:SidSystem, $script:SidAdmins)
+  $specs = New-Object System.Collections.ArrayList
+  [void]$specs.Add((New-Object PSObject -Property @{ Path = $MuRoot; Name = 'root'; Full = $admin; Read = @($script:SidUsers); Recurse = $false; Why = 'only administrators and SYSTEM can write' }))
+  foreach ($sub in @('bin', 'host', 'state', 'logs')) {
+    [void]$specs.Add((New-Object PSObject -Property @{ Path = (Join-Path $MuRoot $sub); Name = $sub; Full = $admin; Read = @($script:SidUsers); Recurse = $true; Why = 'only administrators and SYSTEM can write' }))
+  }
+  [void]$specs.Add((New-Object PSObject -Property @{ Path = (Join-Path $MuRoot 'wsl'); Name = 'wsl'; Full = ($admin + @($script:Me.User.Value)); Read = @(); Recurse = $false
+      Why = "only $($script:Me.Name), administrators and SYSTEM can open it (the distro's disk)" }))
+  return ,$specs.ToArray()
+}
+
+function Get-SidName([string]$Sid) {
+  try { return (New-Object System.Security.Principal.SecurityIdentifier($Sid)).Translate([System.Security.Principal.NTAccount]).Value } catch { return $Sid }
+}
+function Get-DirOwner([string]$Dir) { return (Get-Acl -LiteralPath $Dir).GetOwner([System.Security.Principal.SecurityIdentifier]).Value }
+
+# Test-DirAcl: the folder inherits nothing, is owned by SYSTEM or Administrators, every SID in Full has an entry, SIDs
+# in Read have no write rights, and nobody else has an entry
+function Test-DirAcl($Spec) {
+  $acl = Get-Acl -LiteralPath $Spec.Path
   if (-not $acl.AreAccessRulesProtected) { return $false }
-  $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
-  if ($rules.Count -ne 3) { return $false }
-  $writeMask = [int]([System.Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership')
-  foreach ($r in $rules) {
+  $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+  if ($owner -ne $script:SidSystem -and $owner -ne $script:SidAdmins) { return $false }
+  $seen = @{}
+  foreach ($r in @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
     $sid = $r.IdentityReference.Value
     if ([string]$r.AccessControlType -ne 'Allow') { return $false }
-    if ($sid -eq 'S-1-5-32-545') { if (([int]$r.FileSystemRights -band $writeMask) -ne 0) { return $false } }
-    elseif ($sid -ne 'S-1-5-18' -and $sid -ne 'S-1-5-32-544') { return $false }
+    if ($Spec.Full -contains $sid) { $seen[$sid] = $true }
+    elseif ($Spec.Read -contains $sid) { if (([int]$r.FileSystemRights -band $script:WriteMask) -ne 0) { return $false } }
+    else { return $false }
   }
+  foreach ($sid in $Spec.Full) { if (-not $seen.ContainsKey($sid)) { return $false } }
   return $true
 }
-function Set-AdminOnlyAcl([string]$Dir) {
-  # /reset drops explicit entries, /inheritance:r the inherited ones, then the three grants (by SID: any language)
-  $r = Invoke-Native 'icacls.exe' @($Dir, '/reset', '/T', '/Q')
-  if ($r.ExitCode -eq 0) { $r = Invoke-Native 'icacls.exe' @($Dir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX', '/Q') }
-  if ($r.ExitCode -ne 0) { throw "icacls $Dir failed: $($r.Output -join ' ')" }
+function Set-DirAcl($Spec) {
+  # /reset drops explicit entries; /inheritance:r the inherited ones, then the grants (by SID: any language). Without
+  # /T, the entries the files inside inherit are recomputed and their own explicit entries are kept.
+  $t = @(); if ($Spec.Recurse) { $t = @('/T') }
+  $grants = @($Spec.Full | ForEach-Object { "*$($_):(OI)(CI)F" }) + @($Spec.Read | ForEach-Object { "*$($_):(OI)(CI)RX" })
+  $r = Invoke-Native 'icacls.exe' (@($Spec.Path, '/reset') + $t + @('/Q'))
+  if ($r.ExitCode -eq 0) { $r = Invoke-Native 'icacls.exe' (@($Spec.Path, '/inheritance:r', '/grant:r') + $grants + @('/Q')) }
+  if ($r.ExitCode -eq 0) { $r = Invoke-Native 'icacls.exe' (@($Spec.Path, '/setowner', "*$($script:SidAdmins)") + $t + @('/Q')) }
+  if ($r.ExitCode -ne 0) { throw "icacls $($Spec.Path) failed: $($r.Output -join ' ')" }
+}
+# Assert-DirOwner: a folder owned by someone other than SYSTEM, Administrators or the user running this was made by
+# another user, who may have put files in it: refuse
+function Assert-DirOwner([string]$Dir) {
+  $owner = Get-DirOwner $Dir
+  if (@($script:SidSystem, $script:SidAdmins, $script:Me.User.Value) -contains $owner) { return }
+  throw "$Dir belongs to $(Get-SidName $owner): another user created it and may have put files in it. Check it and delete it (or use -MuRoot for another folder), then run install again"
 }
 function Initialize-MuDirs {
-  foreach ($sub in @('bin', 'host', 'state', 'logs')) {
-    $p = Join-Path $MuRoot $sub
-    if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
-    if (-not (Test-AdminOnlyAcl $p)) { Set-AdminOnlyAcl $p; Write-Changed "$p (only administrators and SYSTEM can write)" }
+  foreach ($spec in (Get-MuDirSpecs)) {
+    if (-not (Test-Path -LiteralPath $spec.Path)) { New-Item -ItemType Directory -Force -Path $spec.Path | Out-Null }
+    Assert-DirOwner $spec.Path
+    if (-not (Test-DirAcl $spec)) { Set-DirAcl $spec; Write-Changed "$($spec.Path) ($($spec.Why))" }
   }
 }
+# Get-DiskAclProblem PATH USERSID: who else may read the distro's virtual disk, or $null when only SYSTEM,
+# Administrators, the user and Hyper-V's per-VM accounts (NT VIRTUAL MACHINE, S-1-5-83-...) can
+function Get-DiskAclProblem([string]$Path, [string]$UserSid) {
+  $others = New-Object System.Collections.ArrayList
+  $readMask = [int][System.Security.AccessControl.FileSystemRights]'ReadData, Write, Delete'
+  foreach ($r in @((Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
+    $sid = $r.IdentityReference.Value
+    if ([string]$r.AccessControlType -ne 'Allow' -or ([int]$r.FileSystemRights -band $readMask) -eq 0) { continue }
+    if (@($script:SidSystem, $script:SidAdmins, $UserSid) -contains $sid -or $sid.StartsWith('S-1-5-83-', [StringComparison]::Ordinal)) { continue }
+    $n = Get-SidName $sid
+    if (-not $others.Contains($n)) { [void]$others.Add($n) }
+  }
+  if ($others.Count -eq 0) { return $null }
+  return ($others.ToArray() -join ', ')
+}
+
 # a copy of both scripts in <MuRoot>\host, to run status and uninstall from later
 function Copy-HostScripts {
   $dst = Join-Path $MuRoot 'host'
@@ -892,10 +1007,10 @@ function Copy-HostScripts {
 function Confirm-Wsl {
   if (-not (Test-Path $script:WslExe)) {
     Write-Host '  WSL is not installed: installing it (wsl --install --no-distribution)'
-    $r = Invoke-Native "$env:SystemRoot\System32\wsl.exe" @('--install', '--no-distribution')
-    $r.Output | ForEach-Object { Write-Host "    $_" }
+    # straight to this console: Windows' own wsl.exe writes UTF-16 into a pipe
+    $r = Invoke-Wsl -Exe "$env:SystemRoot\System32\wsl.exe" -Arguments @('--install', '--no-distribution')
     Write-Host ''
-    Write-Host 'Restart Windows, then run this script again.' -ForegroundColor Yellow
+    Write-Host "wsl --install --no-distribution: exit code $($r.ExitCode). Restart Windows, then run this script again." -ForegroundColor Yellow
     return $false
   }
   $v = Get-WslVersion
@@ -914,6 +1029,11 @@ function Confirm-Distro {
   if ($d) {
     if ($d.BasePath -and ($d.BasePath.TrimEnd('\') -ne $Location.TrimEnd('\'))) { Write-Note "$Distro is at $($d.BasePath), not $Location (left where it is)" }
     Write-Same "$Distro is installed ($($d.BasePath))"
+    $disk = Join-Path $d.BasePath 'ext4.vhdx'
+    if ($d.BasePath -and (Test-Path -LiteralPath $disk)) {
+      $who = Get-DiskAclProblem $disk $script:Me.User.Value
+      if ($null -ne $who) { Write-Note "$disk can be read by $who, and it holds the deploy key: move the distro into $(Join-Path $MuRoot 'wsl') (wsl --manage $Distro --move <folder>) or fix its access rules" }
+    }
     return $false
   }
   Write-Host "  installing $Image as $Distro in $Location (a download of a few hundred MB)"
@@ -994,6 +1114,19 @@ function Clear-RunOobe {
   }
 }
 
+# Stop-HookService: stops the hook (STOP never touches WSL) and waits until its process has exited. The SCM reports
+# STOPPED before the process ends, and its exe can't be replaced or deleted while the process still maps it.
+function Stop-HookService {
+  $wmi = Get-CimInstance Win32_Service -Filter "Name='$($script:ServiceName)'"
+  if (-not $wmi) { return }
+  $procId = [int]$wmi.ProcessId
+  if ($wmi.State -ne 'Stopped') {
+    Stop-Service -Name $script:ServiceName
+    (Get-Service -Name $script:ServiceName).WaitForStatus('Stopped', (New-TimeSpan -Seconds 30))
+  }
+  if ($procId -gt 0) { try { Wait-Process -Id $procId -Timeout 30 -ErrorAction SilentlyContinue } catch { } }
+}
+
 function Install-ShutdownHook {
   $bin = Join-Path $MuRoot 'bin'
   $exe = Join-Path $bin 'mu-wsl-shutdown.exe'
@@ -1009,10 +1142,7 @@ function Install-ShutdownHook {
     [IO.File]::WriteAllText("$src.new", $script:ShutdownServiceSource, $script:Utf8)
     $r = Invoke-Native $csc @('/nologo', '/optimize+', '/target:exe', '/platform:anycpu', '/r:System.ServiceProcess.dll', "/out:$newExe", "$src.new")
     if ($r.ExitCode -ne 0 -or -not (Test-Path $newExe)) { throw "building the shutdown hook failed:`n$($r.Output -join "`n")" }
-    if ($svc -and $svc.Status -ne 'Stopped') {
-      Stop-Service -Name $script:ServiceName   # STOP never touches WSL
-      (Get-Service -Name $script:ServiceName).WaitForStatus('Stopped', (New-TimeSpan -Seconds 30))
-    }
+    if ($svc) { Stop-HookService }
     Move-Item -Force -Path $newExe -Destination $exe
     Move-Item -Force -Path "$src.new" -Destination $src
     Write-Changed "$exe built (the in-box C# compiler)"
@@ -1021,7 +1151,7 @@ function Install-ShutdownHook {
   $wmi = Get-CimInstance Win32_Service -Filter "Name='$($script:ServiceName)'"
   if ($wmi -and ($wmi.PathName -ne $wantPath -or $wmi.StartName -ne 'LocalSystem')) {
     Write-Host "  re-creating the service (it runs $($wmi.PathName) as $($wmi.StartName))"
-    if ((Get-Service -Name $script:ServiceName).Status -ne 'Stopped') { Stop-Service -Name $script:ServiceName }
+    Stop-HookService
     [void](Invoke-Native 'sc.exe' @('delete', $script:ServiceName))
     Start-Sleep -Seconds 2
     $wmi = $null
@@ -1106,6 +1236,8 @@ function Invoke-Install {
   if (-not $script:State.installed) { $script:State.installed = Format-Utc (Get-Date) }
   Save-State
 
+  # who owns this user's WSL session before this run's own wsl.exe calls (see Get-WslSessionSource)
+  $sessionBefore = Get-WslSessionState
   Write-Step 'WSL'
   if (-not (Confirm-Wsl)) { return 0 }
   $wasRunning = $false
@@ -1149,6 +1281,10 @@ function Invoke-Install {
   elseif (Start-DistroViaTask) { if ($wasRunning) { Write-Same "$Distro is running (started by the task)" } else { Write-Host "  $Distro started by the task" } }
   else { Write-Note "$Distro did not start through the task within 2 minutes: check the task (status)" }
 
+  if ($sessionBefore -ne 'task') {
+    Write-Note "WSL may have been started for $($script:Me.Name) from this sign-in (by this install) rather than by the startup task: then signing out stops $Distro until the task starts it again (within 5 minutes). To hand it to the task now: restart Windows, or run test-stop"
+  }
+
   Write-Host ''
   $n = $script:Changes.Count + [int]$res.changed
   if ($n -eq 0) { Write-Host 'Nothing to change: this PC is already set up as a mu compute node.' -ForegroundColor Green }
@@ -1170,16 +1306,23 @@ function Invoke-Status {
     Add-Check 'info' 'sign-in' "first sign-in since startup $(Format-Utc $ex[0].StartTime) ($mins min after startup)"
   } else { Add-Check 'info' 'sign-in' 'nobody is signed in' }
 
-  # WSL and the distro
-  $running = $false
+  # WSL and the distro. wsl.exe is called only when the startup task has run since WSL started: otherwise the call
+  # could create this user's WSL session from this sign-in, and signing out would then stop the distro.
+  $running = $false; $d = $null
   if (Test-Path $script:WslExe) {
-    $v = Get-WslVersion
+    $v = Get-WslVersion   # the file's version, else wsl --version (which does not start WSL)
     if ($v -ge [version]'2.5.4') { Add-Check 'pass' 'wsl' "WSL $v" } else { Add-Check 'fail' 'wsl' "WSL $v is older than 2.5.4 (wsl --update)" }
     $d = Get-WslDistro $Distro
     if ($d) {
       Add-Check 'pass' 'distro' "$Distro at $($d.BasePath)"
-      $running = Test-DistroRunning
-      if ($running) { Add-Check 'pass' 'distro.running' "$Distro is running" } else { Add-Check 'fail' 'distro.running' "$Distro is not running (the startup task starts it within 5 minutes)" }
+      switch (Get-WslSessionState) {
+        'none' { Add-Check 'fail' 'distro.running' "$Distro is not running: WSLService is stopped (the startup task starts it within 5 minutes)" }
+        'task' {
+          $running = Test-DistroRunning
+          if ($running) { Add-Check 'pass' 'distro.running' "$Distro is running" } else { Add-Check 'fail' 'distro.running' "$Distro is not running (the startup task starts it within 5 minutes)" }
+        }
+        default { Add-Check 'warn' 'distro.running' "unknown: the startup task has not run successfully since WSL started, and asking WSL from here could tie it to this sign-in. It runs every 5 minutes; or now: Start-ScheduledTask -TaskPath \mu\ -TaskName mu-compute" }
+      }
     } else { Add-Check 'fail' 'distro' "no distro named $Distro for $($script:Me.Name)" }
   } else { Add-Check 'fail' 'wsl' "WSL is not installed ($($script:WslExe))" }
 
@@ -1241,9 +1384,6 @@ function Invoke-Status {
       $src = Join-Path (Join-Path $MuRoot 'bin') 'mu-wsl-shutdown.cs'
       if ((Test-Path $src) -and ([IO.File]::ReadAllText($src) -ceq $script:ShutdownServiceSource)) { Add-Check 'pass' 'hook.build' 'built from the current source' }
       else { Add-Check 'warn' 'hook.build' 'built from another version of this script (run install)' }
-      $bin = Join-Path $MuRoot 'bin'
-      if ((Test-Path $bin) -and (Test-AdminOnlyAcl $bin)) { Add-Check 'pass' 'hook.acl' "$bin (only administrators and SYSTEM can write)" }
-      else { Add-Check 'fail' 'hook.acl' "$bin is writable by non-administrators (run install)" }
       $log = Join-Path (Join-Path $MuRoot 'logs') 'mu-wsl-shutdown.log'
       if (Test-Path $log) {
         $r = Get-LastShutdownResult @(Get-Content -Path $log -Tail 400) $bootUtc
@@ -1260,6 +1400,25 @@ function Invoke-Status {
     }
   }
   } catch { Add-Check 'fail' 'hook' "could not check the hook: $($_.Exception.Message)" }
+
+  # folders: who can write <MuRoot>\bin (run by a SYSTEM service) and read <MuRoot>\wsl (the distro's disk)
+  foreach ($spec in (Get-MuDirSpecs)) {
+    if (-not (Test-Path -LiteralPath $spec.Path)) { continue }
+    try {
+      if (Test-DirAcl $spec) { Add-Check 'pass' "folder.$($spec.Name)" "$($spec.Path) ($($spec.Why))" }
+      else { Add-Check 'fail' "folder.$($spec.Name)" "$($spec.Path): other users can change it, or it inherits the drive's access rules (run install)" }
+    } catch { Add-Check 'fail' "folder.$($spec.Name)" "could not read the access rules of $($spec.Path): $($_.Exception.Message)" }
+  }
+  if ($d -and $d.BasePath) {
+    $disk = Join-Path $d.BasePath 'ext4.vhdx'
+    if (Test-Path -LiteralPath $disk) {
+      try {
+        $who = Get-DiskAclProblem $disk $script:Me.User.Value
+        if ($null -eq $who) { Add-Check 'pass' 'distro.disk' "$disk (only $($script:Me.Name), administrators and SYSTEM can read it)" }
+        else { Add-Check 'fail' 'distro.disk' "$disk can be read by $who (it holds the deploy key: move the distro into $(Join-Path $MuRoot 'wsl') or fix its access rules)" }
+      } catch { Add-Check 'info' 'distro.disk' "could not read the access rules of ${disk}: $($_.Exception.Message)" }
+    }
+  }
 
   # inside the distro (only when it runs: starting it from here would tie its WSL session to this sign-in)
   if ($running) {
@@ -1340,7 +1499,7 @@ function Invoke-Uninstall {
 
   Write-Step 'Shutdown hook'
   if (Get-Service -Name $script:ServiceName -ErrorAction SilentlyContinue) {
-    if ((Get-Service -Name $script:ServiceName).Status -ne 'Stopped') { Stop-Service -Name $script:ServiceName }   # STOP never touches WSL
+    Stop-HookService
     $r = Invoke-Native 'sc.exe' @('delete', $script:ServiceName)
     if ($r.ExitCode -ne 0) { Write-Note "sc.exe delete: $($r.Output -join ' ')" } else { Write-Changed "service $($script:ServiceName) removed" }
   } else { Write-Same 'no shutdown hook service' }
@@ -1439,6 +1598,30 @@ function Test-Admin {
   return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# Get-RelaunchArguments SCRIPT: powershell.exe arguments that run SCRIPT with this run's action and parameters
+function Get-RelaunchArguments([string]$ScriptPath) {
+  $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, '-Action', $Action)
+  foreach ($k in @($script:BoundParams.Keys)) {
+    if ($k -eq 'Action' -or $k -eq 'Elevated') { continue }
+    $v = $script:BoundParams[$k]
+    if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $argv += "-$k" } }
+    else { $argv += "-$k"; $argv += [string]$v }
+  }
+  return ,$argv
+}
+
+# 32-bit Windows PowerShell on 64-bit Windows sees another Program Files, System32 and registry: run this script again
+# in the 64-bit one (in this window)
+function Invoke-As64Bit {
+  $ps = "$env:SystemRoot\sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  if (-not (Test-Path $ps)) { throw "this is 32-bit PowerShell and the 64-bit one was not found ($ps): run the script from the 64-bit Windows PowerShell" }
+  $argv = Get-RelaunchArguments $script:SelfPath
+  if ($Elevated) { $argv += '-Elevated' }
+  Write-Host 'mu-wsl2-host: continuing in 64-bit Windows PowerShell'
+  $p = Start-Process -FilePath $ps -ArgumentList (@($argv | ForEach-Object { ConvertTo-WinArgument $_ }) -join ' ') -NoNewWindow -Wait -PassThru
+  return $p.ExitCode
+}
+
 # restart this script elevated (UAC), with the same parameters; from a UNC path (\\wsl.localhost\...), a local copy
 function Invoke-Elevated {
   $src = $script:SelfPath
@@ -1450,13 +1633,7 @@ function Invoke-Elevated {
     if (Test-Path $sib) { Copy-Item -Path $sib -Destination $tmp }
     $src = Join-Path $tmp (Split-Path $src -Leaf)
   }
-  $argv = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $src, '-Action', $Action)
-  foreach ($k in @($script:BoundParams.Keys)) {
-    if ($k -eq 'Action' -or $k -eq 'Elevated') { continue }
-    $v = $script:BoundParams[$k]
-    if ($v -is [System.Management.Automation.SwitchParameter]) { if ($v.IsPresent) { $argv += "-$k" } }
-    else { $argv += "-$k"; $argv += [string]$v }
-  }
+  $argv = Get-RelaunchArguments $src
   $argv += '-Elevated'
   $line = (@($argv | ForEach-Object { ConvertTo-WinArgument $_ }) -join ' ')
   $exe = (Get-Process -Id $PID).Path
@@ -1464,6 +1641,12 @@ function Invoke-Elevated {
   try { $p = Start-Process -FilePath $exe -ArgumentList $line -Verb RunAs -Wait -PassThru }
   catch { Write-Host "mu-wsl2-host: not elevated ($($_.Exception.Message))" -ForegroundColor Red; return 1 }
   return $p.ExitCode
+}
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and [Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+  $rc = 1
+  try { $rc = [int](Invoke-As64Bit) } catch { Write-Host "mu-wsl2-host: $($_.Exception.Message)" -ForegroundColor Red }
+  exit $rc
 }
 
 $rc = 1

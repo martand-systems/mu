@@ -27,7 +27,8 @@ elevation itself:
   (see [GitHub access](#github-access-the-one-manual-step)). Add the key, then run `install` again: the second run
   clones the repo.
 - Add `-InstallMu` to also install μ in the distro: `install.sh --system --user mu` as root, then `./install.sh` as
-  `mu`. The first install takes 1–2 h, mostly downloads.
+  `mu`. The first install takes 1–2 h, mostly downloads. Once `~mu/.local/bin/mu` exists, later runs skip this step:
+  μ updates itself.
 - Add `-Heartbeat on` for the reboot tests below.
 - Each elevated run is logged to `C:\Mu\logs\wsl2-host-<action>-<time>.log`.
 
@@ -75,7 +76,8 @@ pass new ones.
 | Automatic sign-in after updates (ARSO) | off (`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` `DisableAutomaticRestartSignOn=1`) | WSL ties a user's session to the Windows session that started it first. An automatic sign-in could start it from an interactive session that is later signed out, which would end the distro. It also made the first S3 reboot test inconclusive |
 | Service `mu-wsl-shutdown` (the shutdown hook) | LocalSystem, automatic, restarts after a failure; `C:\Mu\bin\mu-wsl-shutdown.exe`, compiled here from the C# inside the script with Windows' own .NET Framework compiler | See below |
 | `HKLM\SYSTEM\CurrentControlSet\Control\PreshutdownOrder` | `mu-wsl-shutdown` first | Services listed there get the shutdown notice before the others |
-| `C:\Mu\bin`, `host`, `state`, `logs` | writable only by Administrators and SYSTEM | `C:\` lets every user modify new folders, and a SYSTEM service runs the exe in `C:\Mu\bin` |
+| `C:\Mu` and its `bin`, `host`, `state`, `logs` | writable only by Administrators and SYSTEM, owned by Administrators | `C:\` lets every user create folders and modify new ones, and a SYSTEM service runs the exe in `C:\Mu\bin`. A `C:\Mu` created by another user is refused, not taken over |
+| `C:\Mu\wsl` (the distro's disk) | only you, Administrators and SYSTEM; nobody else can even read it | The disk holds the deploy key and every job file. You need full control: WSL grants the VM access to the disk as you. WSL's own entries on the disk file are kept |
 
 ### The shutdown hook
 
@@ -94,21 +96,22 @@ At every start the service sets its own preshutdown timeout to 90 s (Windows' de
 `PreshutdownOrder`. Stopping the service by hand, uninstalling it or reinstalling it never touches WSL.
 
 WSL gives systemd 10 s (`[boot] initTimeout`) to power off. Stock Ubuntu can run over that (WSL issue #42237), which is
-why the distro gets `DefaultTimeoutStopSec=8s`. Even when it runs over, WSL still syncs the disk before it powers the
+why the distro's services get 8 s to stop, `mu`'s user services included (linger keeps them running). Even when it runs over, WSL still syncs the disk before it powers the
 VM off, so no cached data is lost.
 
 ## What it changes inside the distro (`mu-wsl2-distro.sh`, as root)
 
 | | |
 |---|---|
-| `/etc/wsl.conf` | `[boot] systemd=true`, `[user] default=mu`, `[interop] appendWindowsPath=false`, merged. The original is saved in `/var/lib/mu-wsl2/`, and uninstall puts it back |
+| `/etc/wsl.conf` | `[boot] systemd=true`, `[user] default=mu`, `[interop] appendWindowsPath=false`, merged. If this changes the file, the original is saved in `/var/lib/mu-wsl2/` and uninstall puts it back. A file that already has these values is left alone, and uninstall leaves it too |
 | user `mu` | a normal user, not in `sudo`. Admin work: `wsl -d mu-compute -u root` |
 | `/etc/sysctl.d/60-mu-writeback.conf` | `vm.dirty_expire_centisecs=500`, `vm.dirty_writeback_centisecs=100`. Data left in the page cache by a hard stop is now at most about 6 s old instead of about 35 s. This narrows the window but does not close it; only `fsync` does. It applies to the whole WSL VM |
 | `/etc/systemd/journald.conf.d/60-mu.conf` | `SyncIntervalSec=30s` |
 | `/etc/systemd/system.conf.d/60-mu-stop.conf` | `DefaultTimeoutStopSec=8s`. WSL gives systemd 10 s (`initTimeout`, left at its default) to power off |
+| `/etc/systemd/user.conf.d/60-mu-stop.conf`, `/etc/systemd/system/user@.service.d/60-mu-stop.conf` | `DefaultTimeoutStopSec=8s` for user services, `TimeoutStopSec=9s` for each user's service manager. The system setting does not reach them: `user@.service` has its own 120 s, user services 90 s |
 | `mu-clean-stop.service` | When systemd stops, it writes and fsyncs `/var/lib/mu-wsl2/clean-stop`. At the next start it appends `previous-stop=clean`, `unclean` or `first` to `/var/lib/mu-wsl2/stops.log`. This is how a restart nobody watched is judged |
 | linger for `mu` | `mu`'s systemd user services, such as μ's auto-update timer, run without a login |
-| `~mu/.ssh/mu_github` | ed25519 key. `~/.ssh/config` maps `github.com` to it. `known_hosts` pins GitHub's ed25519 key from `api.github.com/meta`, cross-checked with `ssh-keyscan` |
+| `~mu/.ssh/mu_github` | ed25519 key, made once. If only `mu_github.pub` is missing, it is rebuilt from the key. A block at the top of `~/.ssh/config`, between `# >>> mu-wsl2` and `# <<< mu-wsl2`, maps `github.com` to it. `known_hosts` pins GitHub's ed25519 key from `api.github.com/meta`, cross-checked with `ssh-keyscan` |
 | `/home/mu/mu` | the clone, once the key works. An existing clone is never touched again: μ updates itself |
 | `/usr/local/sbin/mu-wsl2-distro` | the script itself, so you can run `wsl -d mu-compute -u root -- mu-wsl2-distro status` |
 
@@ -137,9 +140,13 @@ checks the key and clones. `status` reports `linux.github` as PASS once `mu` can
 - `vm.processors` and `vm.memory`: whether the VM really got the `.wslconfig` values;
 - `vm.started`: how long after Windows started the distro came up;
 - `sign-in`: when someone first signed in after startup;
+- `folder.*` and `distro.disk`: who can write `C:\Mu` and its folders, and who can read the distro's disk;
+- `distro.running`: WARN "unknown" when the startup task has not run since WSL started. `status` then does not ask WSL
+  (that would tie WSL to your sign-in, see [Known limits](#known-limits)); the checks inside the distro are skipped;
 - `linux.last-stop`: whether the distro's previous stop was clean;
-- `linux.heartbeat.*`: when the heartbeat is on, NUL bytes (FAIL: data lost) and gaps longer than 90 s (WARN: one per
-  restart is expected) in `/home/mu/heartbeat.log`.
+- `linux.heartbeat.*`: only while the heartbeat is on. NUL bytes from the stop just before the distro's current start
+  are a FAIL (data lost); older ones are listed as `heartbeat.nul-old` (INFO), so each restart is judged on its own.
+  Gaps longer than 90 s are a WARN: one per restart is expected.
 
 Inside the distro: `wsl -d mu-compute -u root -- mu-wsl2-distro status` (`--json`, `--offline`, `--gap SECONDS`).
 
@@ -148,15 +155,23 @@ Inside the distro: `wsl -d mu-compute -u root -- mu-wsl2-distro status` (`--json
     powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 uninstall
 
 This removes the task, the service and its `PreshutdownOrder` entry, and inside the distro the drop-ins, the units and
-`/usr/local/sbin/mu-wsl2-distro`. It puts back `/etc/wsl.conf`. It restores every Windows setting it changed to the value
-recorded in `C:\Mu\state\wsl2-host.json` before its first change: power, Fast Startup, ARSO, and each `.wslconfig` key
-(keys that were absent are removed). Run `wsl --shutdown` afterwards for `.wslconfig` to apply.
+`/usr/local/sbin/mu-wsl2-distro`. It puts back `/etc/wsl.conf` only if install changed it (a file that already had the
+values stays as it is). It restores every Windows setting it changed to the value recorded in
+`C:\Mu\state\wsl2-host.json` before its first change: power, Fast Startup, ARSO, and each `.wslconfig` key (keys that
+were absent are removed). Run `wsl --shutdown` afterwards for `.wslconfig` to apply. The access rules of `C:\Mu` stay.
 
 It keeps the distro with the user `mu`, its key, the clone and μ; `C:\Mu\logs`; and linger for `mu`. Add `-RemoveDistro`
-to delete the distro: it asks you to type the distro's name.
+to delete the distro: it asks you to type the distro's name. Also kept inside the distro, to remove by hand if wanted
+(as root: `wsl -d mu-compute -u root`):
 
-On the office PC the S3 settings were made by hand before this script existed. The script recorded those hand-made
-values as the "previous" ones, so `uninstall` leaves them as they are. To change them by hand:
+- the `github.com` block in `~mu/.ssh/config`: the lines from `# >>> mu-wsl2` to `# <<< mu-wsl2`;
+- GitHub's key in `~mu/.ssh/known_hosts`: `ssh-keygen -R github.com -f ~mu/.ssh/known_hosts`;
+- `/var/lib/mu-wsl2/stops.log`, the record of clean and unclean stops;
+- linger: `loginctl disable-linger mu`.
+
+On the office PC the S3 settings were made by hand before this script existed. Where a hand-made value already
+matches, install changes nothing and records nothing, so `uninstall` leaves it as it is: the power settings, ARSO,
+`.wslconfig` and `/etc/wsl.conf`. To change the Windows ones by hand:
 `powercfg /change standby-timeout-ac <minutes>`, `powercfg /change hibernate-timeout-ac <minutes>`,
 `HiberbootEnabled=1` (Fast Startup on), and delete `DisableAutomaticRestartSignOn` (ARSO back to its default).
 
@@ -165,7 +180,8 @@ values as the "previous" ones, so `uninstall` leaves them as they are. To change
 Turn the heartbeat on first: `install -Heartbeat on`. It appends the UTC time to `/home/mu/heartbeat.log` every 60 s,
 without fsync, like most tools do. Each test ends with `status`. Three checks decide it:
 
-- `linux.heartbeat.nul`: no NUL bytes;
+- `linux.heartbeat.nul`: no NUL bytes from the stop that the test made (NUL bytes from earlier stops, such as the 21
+  from S3, show up as `linux.heartbeat.nul-old`, INFO);
 - `linux.last-stop`: a clean stop;
 - `hook.last-shutdown`: the hook stopped WSL. Also check `hook.event-7043`.
 
@@ -177,7 +193,8 @@ without fsync, like most tools do. Each test ends with `status`. Three checks de
 
 2. **Stop WSL as SYSTEM, without a restart:** `mu-wsl2-host.ps1 test-stop`. Expect `last-stop: clean`, no NUL bytes,
    and in the distro no ext4 journal recovery at the new start: `wsl -d mu-compute -u root -- dmesg | grep -i 'EXT4.*recover'`
-   prints nothing.
+   prints nothing. This also hands WSL to the startup task: after an install that started WSL from your sign-in
+   (install says so), the next tests are only valid after this step or a restart.
 3. **Baseline, without the hook.** `Stop-Service mu-wsl-shutdown` (it stays stopped until the next boot), then
    `shutdown /r /t 0`. After the restart, `status` should show `last-stop: UNCLEAN` and `hook.last-shutdown: WARN` (no
    preshutdown logged), and possibly NUL bytes. This shows the detector works.
@@ -198,10 +215,13 @@ without fsync, like most tools do. Each test ends with `status`. Three checks de
   are tested on macOS by `tools/test-wsl2-host/run.sh`. That covers the `wsl.conf`/`.wslconfig` merges, heartbeat
   analysis, the task definition and its comparison, quoting, the PowerShell 5.1 syntax check, and a C# 5 compile of
   the hook.
-- **Who started WSL decides when it ends.** WSL keeps one session per Windows user, tied to the Windows session that
-  created it. If you sign in and run `wsl` before the startup task has run, signing out later stops the distro. The
-  watchdog starts it again within 5 minutes. `install` starts the distro through the task for this reason, and
-  `status` never starts it.
+- **Who started WSL decides when it ends.** WSL keeps one session per Windows user, created by the first `wsl.exe`
+  call when none exists and tied to the Windows session of that caller. If you sign in and run `wsl` before the
+  startup task has run (or after a WSL update restarted WSL), signing out later stops the distro. The watchdog
+  starts it again within 5 minutes. For this reason `install` starts the distro through the task and waits for the
+  task's run to finish before it asks WSL anything. `status` calls `wsl.exe` only when the task has run successfully
+  since WSL last started. `install` itself has to call `wsl.exe`: when WSL was not already running from the task, it
+  says so at the end, and `test-stop` or a restart hands WSL to the task.
 - **A watchdog run during shutdown:** if the 5-minute run falls in the seconds between the hook's stop and the end of
   shutdown, it can start WSL again, and that brief instance is then stopped hard. This is accepted, and the watchdog is
   never disabled.

@@ -14,9 +14,10 @@
 #   --branch REF         branch or tag to clone (default: the repo's default branch)
 #   --clone              clone the repo into ~NAME/mu once the deploy key works (never updates an existing clone)
 #   --install-mu         then install μ: install.sh --system --user NAME as root, then ./install.sh as NAME (implies
-#                        --clone; the first install takes 1-2 h, mostly downloads)
+#                        --clone; the first install takes 1-2 h, mostly downloads). Skipped once ~NAME/.local/bin/mu
+#                        exists: μ updates itself
 #   --heartbeat on|off   install / remove mu-heartbeat.service, a test aid that appends the UTC time to
-#                        ~NAME/heartbeat.log every 60 s (the log is kept; status analyses it)
+#                        ~NAME/heartbeat.log every 60 s (the log is kept; status analyses it while the unit is on)
 #   --json               status: one JSON object on stdout
 #   --offline            status: skip the network check (GitHub access)
 #   --gap SECONDS        status: report heartbeat gaps longer than this (default 90)
@@ -30,7 +31,8 @@
 #                        (a file can come back with its size updated and NUL bytes instead of data). This shrinks that
 #                        window from about 35 s to about 6 s; it does not close it (only fsync does)
 #   journald             SyncIntervalSec=30s (the journal of the last minutes survives a hard stop)
-#   stop timeouts        DefaultTimeoutStopSec=8s: WSL gives systemd 10 s ([boot] initTimeout) to power off
+#   stop timeouts        DefaultTimeoutStopSec=8s for system and user services, TimeoutStopSec=9s for user@.service:
+#                        WSL gives systemd 10 s ([boot] initTimeout) to power off
 #   mu-clean-stop.service  writes and fsyncs /var/lib/mu-wsl2/clean-stop when systemd stops; at the next start it logs
 #                        whether the previous stop was clean to /var/lib/mu-wsl2/stops.log
 #   linger               NAME's systemd user services (μ auto-update) run without a login
@@ -46,6 +48,9 @@ REPO="git@github.com:martand-systems/mu.git"
 BRANCH=""; CLONE=0; INSTALL_MU=0; HEARTBEAT=""; JSON=0; OFFLINE=0; GAP=90
 STATE_DIR="/var/lib/mu-wsl2"
 SELF_PATH="/usr/local/sbin/mu-wsl2-distro"
+# this file, resolved now: main does `cd /` later, and a relative path (./mu-wsl2-distro.sh) would then point elsewhere
+SELF_SRC="$(readlink -f "${BASH_SOURCE[0]}" 2> /dev/null || true)"
+[ -n "$SELF_SRC" ] || SELF_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 MARK_BEGIN="# >>> mu-wsl2: GitHub access for mu (managed by mu-wsl2-distro; edits inside this block are replaced)"
 MARK_END="# <<< mu-wsl2"
 
@@ -94,28 +99,31 @@ ini_set() {
     }'
 }
 
-# ini_get SECTION KEY < in: prints the value of KEY in [SECTION] (the last one if repeated); nothing if absent
+# ini_get SECTION KEY < in: prints the value of KEY in [SECTION] (the first one if repeated: WSL uses the first and
+# warns about the others); nothing if absent
 ini_get() {
   LC_ALL=C awk -v sec="$1" -v key="$2" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
     BEGIN { want = tolower(sec); k = tolower(key); insec = 0; found = 0 }
     /^[ \t]*\[[^]]*\][ \t\r]*$/ { s = trim($0); insec = (tolower(trim(substr(s, 2, length(s) - 2))) == want); next }
-    insec && $0 !~ /^[ \t]*[#;]/ && index($0, "=") > 0 {
+    !found && insec && $0 !~ /^[ \t]*[#;]/ && index($0, "=") > 0 {
       if (tolower(trim(substr($0, 1, index($0, "=") - 1))) == k) { v = trim(substr($0, index($0, "=") + 1)); found = 1 }
     }
     END { if (found) print v }'
 }
 
-# hb_analyze GAP_SECONDS < heartbeat.log: one record per line, tab-separated:
+# hb_analyze GAP_SECONDS [SINCE_EPOCH] < heartbeat.log: one record per line, tab-separated:
 #   lines N | valid N | first TS | last TS | last_epoch N | nul BYTES
 #   nulline LINE COUNT PREV_TS NEXT_TS   a line holding NUL bytes: data lost by an unclean stop (its size was written,
-#                                        its data was not). NEXT_TS is a timestamp written after them on the same line
+#                                        its data was not). NEXT_TS is the first timestamp written after them ("-": none
+#                                        yet), the first heartbeat after the restart that followed that stop
+#   nulold LINE COUNT PREV_TS NEXT_TS    the same, for a stop before SINCE_EPOCH (NEXT_TS earlier than it)
 #   gap PREV_TS NEXT_TS SECONDS          consecutive timestamps further apart than GAP_SECONDS
 #   back PREV_TS NEXT_TS                 time went backwards
 #   bad LINE TEXT                        a line that is not a timestamp (torn write, or not written by the heartbeat)
 # Timestamps are `date -u +%FT%TZ`. No mktime: portable to mawk, gawk and BSD awk.
 hb_analyze() {
-  LC_ALL=C tr '\000' '\001' | LC_ALL=C awk -v gap="${1:-90}" -v soh="$(printf '\001')" '
+  LC_ALL=C tr '\000' '\001' | LC_ALL=C awk -v gap="${1:-90}" -v since="${2:-0}" -v soh="$(printf '\001')" '
     function epoch(ts,   y, mo, d, h, mi, s, yy, era, yoe, mm, doy, doe) {
       y = substr(ts, 1, 4) + 0; mo = substr(ts, 6, 2) + 0; d = substr(ts, 9, 2) + 0
       h = substr(ts, 12, 2) + 0; mi = substr(ts, 15, 2) + 0; s = substr(ts, 18, 2) + 0
@@ -134,7 +142,8 @@ hb_analyze() {
       if (l == "") { if (n == 0) print "bad\t" NR "\t(empty line)"; next }
       if (!is_ts(l)) { print "bad\t" NR "\t" clean(l); next }
       e = epoch(l)
-      for (i = 1; i <= npend; i++) print "nulline\t" pend_line[i] "\t" pend_n[i] "\t" (pend_prev[i] == "" ? "-" : pend_prev[i]) "\t" l
+      kind = (e < since + 0) ? "nulold" : "nulline"
+      for (i = 1; i <= npend; i++) print kind "\t" pend_line[i] "\t" pend_n[i] "\t" (pend_prev[i] == "" ? "-" : pend_prev[i]) "\t" l
       npend = 0
       if (prev != "") {
         if (e < pe) print "back\t" prev "\t" l
@@ -174,6 +183,19 @@ ssh_config_merge() {
 # repo_slug URL: OWNER/REPO for a GitHub URL (ssh or https), or nothing
 repo_slug() {
   printf '%s\n' "$1" | sed -n -E 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)([^/]+/[^/]+)$#\2#p' | sed 's/\.git$//'
+}
+
+# git_error_class < git's stderr: "denied: <reason>" or "unreachable: <reason>". The reason is the line that says what
+# went wrong: git always ends with the same "Please make sure you have the correct access rights" trailer
+git_error_class() {
+  local all why
+  all="$(cat)"
+  why="$(printf '%s\n' "$all" | grep -m 1 -E 'Permission denied|Repository not found|Host key verification failed|Could not resolve|timed out|Connection refused|Connection closed|Network is unreachable|No route to host' || true)"
+  [ -n "$why" ] || why="$(printf '%s\n' "$all" | grep -v '^[[:space:]]*$' | head -n 1 || true)"
+  case "$why" in
+    *"Permission denied"*|*"Repository not found"*) echo "denied: $why" ;;
+    *) echo "unreachable: ${why:-timed out}" ;;
+  esac
 }
 
 # installsh_supports_user FILE: does this install.sh (the real one, install/install.sh) take --system --user NAME?
@@ -240,11 +262,7 @@ repo_access() {
   local err; err="$(mktemp)"
   if timeout 60 runuser -u "$MU_USER" -- env HOME="$(user_home "$MU_USER")" "$GIT_SSH_ENV" GIT_TERMINAL_PROMPT=0 \
        git ls-remote --heads "$REPO" > /dev/null 2> "$err"; then rm -f "$err"; echo ok; return 0; fi
-  local why; why="$(grep -v '^[[:space:]]*$' "$err" | tail -n 1)"; rm -f "$err"
-  case "$why" in
-    *"Permission denied"*|*"not found"*|*"Repository not found"*|*"access rights"*) echo "denied: ${why:-no detail}" ;;
-    *) echo "unreachable: ${why:-timed out}" ;;
-  esac
+  git_error_class < "$err"; rm -f "$err"
   return 0
 }
 
@@ -305,6 +323,8 @@ ensure_wsl_conf() {
 WRITEBACK_CONF=/etc/sysctl.d/60-mu-writeback.conf
 JOURNALD_CONF=/etc/systemd/journald.conf.d/60-mu.conf
 STOPTIMEOUT_CONF=/etc/systemd/system.conf.d/60-mu-stop.conf
+USER_STOPTIMEOUT_CONF=/etc/systemd/user.conf.d/60-mu-stop.conf
+USER_AT_STOPTIMEOUT_CONF=/etc/systemd/system/user@.service.d/60-mu-stop.conf
 CLEANSTOP_UNIT=/etc/systemd/system/mu-clean-stop.service
 HEARTBEAT_UNIT=/etc/systemd/system/mu-heartbeat.service
 
@@ -344,12 +364,30 @@ DefaultTimeoutStopSec=8s
 EOF
     changed "$STOPTIMEOUT_CONF: units get 8 s to stop (applies at the next start)"; RESTART=1
   else same "$STOPTIMEOUT_CONF"; fi
+  # the system setting does not reach the user managers (linger keeps $MU_USER's running): user@.service sets its own
+  # 120 s, and units inside a user manager use /etc/systemd/user.conf (90 s)
+  if put_file "$USER_STOPTIMEOUT_CONF" 0644 <<'EOF'; then
+# mu (mu-wsl2-distro): user services (mu's, kept running by linger) get 8 s to stop instead of 90 s, like system units
+[Manager]
+DefaultTimeoutStopSec=8s
+EOF
+    changed "$USER_STOPTIMEOUT_CONF: user services get 8 s to stop (applies at the next start)"; RESTART=1
+  else same "$USER_STOPTIMEOUT_CONF"; fi
+  if put_file "$USER_AT_STOPTIMEOUT_CONF" 0644 <<'EOF'; then
+# mu (mu-wsl2-distro): a user's service manager gets 9 s to stop instead of 120 s (its units get 8 s, user.conf.d)
+[Service]
+TimeoutStopSec=9s
+EOF
+    changed "$USER_AT_STOPTIMEOUT_CONF: a user's service manager gets 9 s to stop"
+    if systemd_running; then systemctl daemon-reload; else RESTART=1; fi
+  else same "$USER_AT_STOPTIMEOUT_CONF"; fi
 }
 
 # the script itself, where the units find it
 ensure_self() {
-  local me; me="$(readlink -f "${BASH_SOURCE[0]}")"
+  local me="$SELF_SRC"
   [ "$me" = "$SELF_PATH" ] && { same "$SELF_PATH"; return 0; }
+  [ -r "$me" ] || die "cannot read this script at $me to install it as $SELF_PATH"
   if put_file "$SELF_PATH" 0755 < "$me"; then changed "$SELF_PATH installed"; else same "$SELF_PATH"; fi
 }
 
@@ -408,8 +446,14 @@ ensure_ssh() {
   home="$(user_home "$MU_USER")"; grp="$(id -gn "$MU_USER")"; ssh="$home/.ssh"; key="$ssh/mu_github"
   install -d -m 700 -o "$MU_USER" -g "$grp" "$ssh"
   if [ -f "$key" ] && [ -f "$key.pub" ]; then same "ssh key $key"
+  elif [ -f "$key" ] && ssh-keygen -y -P '' -f "$key" > "$key.pub.tmp" 2> /dev/null; then
+    # only the public half is missing: rebuild it (a new key would no longer match the deploy key on GitHub)
+    chown "$MU_USER:$grp" "$key.pub.tmp"; chmod 644 "$key.pub.tmp"; mv -f "$key.pub.tmp" "$key.pub"
+    changed "ssh key $key: its public half $key.pub rebuilt from it"
   else
-    rm -f "$key" "$key.pub"
+    rm -f "$key.pub.tmp"
+    [ ! -f "$key" ] || die "$key exists but $key.pub is missing and could not be rebuilt from it (a passphrase?): fix it, or delete $key for a new key"
+    rm -f "$key.pub"
     as_user ssh-keygen -q -t ed25519 -N '' -C "${WSL_DISTRO_NAME:-mu}@$(hostname)" -f "$key"
     changed "ssh key $key generated (ed25519)"; NEW_KEY=1
   fi
@@ -461,6 +505,10 @@ install_mu() {
   [ -z "${WSL_DISTRO_NAME:-}" ] || wslenv+=("WSL_DISTRO_NAME=$WSL_DISTRO_NAME")
   [ -z "${WSL_INTEROP:-}" ] || wslenv+=("WSL_INTEROP=$WSL_INTEROP")
   [ -x "$dir/install.sh" ] || { warn "--install-mu: no clone at $dir yet (add the deploy key first)"; return 0; }
+  if [ -e "$home/.local/bin/mu" ]; then
+    same "μ is installed for $MU_USER (it updates itself; to install again by hand: wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER -- bash -lc 'cd ~/mu && ./install.sh')"
+    return 0
+  fi
   step "μ system packages (install.sh --system, as root)"
   if installsh_supports_user "$dir/install/install.sh"; then "$dir/install.sh" --system --user "$MU_USER"
   else
@@ -548,9 +596,11 @@ do_uninstall() {
     changed "mu-clean-stop.service removed (its log $STATE_DIR/stops.log is kept)"
   fi
   local f
-  for f in "$WRITEBACK_CONF" "$JOURNALD_CONF" "$STOPTIMEOUT_CONF"; do
+  for f in "$WRITEBACK_CONF" "$JOURNALD_CONF" "$STOPTIMEOUT_CONF" "$USER_STOPTIMEOUT_CONF" "$USER_AT_STOPTIMEOUT_CONF"; do
     if [ -f "$f" ]; then rm -f "$f"; changed "$f removed"; fi
   done
+  rmdir /etc/systemd/user.conf.d /etc/systemd/system/user@.service.d 2> /dev/null || true
+  if systemd_running; then systemctl daemon-reload; fi
   if [ "$(cat /proc/sys/vm/dirty_expire_centisecs 2>/dev/null)" = 500 ]; then
     sysctl -q -w vm.dirty_expire_centisecs=3000 vm.dirty_writeback_centisecs=500 > /dev/null 2>&1 || true
     changed "write-back timers back to the kernel defaults (3000 / 500)"
@@ -560,7 +610,10 @@ do_uninstall() {
   elif [ -f "$STATE_DIR/wsl.conf.absent" ]; then
     rm -f /etc/wsl.conf "$STATE_DIR/wsl.conf.absent"; changed "/etc/wsl.conf removed (there was none)"
   fi
-  echo "Kept: linger for $MU_USER (loginctl disable-linger $MU_USER), $SELF_PATH (rm it by hand), $STATE_DIR/stops.log."
+  echo "Kept: linger for $MU_USER (loginctl disable-linger $MU_USER); $STATE_DIR/stops.log; in ~$MU_USER/.ssh the key, the"
+  echo "  managed github.com block in config (between the '# >>> mu-wsl2' and '# <<< mu-wsl2' lines) and GitHub's key in"
+  echo "  known_hosts (ssh-keygen -R github.com -f ~$MU_USER/.ssh/known_hosts); $SELF_PATH itself (mu-wsl2-host.ps1"
+  echo "  uninstall deletes it next; by hand: rm $SELF_PATH)."
   echo "Restart the distro to apply (from Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distro>})."
 }
 
@@ -568,16 +621,31 @@ do_uninstall() {
 CHECKS=""
 check() { printf '%s\t%s\t%s\n' "$1" "$2" "$(printf '%s' "$3" | tr '\t\n' '  ')" >> "$CHECKS"; }   # RESULT NAME DETAIL
 
+# distro_start_epoch: when this distro's init (PID 1) started, in seconds since 1970 (0 if unknown). Its start time
+# in /proc/1/stat is in clock ticks since the VM booted (btime in /proc/stat); the VM can outlive a distro restart.
+distro_start_epoch() {
+  local bt st hz
+  bt="$(awk '$1 == "btime" { print $2 }' /proc/stat 2> /dev/null || true)"
+  st="$(sed 's/^.*) //' /proc/1/stat 2> /dev/null | awk '{ print $20 }' || true)"
+  hz="$(getconf CLK_TCK 2> /dev/null || echo 100)"
+  case "$bt$st$hz" in ""|*[!0-9]*) echo 0 ;; *) echo $((bt + st / hz)) ;; esac
+}
+
+# The heartbeat checks, only while the unit is installed. NUL bytes fail only when they come from the stop just
+# before this start of the distro (the first heartbeat after them is later than the start). Older ones, such as those
+# of an earlier restart test, are listed as info, so that each restart is judged on its own.
 status_heartbeat() {
-  local home log unit=0 a lines valid nul first last le now age ngap=0 rec
+  local home log a lines valid nul first last le now age ngap=0 nnow=0 rec since
   home="$(user_home "$MU_USER")"; log="$home/heartbeat.log"
-  [ -f "$HEARTBEAT_UNIT" ] && unit=1
-  if [ "$unit" = 1 ]; then
-    if systemd_running && systemctl is-active --quiet mu-heartbeat.service; then check pass heartbeat.service "active"
-    else check fail heartbeat.service "installed but not running"; fi
+  if [ ! -f "$HEARTBEAT_UNIT" ]; then
+    [ ! -f "$log" ] || check info heartbeat "off (mu-heartbeat.service is not installed; its log $log is kept)"
+    return 0
   fi
-  if [ ! -f "$log" ]; then [ "$unit" = 0 ] || check fail heartbeat.log "$log does not exist yet"; return 0; fi
-  a="$(hb_analyze "$GAP" < "$log")"
+  if systemd_running && systemctl is-active --quiet mu-heartbeat.service; then check pass heartbeat.service "active"
+  else check fail heartbeat.service "installed but not running"; fi
+  if [ ! -f "$log" ]; then check fail heartbeat.log "$log does not exist yet"; return 0; fi
+  since="$(distro_start_epoch)"
+  a="$(hb_analyze "$GAP" "$since" < "$log")"
   lines="$(printf '%s\n' "$a" | awk -F'\t' '$1 == "lines" { print $2 }')"
   valid="$(printf '%s\n' "$a" | awk -F'\t' '$1 == "valid" { print $2 }')"
   nul="$(printf '%s\n' "$a" | awk -F'\t' '$1 == "nul" { print $2 }')"
@@ -587,12 +655,15 @@ status_heartbeat() {
   check info heartbeat.log "$valid timestamps in $lines lines, ${first:-none} to ${last:-none}"
   if [ "${nul:-0}" -gt 0 ]; then
     while IFS="$(printf '\t')" read -r rec l1 l2 l3 l4; do
-      [ "$rec" = nulline ] || continue
-      check fail heartbeat.nul "line $l1: $l2 NUL bytes between $l3 and $l4 (data lost by an unclean stop)"
+      case "$rec" in
+        nulline) nnow=$((nnow + 1)); check fail heartbeat.nul "line $l1: $l2 NUL bytes between $l3 and $l4 (data lost by the stop before this start: it was not clean)" ;;
+        nulold) check info heartbeat.nul-old "line $l1: $l2 NUL bytes between $l3 and $l4 (an earlier stop, before this start of the distro)" ;;
+      esac
     done <<EOF
 $a
 EOF
-  else check pass heartbeat.nul "no NUL bytes"; fi
+  fi
+  [ "$nnow" -gt 0 ] || check pass heartbeat.nul "no NUL bytes from the stop before this start of the distro"
   while IFS="$(printf '\t')" read -r rec l1 l2 l3; do
     case "$rec" in
       gap) ngap=$((ngap + 1)); [ "$ngap" -gt 30 ] || check warn heartbeat.gap "$l1 -> $l2 ($l3 s without a heartbeat; a restart shows up as one gap)" ;;
@@ -604,7 +675,7 @@ $a
 EOF
   [ "$ngap" -le 30 ] || check warn heartbeat.gap "... $((ngap - 30)) more gaps"
   [ "$ngap" -gt 0 ] || check pass heartbeat.gaps "no gap longer than $GAP s"
-  if [ "$unit" = 1 ] && [ -n "$le" ]; then
+  if [ -n "$le" ]; then
     now="$(date +%s)"; age=$((now - le))
     if [ "$age" -gt "$GAP" ]; then check fail heartbeat.fresh "last heartbeat $age s ago ($last)"
     else check pass heartbeat.fresh "last heartbeat $age s ago"; fi
@@ -640,6 +711,8 @@ do_status() {
       [ "$v" = 8s ] && check pass stop-timeout "DefaultTimeoutStopSec=8s" || check fail stop-timeout "systemd uses $v (restart the distro to apply 8s)"
     else check pass stop-timeout "DefaultTimeoutStopSec=8s (file)"; fi
   else check fail stop-timeout "$STOPTIMEOUT_CONF missing"; fi
+  if [ -f "$USER_STOPTIMEOUT_CONF" ] && [ -f "$USER_AT_STOPTIMEOUT_CONF" ]; then check pass stop-timeout.user "user services 8 s, user@.service 9 s"
+  else check fail stop-timeout.user "$USER_STOPTIMEOUT_CONF or $USER_AT_STOPTIMEOUT_CONF missing"; fi
   # clean stops
   if [ -f "$CLEANSTOP_UNIT" ] && systemctl is-enabled --quiet mu-clean-stop.service 2>/dev/null; then
     if ! systemd_running || systemctl is-active --quiet mu-clean-stop.service; then check pass clean-stop.unit "enabled"
@@ -698,7 +771,7 @@ do_status() {
 }
 
 # ================================================================ main
-usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo/p' "$SELF_SRC" | sed '$d' | sed 's/^# \{0,1\}//'; }
 main() {
   local action="${1:-}"; [ $# -gt 0 ] && shift
   case "$action" in
