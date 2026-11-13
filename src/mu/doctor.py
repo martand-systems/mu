@@ -60,6 +60,26 @@ def check_layers():
     return dict(name="layers", ok=not bad, detail=("; ".join(bad) if bad else f"{len(keys)} layers complete and sealed"),
                 seconds=0.0)
 
+def check_linux_libs():
+    """Linux: every app binary finds its shared libraries (a missing one names the Ubuntu package to install)."""
+    t = os.environ.get("MU_TOOLCHAIN", "")
+    bins = ["apps/ParaView-6.2.1/lib/libvtkRenderingOpenGL2-pv6.2.so*", "apps/OpenVSP-3.56.0-Linux/vspaero",
+            "apps/openfoam2606/platforms/*/bin/simpleFoam", "apps/openfoam2606/platforms/*/lib/libOpenFOAM.so",
+            "cam-venv/lib/python3.11/site-packages/OCP/OCP*.so"]
+    import glob
+    missing = set()
+    for pat in bins:
+        for f in glob.glob(os.path.join(t, pat)):
+            env = dict(os.environ)
+            if "openfoam2606" in f:   # OpenFOAM's own libraries are found through its environment, not RPATH
+                root = f.split("/platforms/")[0] + "/platforms/" + f.split("/platforms/")[1].split("/")[0]
+                env["LD_LIBRARY_PATH"] = f"{root}/lib:{root}/lib/sys-openmpi:{root}/lib/dummy"
+            out = subprocess.run(["ldd", f], capture_output=True, text=True, env=env).stdout
+            missing |= {l.split()[0] for l in out.splitlines() if "not found" in l}
+    return dict(name="linux-libs", ok=not missing, seconds=0.0,
+                detail=("all app libraries found" if not missing else
+                        "missing " + " ".join(sorted(missing)) + ": run sudo ./install.sh --system in the mu repo"))
+
 def run_one(name, cmd, expect):
     t0 = time.time()
     if not shutil.which(cmd[0]) and not os.path.isabs(cmd[0]):
@@ -84,7 +104,8 @@ def main():
     except Exception:  # noqa: BLE001  (reported by the cad checks themselves)
         pass
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as ex:
-        res = [check_layers()] + list(ex.map(lambda c: run_one(*c), CHECKS))
+        res = [check_layers()] + ([check_linux_libs()] if sys.platform.startswith("linux") else []) \
+            + list(ex.map(lambda c: run_one(*c), CHECKS))
     if as_json:
         print(json.dumps(dict(ok=all(r["ok"] for r in res), checks=res), indent=1))
     else:

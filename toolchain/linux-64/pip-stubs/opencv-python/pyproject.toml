@@ -1,0 +1,10 @@
+# Empty placeholder (linux-64): cv2 comes from opencv-python-headless (same module, no X/GL): this only satisfies CHARM's declared dependency.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "opencv-python"
+version = "5.0.0.93"
+description = "placeholder; see toolchain/linux-64/pip-stubs"
+[tool.setuptools]
+packages = []

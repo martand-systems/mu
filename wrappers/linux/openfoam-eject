@@ -1,0 +1,3 @@
+#!/bin/sh
+# Nothing to unmount on Linux (macOS mounts OpenFOAM's image); kept so scripts work on both.
+exit 0

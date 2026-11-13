@@ -5,7 +5,7 @@
 export MU_TOOLCHAIN
 export MU_HOME="${MU_HOME:-$(cd "$MU_TOOLCHAIN/../.." && pwd)}"
 export MU_STATE="$MU_HOME/state"
-export MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
+case "$(uname -s)" in Darwin) export MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) export MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
 if [ -n "${MU_ACTIVE:-}" ] && [ "${MU_ACTIVE}" = "$MU_TOOLCHAIN" ]; then return 0 2>/dev/null; fi
 export MU_ACTIVE="$MU_TOOLCHAIN"
 mkdir -p "$MU_STATE/tmp" "$MU_STATE/home"
@@ -35,6 +35,15 @@ export CAD_STATE_DIR="$_MU_CAD/state" CAD_CACHE_DIR="$_MU_CAD/cache"
 export CAD_ENGINE_DIR="$_MU_CAD/engine" CAD_LAUNCHER_DIR="$_MU_CAD/launcher"
 unset _MU_CAD
 export CAD_TELEMETRY=0 CAD_UPDATE_CHECK=0 DO_NOT_TRACK=1
+
+# Linux: VTK (render-png, PyVista) renders through EGL with the env's software Mesa (llvmpipe) when there is no display
+if [ "$(uname -s)" = Linux ]; then
+  export __EGL_VENDOR_LIBRARY_DIRS="${__EGL_VENDOR_LIBRARY_DIRS:-$MU_TOOLCHAIN/env/share/glvnd/egl_vendor.d}"
+  [ -n "${DISPLAY:-}" ] || export VTK_DEFAULT_OPENGL_WINDOW="${VTK_DEFAULT_OPENGL_WINDOW:-vtkEGLRenderWindow}"
+fi
+
+# OpenVSP's folder (for vsp.SetVSPAEROPath(os.environ["MU_VSPAERO_DIR"])), whatever the platform's app layout
+for _d in "$MU_TOOLCHAIN"/apps/OpenVSP-*; do [ -x "$_d/vspaero" ] && export MU_VSPAERO_DIR="$_d"; done; unset _d
 
 # activate the env by hand (micromamba's shell hook would write ~/.conda)
 export CONDA_PREFIX="$MU_TOOLCHAIN/env" CONDA_DEFAULT_ENV="$MU_TOOLCHAIN/env"

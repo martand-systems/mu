@@ -1,0 +1,9 @@
+#!/bin/sh
+# PrusaSlicer 2.9.7 (Flathub build at pinned commits, in μ's own flatpak installation). CLI:
+#   prusa-slicer --export-gcode --load profile.ini part.stl -o part.gcode
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home" "$S/prusaslicer"
+export FLATPAK_USER_DIR="$T/apps/prusaslicer-flatpak" HOME="$S/home"
+set -- flatpak run --user --command=prusa-slicer --filesystem=host --nosocket=x11 --nosocket=wayland --env=LC_ALL=C.UTF-8 \
+  com.prusa3d.PrusaSlicer --datadir "$S/prusaslicer" "$@"
+# flatpak needs a D-Bus session bus; WSL logins and containers often have none
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then exec "$@"; else exec dbus-run-session -- "$@"; fi

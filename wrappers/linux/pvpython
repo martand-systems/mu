@@ -1,0 +1,5 @@
+#!/bin/sh
+# ParaView 6.2.1 pvpython. Headless by default: OSMesa software rendering (MU_PARAVIEW_WINDOW=vtkEGLRenderWindow for a GPU).
+T="$(cd "$(dirname "$0")/.." && pwd)"; S="${MU_STATE:-$(cd "$T/../.." && pwd)/state}"; mkdir -p "$S/home"
+HOME="$S/home" PYTHONPYCACHEPREFIX="$S/pycache" VTK_DEFAULT_OPENGL_WINDOW="${MU_PARAVIEW_WINDOW:-vtkOSOpenGLRenderWindow}" \
+  exec "$T/apps/ParaView-6.2.1/bin/pvpython" "$@"

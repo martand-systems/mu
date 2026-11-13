@@ -35,13 +35,13 @@ jobs:
           df -h / | tail -1
       - uses: actions/checkout@v4
         if: steps.sel.outputs.run == '1'
-      - name: Download cache
+      - name: Restore download cache
         if: steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: mucache
-          key: mucache-linux-64-${{ hashFiles('toolchain/apps.toml', 'toolchain/linux-64/*') }}
-          restore-keys: mucache-linux-64-
+          key: mucache-${{ matrix.image }}-${{ github.run_id }}
+          restore-keys: mucache-${{ matrix.image }}-
       - name: Container image
         if: steps.sel.outputs.run == '1'
         run: |
@@ -64,6 +64,16 @@ jobs:
             grep -hE "✓|✗|ready in|failed" out/install1.txt out/install2.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
             echo; cat out/timeline.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           sudo chown -R "$(id -u)" mucache out 2>/dev/null || true
+      - name: Save download cache (also after a failure, so a retry doesn't download again)
+        if: always() && steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            mucache/downloads
+            mucache/pkgs/*.conda
+            mucache/pkgs/https/conda.anaconda.org/conda-forge/*/*.conda
+            mucache/uv
+          key: mucache-${{ matrix.image }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always() && steps.sel.outputs.run == '1'
         with:
