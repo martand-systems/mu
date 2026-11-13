@@ -1,0 +1,156 @@
+# S4 (docs/PLAN.md §16): chisel through Dokploy's Traefik. Each job builds a replica of the server on the runner's
+# Docker (Dokploy's Traefik start line and static config, the labels Dokploy adds, relay/compose.yaml as it is in
+# git) and runs tools/s4/run.sh in it, once per Traefik version Dokploy has shipped since v0.29. Nothing here
+# contacts the real server: relay.martand.systems resolves to the runner inside the test containers.
+#
+# A push idles the tunnels for 240 s (longer than every Traefik timer). The long run idles them for 20 minutes on
+# every version and also runs the credential tests on macOS: start it by hand (Run workflow, idle 1200), or put
+# [s4-long] in the message of the pushed head commit. Do that before a chisel or Traefik version change is deployed.
+name: s4-relay
+on:
+  push:
+    # Branches only. GitHub does not apply `paths` to a tag push, so without this every release tag would run it all.
+    branches: ["**"]
+    paths:
+      - "relay/**"
+      - "tools/s4/**"
+      - ".github/workflows/s4-relay.yml"
+  workflow_dispatch:
+    inputs:
+      idle:
+        description: "idle period in seconds, 60 to 1500 (240; 1200 is the long run)"
+        required: false
+        default: "240"
+      blob_mb:
+        description: "payload each way, MB"
+        required: false
+        default: "100"
+permissions:
+  contents: read
+concurrency:
+  group: s4-relay-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  LONG: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[s4-long]')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.idle == '1200') }}
+jobs:
+  config:
+    name: credentials and entrypoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: tools/s4/test-config.sh
+
+  # The owner makes the credentials on a Mac, with the bash 3.2 that macOS ships. Only there does bash match
+  # upper-case letters against [a-z] in a UTF-8 locale, which is what the scripts' LC_ALL=C is for. In the long run
+  # only: macOS minutes are billed tenfold.
+  config-macos:
+    name: credentials and entrypoint, macOS bash 3.2
+    if: (github.event_name == 'push' && contains(github.event.head_commit.message, '[s4-long]')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.idle == '1200')
+    runs-on: macos-15
+    timeout-minutes: 5
+    env:
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The bash that `env bash` finds is 3.2
+        run: |
+          v="$(env bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')"; echo "bash $v, $(openssl version)"
+          [ "$v" = 3.2 ] || { echo "::error::expected bash 3.2, found $v: this job would not test the Mac's shell"; exit 1; }
+      - run: tools/s4/test-config.sh
+      - name: "The test of the test: without LC_ALL=C the upper-case name is accepted, and the tests notice"
+        run: |
+          sed -i '' '/^export LC_ALL=C/d' relay/gen-credentials.sh
+          rc=0; tools/s4/test-config.sh > mutated.txt 2>&1 || rc=$?
+          grep '^FAIL' mutated.txt || true
+          [ "$rc" = 1 ] || { echo "::error::test-config.sh passed without LC_ALL=C in gen-credentials.sh"; exit 1; }
+          grep -q '^FAIL  gen-credentials accepted: an upper-case name' mutated.txt || { echo "::error::the upper-case name check did not fail"; exit 1; }
+
+  relay:
+    name: Traefik v${{ matrix.traefik }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dokploy's pinned Traefik: 3.6.7 up to v0.29.14, 3.6.25 in v0.30.x, 3.7.16 from v0.31.0.
+        traefik: ["3.6.7", "3.6.25", "3.7.16"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Idle period
+        env:
+          IDLE_INPUT: ${{ github.event.inputs.idle }}
+        run: |
+          idle="${IDLE_INPUT:-240}"; [ "$LONG" != true ] || idle=1200
+          case "$idle" in ''|*[!0-9]*) echo "::error::idle must be a number of seconds"; exit 1 ;; esac
+          # under 60 s the idle-cutting hop has not cut yet; over 1500 s the job would hit its 45-minute limit
+          [ "$idle" -ge 60 ] && [ "$idle" -le 1500 ] || { echo "::error::idle must be 60 to 1500 seconds"; exit 1; }
+          echo "S4_IDLE=$idle" >> "$GITHUB_ENV"
+      - name: Replica and tests
+        env:
+          TRAEFIK_VERSION: ${{ matrix.traefik }}
+          S4_BLOB_MB: ${{ github.event.inputs.blob_mb || '100' }}
+        run: tools/s4/run.sh
+      - name: Summary
+        if: always()
+        run: cat .scratch/s4/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: s4-traefik-${{ matrix.traefik }}
+          # logs and results only: the throw-away credentials (env/, cred/, *.env) are not uploaded
+          path: |
+            .scratch/s4/summary.md
+            .scratch/s4/results.tsv
+            .scratch/s4/logs/
+            .scratch/s4/out/
+          include-hidden-files: true
+          retention-days: 14
+
+  # The test of the test. Each job breaks one thing (S4_BREAK in tools/s4/run.sh) and run.sh has to say so: exit 1,
+  # with exactly the rows that test that thing failed, and the rows next to them passed.
+  must-fail:
+    name: fails when ${{ matrix.what }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { break: port,    what: "the container port is wrong",        fail: "A1",               pass: "T1 T2" }
+          - { break: acl,     what: "the relay has no access rules",      fail: "X6 X7 X8 X16 X17", pass: "X1 X5 X9 X15" }
+          - { break: idle,    what: "an idle tunnel is cut",              fail: "I2",               pass: "I1 I3 I4" }
+          - { break: noretry, what: "the workstation does not reconnect", fail: "R1",               pass: "I1 I5" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run with the fault
+        env:
+          TRAEFIK_VERSION: "3.6.25"
+          S4_BREAK: ${{ matrix.break }}
+          S4_IDLE: "60"
+          S4_BLOB_MB: "1"
+          EXPECT_FAIL: ${{ matrix.fail }}
+          EXPECT_PASS: ${{ matrix.pass }}
+        run: |
+          rc=0; tools/s4/run.sh || rc=$?
+          echo "run.sh exit $rc"
+          [ "$rc" = 1 ] || { echo "::error::expected exit 1 (a failed check), got $rc"; exit 1; }
+          failed="$(awk -F '\t' '$1 == "FAIL" { printf "%s%s", sep, $2; sep = " " }' .scratch/s4/results.tsv)"
+          [ "$failed" = "$EXPECT_FAIL" ] || { echo "::error::failed rows: '$failed', expected exactly '$EXPECT_FAIL'"; exit 1; }
+          for id in $EXPECT_PASS; do
+            grep -q "^PASS"$'\t'"$id"$'\t' .scratch/s4/results.tsv || { echo "::error::row $id did not pass"; exit 1; }
+          done
+      - name: Summary
+        if: always()
+        run: cat .scratch/s4/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: s4-must-fail-${{ matrix.break }}
+          path: |
+            .scratch/s4/summary.md
+            .scratch/s4/results.tsv
+            .scratch/s4/logs/
+            .scratch/s4/out/
+          include-hidden-files: true
+          retention-days: 14

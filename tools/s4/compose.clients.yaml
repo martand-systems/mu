@@ -1,0 +1,115 @@
+# The two ends of the tunnel, outside dokploy-network like real clients: each on its own network, reaching the
+# relay only through the host's published port 443 (relay.martand.systems -> host-gateway, so the name never
+# resolves to the real server). Started by run.sh.
+name: s4-clients
+
+x-client: &client
+  image: s4-client
+  restart: "no"
+  stop_grace_period: 2s
+  extra_hosts:
+    - "relay.martand.systems:host-gateway"
+    - "relay-silent.s4.test:host-gateway"
+  volumes:
+    - ${S4_WORK:?}/certs/ca.crt:/certs/ca.crt:ro
+    - ${S4_WORK:?}/certs/probe.crt:/certs/probe.crt:ro
+    - ${S4_WORK:?}/certs/probe.key:/certs/probe.key:ro
+
+services:
+  # The pair under test: production settings (keepalive 25 s on both ends, the relay at its defaults).
+  compute:
+    <<: *client
+    container_name: s4-compute
+    command: [compute]
+    env_file: ["${S4_WORK:?}/env/compute.env"]
+    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-100}"}
+    networks: [office]
+  workstation:
+    <<: *client
+    container_name: s4-ws
+    command: [workstation]
+    env_file: ["${S4_WORK:?}/env/workstation.env"]
+    # S4_WS_MAX_RETRY is only set by run.sh's S4_BREAK=noretry (a workstation that never reconnects)
+    environment: {S4_BLOB_MB: "${S4_BLOB_MB:-100}", S4_MAX_RETRY: "${S4_WS_MAX_RETRY:-}"}
+    networks: [home]
+  # The compute node coming back while the relay still holds its old, dead session (run.sh row R8): a second
+  # container with the same credentials, started while the first one is frozen.
+  compute-twin:
+    <<: *client
+    container_name: s4-compute-twin
+    command: [compute]
+    env_file: ["${S4_WORK:?}/env/compute.env"]
+    environment: {S4_BLOB_MB: "1"}
+    networks: [office]
+
+  # A second pair on a second relay with every keepalive off: a tunnel that carries no bytes at all while idle.
+  compute-silent:
+    <<: *client
+    container_name: s4-compute-silent
+    command: [compute]
+    env_file: ["${S4_WORK:?}/env/compute-silent.env"]
+    environment: {S4_BLOB_MB: "1", S4_KEEPALIVE: "0s"}
+    networks: [office]
+  ws-silent:
+    <<: *client
+    container_name: s4-ws-silent
+    command: [workstation]
+    env_file: ["${S4_WORK:?}/env/workstation-silent.env"]
+    # S4_SILENT_URL and S4_SILENT_HOSTNAME are only set by run.sh's S4_BREAK=idle (this client through the killer hop)
+    environment: {S4_BLOB_MB: "1", S4_KEEPALIVE: "0s", S4_CONNECT_URL: "${S4_SILENT_URL:-}", S4_HOSTNAME: "${S4_SILENT_HOSTNAME:-}"}
+    networks: [home]
+
+  # A hop that cuts connections idle for 45 s, and two workstations that go through it: one silent (must be
+  # cut: the negative control for the idle test), one with the 25 s keepalive (must survive). The second one also
+  # keeps chisel's default handshake timeout, to show what CHISEL_WS_TIMEOUT=10s changes after a redeploy.
+  killer:
+    <<: *client
+    container_name: s4-killer
+    command: [killer]
+    environment: {S4_KILLER_TARGET: relay.martand.systems, S4_KILLER_IDLE: "45"}
+    networks: [home]
+  ws-silent-cut:
+    <<: *client
+    container_name: s4-ws-silent-cut
+    command: [workstation]
+    env_file: ["${S4_WORK:?}/env/workstation-silent.env"]
+    environment: {S4_BLOB_MB: "1", S4_KEEPALIVE: "0s", S4_CONNECT_URL: "https://killer:443", S4_HOSTNAME: relay-silent.s4.test}
+    networks: [home]
+    depends_on: [killer]
+  ws-ka-cut:
+    <<: *client
+    container_name: s4-ws-ka-cut
+    command: [workstation]
+    env_file: ["${S4_WORK:?}/env/workstation.env"]
+    environment: {S4_BLOB_MB: "1", S4_WS_TIMEOUT: "45s", S4_CONNECT_URL: "https://killer:443", S4_HOSTNAME: relay.martand.systems}
+    networks: [home]
+    depends_on: [killer]
+
+  # Where run.sh runs its own curl, chisel and probe commands: an outside client like the workstation.
+  probe:
+    <<: *client
+    container_name: s4-probe
+    command: [probe]
+    networks: [home]
+
+  # A neighbour on dokploy-network, like the other services on the server. Starting and stopping it makes Traefik
+  # rebuild its configuration; it is also where "can a neighbour reach a compute node's port?" is asked from, and
+  # a second client address for the connection limit (it reaches Traefik on the overlay network, with its own IP).
+  noise:
+    <<: *client
+    container_name: s4-noise
+    command: [noise]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dokploy-network
+      - traefik.http.routers.s4-noise-web.rule=Host(`noise.s4.test`)
+      - traefik.http.routers.s4-noise-web.entrypoints=web
+      - traefik.http.routers.s4-noise-web.service=s4-noise-web
+      - traefik.http.services.s4-noise-web.loadbalancer.server.port=9000
+    networks: [dokploy-network]
+
+networks:
+  office: {}
+  home: {}
+  dokploy-network:
+    external: true

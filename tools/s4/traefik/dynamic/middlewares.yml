@@ -1,0 +1,7 @@
+# Dokploy's default middlewares (getDefaultMiddlewares), verbatim.
+http:
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true

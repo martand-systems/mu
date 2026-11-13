@@ -1,0 +1,14 @@
+# S4_BREAK=acl only (run.sh): the relay with its access rules taken out, to show that the access rows notice.
+# The real entrypoint still checks RELAY_KEY and RELAY_CLIENTS and writes the auth file (with `true` in place of
+# chisel); then every client's rule is replaced by "", which chisel reads as "anything", and chisel is started with
+# the entrypoint's own command line. Never part of a deploy: Dokploy only reads relay/compose.yaml.
+services:
+  mu-relay:
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        RELAY_CHISEL=/bin/true /bin/sh /usr/local/bin/relay-entrypoint || exit 1
+        sed -i 's/\["[^]]*"\]/[""]/' /run/relay/users.json
+        exec env -i PATH=/usr/local/bin:/usr/bin:/bin CHISEL_KEY_FILE="$$RELAY_KEY" \
+          chisel server --host 0.0.0.0 --port 8080 --reverse --authfile /run/relay/users.json --keepalive 25s

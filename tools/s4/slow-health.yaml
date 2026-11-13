@@ -1,0 +1,8 @@
+# Negative control for "the relay is routable within seconds of starting". Traefik does not route to a container
+# whose health is still "starting". relay/compose.yaml sets start_period: 15s and start_interval: 1s. With no start
+# period Docker never uses start_interval: the first probe runs after the normal interval (30 s), exactly as if
+# neither line were in compose.yaml. (With start_period alone it would probe every 5 s, Docker's default.)
+services:
+  mu-relay:
+    healthcheck:
+      start_period: 0s

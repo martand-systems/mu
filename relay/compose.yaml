@@ -1,0 +1,60 @@
+# μ relay, Stage A (docs/PLAN.md §7): chisel behind the server's Dokploy-managed Traefik.
+#
+# Deployed by Dokploy as a Compose service from this folder (steps in README.md). Dokploy adds the routing labels
+# and the dokploy-network attachment from its Domains screen (host relay.martand.systems, container port 8080,
+# HTTPS), so this file has no routers, no published ports and no volumes. Its labels define one Traefik
+# middleware, which the Domains entry names. The two secrets come from Dokploy's Environment tab, which Dokploy
+# writes to relay/.env for the ${...} below; they are never in git.
+#
+# tools/s4 runs this file unchanged behind a Traefik configured the way Dokploy configures it (CI: s4-relay).
+services:
+  mu-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_KEY: "${RELAY_KEY:?set RELAY_KEY in the Environment tab, see relay/README.md}"
+      RELAY_CLIENTS: "${RELAY_CLIENTS:?set RELAY_CLIENTS in the Environment tab, see relay/README.md}"
+      RELAY_KEEPALIVE: "${RELAY_KEEPALIVE:-25s}"
+    expose:
+      - "8080"            # internal only; Traefik reaches it on dokploy-network
+    labels:
+      # At most 32 connections at a time from one client address (the address Traefik sees; an IPv6 /64 counts as
+      # one). chisel keeps a connection that never logs in open for ever, so without a limit one machine can fill
+      # the relay's memory with them. Traefik answers 429 above the limit. It only applies once the Domains entry
+      # in Dokploy lists the middleware mu-relay-inflight@docker (README.md §2); Dokploy keeps these labels and
+      # adds its own.
+      - traefik.http.middlewares.mu-relay-inflight.inflightreq.amount=32
+      - traefik.http.middlewares.mu-relay-inflight.inflightreq.sourcecriterion.ipstrategy.depth=0
+      - traefik.http.middlewares.mu-relay-inflight.inflightreq.sourcecriterion.ipstrategy.ipv6subnet=64
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      # the generated chisel auth file; memory only, gone with the container
+      - /run/relay:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=65532,gid=65532
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Traefik does not route to a container whose health is still "starting". Without these two lines the first
+      # probe would run 30 s after start and every deploy would answer 404 for that long. With start_period alone
+      # Docker probes every 5 s until the first success. start_interval needs Docker Engine 25+.
+      start_period: 15s
+      start_interval: 1s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

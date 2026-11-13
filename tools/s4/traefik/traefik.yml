@@ -1,0 +1,37 @@
+# Dokploy's static Traefik config for a deploy server: getDefaultServerTraefikConfig() in Dokploy's
+# packages/server/src/setup/traefik-setup.ts (identical in v0.29.14 .. v0.31.2), which Dokploy writes to
+# /etc/dokploy/traefik/traefik.yml. One line is added for CI and marked "CI:". Nothing sets transport timeouts,
+# so Traefik's defaults apply: readTimeout 60 s, idleTimeout 180 s, graceTimeOut 10 s.
+providers:
+  swarm:
+    exposedByDefault: false
+    watch: true
+  docker:
+    exposedByDefault: false
+    watch: true
+    network: dokploy-network
+  file:
+    directory: /etc/dokploy/traefik/dynamic
+    watch: true
+entryPoints:
+  web:
+    address: :80
+  websecure:
+    address: :443
+    http3:
+      advertisedPort: 443
+    http:
+      tls:
+        certResolver: letsencrypt
+api:
+  insecure: true
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: test@localhost.com
+      storage: /etc/dokploy/traefik/dynamic/acme.json
+      # CI: a dead address, so the replica can never reach Let's Encrypt. The resolver stays defined, so the
+      # `tls.certresolver=letsencrypt` label Dokploy adds resolves as it does in production.
+      caServer: https://127.0.0.1:9/directory
+      httpChallenge:
+        entryPoint: web

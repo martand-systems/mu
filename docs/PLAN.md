@@ -493,7 +493,9 @@ jatayu/                       (GitHub: martand-systems/jatayu)
   - The tunnel is authenticated and encrypted inside the WebSocket.
   - Inside the tunnel, the laptop ↔ agent traffic is again TLS with the agent's certificate **pinned at pairing**, plus a per-workstation token.
 
-  Neither the relay nor the proxy can read job data.
+  Neither the relay nor the proxy can read job data, **once that inner layer exists.** In Stage A as first deployed
+  (S4) there is no inner layer yet: the relay container and anyone with root or Docker access on the server can read
+  the tunnel's traffic. The first job layer puts SSH inside the tunnel, which closes this.
 - **On the office LAN** the laptop connects to the agent directly and skips the relay.
 - **Claude and you never see the tunnel.** `mu compute add office-pc <code>` stores the relay URL and credentials (Keychain), and every
   `mu submit/status/log/fetch` picks direct or relay automatically.
@@ -674,7 +676,7 @@ It's included in every project as the `org/` submodule. Updating it is a deliber
 - **Data classification:** JATAYU design data is cleared for GitHub (confirmed 2026-11-12).
 - **Relay:**
   - outbound-only connections over `wss://` 443 through the server's Traefik
-  - end-to-end encryption between laptop and agent; the relay stores nothing
+  - end-to-end encryption between laptop and agent, from the first job layer on (not in the bare S4 tunnel, see §7.2); the relay stores nothing
   - per-client credentials, kept in the server's `.env` and the clients' Keychain, never in git
   - the container publishes no host ports, runs read-only with CPU and memory limits, and doesn't touch host SSH or the other containers
   - deployed only by Dokploy from GitHub; no extra SSH keys or access to the server are created
@@ -784,7 +786,8 @@ specs are written at the start of each phase, and the early spikes below are wha
 | S4 chisel through Dokploy's Traefik on `relay.martand.systems` (after the DNS record): a reverse tunnel from one client, a forward from another, a long idle period, reconnect | The relay design works with this Traefik | Try frp over WebSocket. Last resort: a high port |
 
 **Spike status (2026-11-13):** S1, S2 and S3 passed, with records in `docs/verification/`. S3 found that a Windows
-restart powers the WSL VM off without a Linux shutdown; the WSL2 host scripts add a clean stop before shutdown. S4 is next.
+restart powers the WSL VM off without a Linux shutdown; the WSL2 host scripts add a clean stop before shutdown. S4 passes against replicas of
+Dokploy's Traefik in CI (`docs/verification/2026-11-13-S4-relay.md`); the check on the real server is the last step.
 
 **Before P1 starts:** answer open items 2 and 3 above (name, shared libraries), or accept the defaults.
 
