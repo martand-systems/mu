@@ -64,6 +64,8 @@ jobs:
             grep -hE "✓|✗|ready in|failed" out/install1.txt out/install2.txt 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g'
             echo; cat out/timeline.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           sudo chown -R "$(id -u)" mucache out 2>/dev/null || true
+      # mucache/flatpak (PrusaSlicer's download cache) is deliberately not saved: every run tests the cold Flathub
+      # download (install #1) and the offline rebuild from that cache (install #2), see tools/s2/ci-install.sh
       - name: Save download cache (also after a failure, so a retry doesn't download again)
         if: always() && steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
         uses: actions/cache/save@v4

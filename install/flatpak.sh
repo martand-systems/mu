@@ -56,11 +56,13 @@ fp_fetch() {
 # _fp_placeholder REF: install REF in the cache installation from an empty local commit (see above). Its metadata must
 # be what Flathub's summary lists for REF (flatpak compares them), so it is read from there first.
 _fp_placeholder() {
-  local ref="$1" repo="$MU_CACHE/flatpak/repo" d c
+  local ref="$1" repo="$MU_CACHE/flatpak/repo" d c m
+  m="$(fp --user remote-info --show-metadata "$FP_REMOTE" "$ref")" && [ -n "$m" ] || return 1
   d="$(mktemp -d "${TMPDIR:-/tmp}/mu-fp.XXXXXX")"; mkdir -p "$d/files"
-  fp --user remote-info --show-metadata "$FP_REMOTE" "$ref" > "$d/metadata" && [ -s "$d/metadata" ] || { rm -rf "$d"; return 1; }
+  printf '%s\n' "$m" > "$d/metadata"   # byte for byte the commit's xa.metadata (flatpak checks that at deploy)
   c="$(ostree --repo="$repo" commit --orphan --tree=dir="$d" --bind-ref="$ref" --timestamp=@86400 --no-xattrs \
-         --canonical-permissions --add-metadata-string=xa.metadata="$(cat "$d/metadata")" \
+         --canonical-permissions --add-metadata-string=xa.metadata="$m
+" \
          -s "μ placeholder: lets flatpak update --commit download a pinned commit directly")" || { rm -rf "$d"; return 1; }
   rm -rf "$d"
   ostree --repo="$repo" refs --delete "mu-placeholder/$ref" >&2
