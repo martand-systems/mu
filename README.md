@@ -135,6 +135,6 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
 | S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain (`docs/verification/`) |
 | S2: linux-64 provisioning | Every tool runs headless on Ubuntu 24.04 (plain and WSL images); see `docs/verification/` |
 | S3: WSL2 compute node | Done: the office PC's distro runs after a reboot with nobody signed in; install passes doctor and benchmarks there (`docs/verification/`) |
-| S4: relay | Not started |
+| S4: relay | chisel relay (`relay/`) passes behind replicas of Dokploy's Traefik in CI; deploy and the real-server check are next (`docs/verification/`) |
 
 `legacy/` holds the hand-built toolchain's activation script, setup report and instructions. They're the reference that the recipe has to reproduce.
