@@ -1,0 +1,50 @@
+#!/bin/sh
+# mu-node-gate: sshd's ForceCommand for the user mu on a μ compute node (docs/design/job-layer.md §7.1).
+#
+# Installed root-owned, mode 755, as /usr/local/lib/mu/mu-node-gate, with the two machine values below written in
+# by the host script (mu-wsl2-distro): replace @MU_BIN@ and @MU_KEYS@. It is a protocol boundary and an audit point,
+# not a sandbox: it checks the SHAPE of the request and hands it to `mu node serve`, which owns the verb table.
+#
+#   request = verb *( 1*SP arg )  |  "git-receive-pack '" repo ".git'"
+#             at most 512 bytes; only A-Z a-z 0-9 . _ : = , + - and space (the git form adds its two ')
+#   verb    = 1*( a-z | "-" ), not starting with "-"
+#   arg     = key "=" value, key starting with a-z; at most 15 arguments
+#   repo    = 1*80( a-z | 0-9 | "." | "_" | "-" ), not starting with "." or "-"
+#
+# A refused request prints one JSON line and exits 64. The key's name comes from sshd (ExposeAuthInfo yes writes the
+# key that logged in to $SSH_USER_AUTH) and the root-owned key file, never from anything a client or a job can set.
+set -fu                                   # -f: the unquoted split below must never glob
+PATH=/usr/local/bin:/usr/bin:/bin; export PATH
+LC_ALL=C; export LC_ALL
+MU_BIN='@MU_BIN@'                         # e.g. /home/mu/.local/share/mu/bin/mu
+KEYS='@MU_KEYS@'                          # /etc/mu/authorized_keys/mu
+deny() {  # deny CODE HINT
+  printf '{"ok":false,"error":"%s","hint":"%s","protocol":1}\n' "$1" "$2"
+  exit 64
+}
+case "$MU_BIN$KEYS" in *@MU_*) deny not-installed "the host script fills in this gate's paths: mu-wsl2-distro install" ;; esac
+c="${SSH_ORIGINAL_COMMAND-}"
+[ -n "$c" ] || deny no-command "this account runs mu node verbs only; there is no shell"
+[ "${#c}" -le 512 ] || deny too-long "the request line is longer than 512 bytes; structured data goes on stdin"
+name=unknown
+if [ -r "${SSH_USER_AUTH-}" ]; then
+  read -r _m kt kb _r < "$SSH_USER_AUTH" || true
+  name="$(awk -v t="${kt-}" -v b="${kb-}" '{ for (i = 1; i < NF; i++) if ($i == t && $(i+1) == b) { print $(i+2); exit } }' "$KEYS" 2>/dev/null)"
+  case "$name" in ''|*[!a-z0-9-]*) name=unknown ;; esac
+fi
+case "$c" in
+  "git-receive-pack '"*"'")               # what `git push mu-<node>:<project-id>.git` sends
+    p="${c#git-receive-pack \'}"; p="${p%\'}"
+    case "$p" in ''|.*|-*|*[!a-z0-9._-]*) deny bad-repository "expected git-receive-pack '<project-id>.git'" ;; esac
+    case "$p" in *.git) ;; *) deny bad-repository "expected git-receive-pack '<project-id>.git'" ;; esac
+    [ "${#p}" -le 84 ] || deny bad-repository "expected git-receive-pack '<project-id>.git'"
+    set -- receive-pack "repo=${p%.git}" ;;
+  *[!A-Za-z0-9._:=,+\ -]*) deny bad-character "allowed: A-Z a-z 0-9 . _ : = , + - and single spaces" ;;
+  *) set -- $c ;;                         # split on spaces; -f above: no globbing
+esac
+[ $# -ge 1 ] && [ $# -le 16 ] || deny bad-request "expected <verb> [key=value ...], at most 15 arguments"
+case "$1" in *[!a-z-]*|-*) deny bad-verb "a verb is lower-case letters and '-'" ;; esac
+v="$1"; shift
+for a in "$@"; do case "$a" in [a-z]*=*) ;; *) deny bad-argument "arguments are key=value" ;; esac; done
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"; export XDG_RUNTIME_DIR
+exec "$MU_BIN" node serve "--key=$name" "$v" "$@"

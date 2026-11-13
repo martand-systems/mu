@@ -123,6 +123,7 @@ st() { awk -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } EN
 calls() { grep -c . "$MU_TEST_CALLS" 2>/dev/null || true; }
 def() { cat "$MU_HOME/default"; }
 rev() { sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$MU_HOME/bin/mu" | head -1; }
+REV="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$REPO/bin/mu")"   # this checkout's dispatcher
 nlogs() { ls "$MU_HOME/logs" 2>/dev/null | grep -c '^autoupdate-'; }
 
 printf 'μ auto-update tests · bash %s · %s\n' "$BASH_VERSION" "$ROOT"
@@ -387,14 +388,14 @@ fresh disp disp
 sum_mu="$(cksum < "$MU_HOME/bin/mu")"; sum_lfs="$(cksum < "$MU_HOME/bin/git-lfs")"
 mu autoupdate run >/dev/null; rc=$?
 eq "auto-update: run exits 1" "$rc" 1
-eq "auto-update: bin/mu restored (rev 6, not the failed release's 99)" "$(rev)" 6
+eq "auto-update: bin/mu restored (this checkout's rev, not the failed release's 99)" "$(rev)" "$REV"
 eq "auto-update: bin/mu is the previous file" "$(cksum < "$MU_HOME/bin/mu")" "$sum_mu"
 eq "auto-update: bin/git-lfs restored" "$(cksum < "$MU_HOME/bin/git-lfs")" "$sum_lfs"
 hasnt "auto-update: mu versions works" "$(mu versions 2>&1)" "BROKEN"
 eq "auto-update: default kept" "$(def)" v2026.11.4
 out="$(mu update 2>&1)"; rc=$?
 check "mu update: exits non-zero" test "$rc" != 0
-eq "mu update: bin/mu restored" "$(rev)" 6
+eq "mu update: bin/mu restored" "$(rev)" "$REV"
 eq "mu update: bin/git-lfs restored" "$(cksum < "$MU_HOME/bin/git-lfs")" "$sum_lfs"
 eq "mu update: default kept" "$(def)" v2026.11.4
 mkrepo disp2 "v2026.11.4:success v2026.11.5:newdisp"
@@ -448,7 +449,7 @@ eq "fail_count 1" "$(st fail_count)" 1
 eq "fail_reason timeout" "$(st fail_reason)" timeout
 has "summary" "$out" "did not finish within 3 s"
 check "the installer's sleep was killed" sh -c '! pgrep -f "sleep 599" >/dev/null'
-eq "bin/mu restored after the stop" "$(rev)" 6
+eq "bin/mu restored after the stop" "$(rev)" "$REV"
 eq "default kept" "$(def)" v2026.11.4
 check "no install lock left behind" sh -c "! test -d '$MU_HOME/.install.lock' || ! ps -p \"\$(cat '$MU_HOME/.install.lock/pid' 2>/dev/null)\" >/dev/null"
 has "mu status warns" "$(mu)" "v2026.11.5 did not finish installing"
@@ -465,7 +466,7 @@ sleep 1
 eq "fail_count 1 (recorded before the install started)" "$(st fail_count)" 1
 eq "fail_version" "$(st fail_version)" v2026.11.5
 eq "fail_reason interrupted" "$(st fail_reason)" interrupted
-eq "bin/mu restored by the TERM trap" "$(rev)" 6
+eq "bin/mu restored by the TERM trap" "$(rev)" "$REV"
 check "the installer's sleep was killed" sh -c '! pgrep -f "sleep 599" >/dev/null'
 has "mu status says it was stopped" "$(mu)" "v2026.11.5 was stopped while installing"
 for i in 2 3; do MU_AUTOUPDATE_TIMEOUT_S=1 mu autoupdate run >/dev/null; done

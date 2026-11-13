@@ -61,6 +61,7 @@ ROOT_LINE="/dev/sdc / ext4 rw,relatime,discard,errors=remount-ro,data=ordered 0 
 printf '%s\n%s\n%s\n%s\n' "$ROOT_LINE" "$C_LINE" "$D_LINE" "$E_LINE" > "$TD/mounts"
 printf '%s\n%s\n' "$ROOT_LINE" "$D_LINE" > "$TD/mounts-noc"
 printf '%s\n' "$ROOT_LINE" > "$TD/mounts-none"
+printf 'D /mnt/d\n' > "$TD/hd-d"; printf 'CD /mnt/c\n' > "$TD/hd-bad"   # host-drive records (install/hosts/wsl2)
 
 cat > "$TD/case.sh" <<'EOS'
 # runs one case as the installer does: set -E, errexit, pipefail and an ERR trap (inherited by $(...)), so any helper
@@ -92,6 +93,8 @@ for B in $BASHES; do
   }
   NI="no answer from Windows (reg.exe), so C: is assumed"
   t "not WSL: df as it is"                      "934|||"                   MU_WSL=0
+  t "WSL, drive recorded by the host script, interop off" "410|D: (WSL disk)||" WSL_DISTRO_NAME=x MU_WSL_REG=/nonexistent MU_WSL_HOST_DRIVE="$TD/hd-d"
+  t "WSL, host-drive record damaged: reg.exe as before" "130|C: (WSL disk)||" WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_HOST_DRIVE="$TD/hd-bad"
   t "WSL, distro found (CRLF): its drive C:"    "130|C: (WSL disk)||"      WSL_DISTRO_NAME=Ubuntu-24.04
   t "WSL, \\\\?\\D:\\ base path: D:"            "410|D: (WSL disk)||"      WSL_DISTRO_NAME=mu-compute
   t "WSL, UTF-16LE output with BOM"             "410|D: (WSL disk)||"      WSL_DISTRO_NAME=mu-compute MU_WSL_REG="$TD/bin/utf16.exe"

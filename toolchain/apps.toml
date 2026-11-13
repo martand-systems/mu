@@ -34,6 +34,20 @@ kind   = "tar"
 source_item = "uv-x86_64-unknown-linux-gnu"
 target = "uv"
 
+[chisel]
+version = "1.12.0"
+source  = "github.com/jpillora/chisel (the job layer's relay client; the same release and sums as relay/Dockerfile)"
+[chisel.osx-arm64]
+file   = "chisel_1.12.0_darwin_arm64.gz"
+sha256 = "707a4b932eea214765146504a0df246cefc415b4297af65a80dd67cf69ba85a9"
+url    = "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_darwin_arm64.gz"
+kind   = "gz.bin"
+[chisel.linux-64]
+file   = "chisel_1.12.0_linux_amd64.gz"
+sha256 = "f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6"
+url    = "https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_amd64.gz"
+kind   = "gz.bin"
+
 [openvsp]
 version = "3.56.0"
 source  = "openvsp.org (ARM64 / Python 3.13 build; includes VSPAERO 7.2.2 and the Python API)"
