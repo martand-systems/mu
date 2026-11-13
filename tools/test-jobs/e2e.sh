@@ -107,7 +107,8 @@ setup() {
   row PASS S1 "relay and Traefik replica (tools/s4/run.sh relay)" "$(tail -1 "$WORK/logs/relay-up.log")"
   sudo CI=true "$ROOT/tools/test-jobs/node-setup.sh" "$ROOT" "$WORK/chisel" "$S4W/certs/ca.crt" "$S4W/env/compute.env" \
     > "$WORK/logs/node-setup.log" 2>&1 || { tail -40 "$WORK/logs/node-setup.log"; row FAIL S2 "node set-up" "failed"; return 1; }
-  row PASS S2 "node set-up (§13 on the runner: mu-sshd, gate, /srv/mu, mu-tunnel, runner)" "ok"
+  MU_UID="$(id -u mu)"   # the user exists only now
+  row PASS S2 "node set-up (§13 on the runner: mu-sshd, gate, /srv/mu, mu-tunnel, runner)" "uid of mu $MU_UID"
   local fp pw out
   fp="$(sed -n 's/^RELAY_FINGERPRINT=//p' "$S4W/env/workstation.env")"; pw="$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/workstation.env")"
   out="$(printf '%s\n' "$pw" | sudo -u ws -H "$WSH/bin/mu" compute add office-pc --host-key "$(sudo cat /etc/mu/ssh_host_ed25519_key.pub)" \
