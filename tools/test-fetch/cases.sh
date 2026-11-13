@@ -35,7 +35,7 @@ procs() { pgrep -f "127.0.0.1:$PORT/" | tr '\n' ' ' || true; }   # curl processe
 begin() {
   CASE="$1"; PROBS=""; NOTE=""; rm -rf "$DL"; mkdir -p "$DL"; : > "$TF/fail.msg"; : > "$TF/case.log"
   curl -s "$U/_reset" >/dev/null
-  unset MU_DL_SEGMENTS MU_DL_STALL_S MU_DL_MAX_IDLE MU_DL_BACKOFF_MAX MU_DL_SEG_MIN
+  unset MU_DL_SEGMENTS MU_DL_STALL_S MU_DL_IDLE_S MU_DL_MAX_ATTEMPTS MU_DL_BACKOFF_MAX MU_DL_SEG_MIN CURL_HOME
 }
 run_fetch() {   # run_fetch NAME URL SHA: like the installer; sets OUT RC SECS STATS
   local t0 t1; t0=$(now)
@@ -64,6 +64,20 @@ zero() {   # zero N: how many data requests started at byte 0 (1 = the file was 
 served() {   # served LO HI (bytes)
   local b; b=$(sv bytes)
   if [ "$b" -lt "$1" ] || [ "$b" -gt "$2" ]; then add "served $b bytes, expected $1..$2"; fi
+}
+interrupt() {   # interrupt COMMAND...: run it in its own process group; once 8 MB are in range files (or after 30 s),
+  # send SIGINT to the group, as Ctrl-C does (waiting for progress, not a fixed time: a loaded machine starts slowly)
+  python3 -I -c 'import glob, os, signal, subprocess, sys, time
+p = subprocess.Popen(sys.argv[2:], start_new_session=True)
+t = time.time() + 30
+def held():
+    n = 0
+    for f in glob.glob(sys.argv[1] + "/big.bin.part.[0-9][0-9]"):
+        try: n += os.path.getsize(f)
+        except OSError: pass
+    return n
+while time.time() < t and held() < 8 << 20 and p.poll() is None: time.sleep(0.1)
+os.killpg(p.pid, signal.SIGINT); p.wait(timeout=60)' "$DL" "$@"
 }
 log_has() { if ! grep -q "$1" "$TF/case.log"; then add "log lacks '$1'"; fi; }
 log_lacks() { if grep -q "$1" "$TF/case.log"; then add "log has '$1'"; fi; }
@@ -137,8 +151,8 @@ fi
 if want c-norange; then   # (c) server ignores Range (200, whole file) and resets the first transfer at 10 MB:
   # probe sees 200 -> one connection; the resume gets 200 -> curl 33 -> start over (the only case that re-sends)
   begin c-norange; run_fetch big.bin "$U/m/norange+drop=10000000x1/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
-  # 3 requests from byte 0: the first transfer, the resume the server answered from 0 (refused), the restart
-  served $((S + 10000000)) $((S + 10000000 + 16 * MB)); zero 3; log_has "cannot resume"; log_lacks "parallel ranges"
+  # 2 requests from byte 0: the first transfer and the restart (the resume between them asked for 10 MB on, got 200)
+  served $((S + 10000000)) $((S + 10000000 + 16 * MB)); zero 2; log_has "cannot resume"; log_lacks "parallel ranges"
   NOTE="fallback: one connection, restart after curl 33"; end
 fi
 if want c-norange-ranges; then   # (c) server honours only the 1-byte probe, answers every range with the whole file
@@ -149,8 +163,68 @@ fi
 if want d-416; then   # (d) every Range gets 416, and a stale 1 MB garbage .part is in the cache
   begin d-416; head -c "$MB" /dev/urandom > "$DL/big.bin.part"
   run_fetch big.bin "$U/m/r416/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
-  served "$S" "$S"; log_has "does not verify"
-  NOTE="stale partial discarded once, then one connection"; end
+  served "$S" "$S"; zero 1; log_has "cannot resume"
+  NOTE="stale partial discarded (416), then one connection"; end
+fi
+if want d-416-fresh; then   # (d) empty cache, one connection dropped at 10 MB, and the resume answered 416: curl takes
+  # that for success (rc 0), so the size must be checked against the 416's Content-Range: start over, no SHA mismatch
+  begin d-416-fresh; export MU_DL_SEGMENTS=1
+  run_fetch big.bin "$U/m/r416+drop=10000000x1/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  served $((S + 10000000)) $((S + 10000000 + 16 * MB)); zero 2; log_has "cannot resume"; log_lacks "does not verify"
+  NOTE="416 to the resume -> restart"; end
+fi
+if want c-one-200; then   # (c) one range request (the 4th) answered with a whole-file 200 (a CDN cache miss): that
+  # answer is dropped and the range asked again; the ranges carry on, nothing is re-downloaded
+  begin c-one-200; run_fetch big.bin "$U/m/full200=4-4/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  served "$S" $((S + 16 * MB)); zero 1; [ "$(sv ranges_ignored)" = 1 ] || add "expected 1 ignored range, got $(sv ranges_ignored)"
+  log_has "instead of the range"; log_lacks "continuing on one connection"
+  NOTE="200 to one range: asked again, ranges kept"; end
+fi
+if want c-keep-prefix; then   # (c) the 8th range request drops at 1 MB and the next three requests (its resumes) get
+  # whole-file 200s: ranges are given up, and the ranges that join up from byte 0 are kept for the one connection
+  begin c-keep-prefix; run_fetch big.bin "$U/m/dropnth=8:1000000+full200=9-11/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  # served: the file, plus what follows the kept part once more (one connection), plus the cut-off 200s (<= 24 MB)
+  P=$(sed -n 's/.*: \([0-9.]*\) MB from byte 0 kept.*/\1/p' "$TF/case.log" | head -1)
+  P=$(awk -v m="${P:-0}" 'BEGIN { printf "%d", m * 1048576 }'); [ "$P" -ge $((10 * MB)) ] || add "kept only $P bytes"
+  served "$S" $((2 * S - P + 24 * MB)); zero 1; log_has "continuing on one connection"
+  NOTE="fallback kept $(mb "$P") MB, fetched $(mb $((S - P))) MB again"; end
+fi
+if want i-maxconn; then   # a server that allows 4 connections per client (503 for more), 1 MB/s each, and a short
+  # MU_DL_IDLE_S=3 (each range needs 10 s): the refused ranges keep trying while the others deliver, then get a slot
+  begin i-maxconn; export MU_DL_IDLE_S=3 MU_DL_BACKOFF_MAX=1
+  run_fetch big.bin "$U/m/maxconn=4+throttle=1000000/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  served "$S" $((S + 1)); zero 1; [ "$(sv status_503)" -gt 0 ] || add "no 503 seen"; log_lacks "giving up"
+  NOTE="$(sv status_503)x 503, waited for slots"; end
+fi
+if want i-maxconn-rounds; then   # as above, but MU_DL_MAX_ATTEMPTS=2: the refused ranges give up, and a second round
+  # runs them once the first 4 are done
+  begin i-maxconn-rounds; export MU_DL_MAX_ATTEMPTS=2 MU_DL_BACKOFF_MAX=1
+  run_fetch big.bin "$U/m/maxconn=4+throttle=2000000/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  served "$S" $((S + 1)); zero 1; log_has "running them again (round 2)"
+  NOTE="$(sv status_503)x 503, refused ranges in round 2"; end
+fi
+if want j-proxy; then   # through an HTTP CONNECT proxy (.curlrc: proxytunnel) that closes the 5th tunnel right after
+  # "200 Connection established": a transient failure, not a refused range (the 200 is the proxy's, not the server's)
+  begin j-proxy; curl -s "$U/_proxyfault/5" >/dev/null
+  mkdir -p "$TF/curlhome"; printf 'proxytunnel\nproxy = "http://127.0.0.1:%s"\nnoproxy = ""\n' "$PORT" > "$TF/curlhome/.curlrc"
+  export CURL_HOME="$TF/curlhome"; run_fetch big.bin "$U/m/plain/big.bin" "$BIG_SHA"; unset CURL_HOME
+  expect_ok big.bin "$BIG_SHA"; served "$S" $((S + 1)); zero 1
+  [ "$(sv proxy_faults)" = 1 ] || add "expected 1 broken tunnel, got $(sv proxy_faults) (tunnels: $(sv proxy_tunnels))"
+  log_lacks "does not serve ranges"; log_lacks "instead of the range"; log_has "resuming in"
+  NOTE="$(sv proxy_tunnels) tunnels, 1 broken: resumed"; end
+fi
+if want k-outage; then   # default settings: 8 ranges at 1 MB/s each; the server goes away at 3 s (connections closed,
+  # then refused) and comes back on the same port 40 s later: every range waits and resumes (gave up at ~31 s before)
+  begin k-outage; rm -f "$TF/port2"
+  python3 -I "$REPO/tools/test-fetch/server.py" "$TF/srv" "$TF/port2" > "$TF/server2.log" 2>&1 & P2=$!
+  disown "$P2" 2>/dev/null || true   # it is killed on purpose: no "Terminated" report
+  for _ in $(seq 1 100); do [ -s "$TF/port2" ] && break; sleep 0.1; done; PORT2=$(cat "$TF/port2")
+  ( trap - ERR; set +e; sleep 3; kill "$P2"; wait "$P2" 2>/dev/null; sleep 40
+    exec python3 -I "$REPO/tools/test-fetch/server.py" "$TF/srv" "$TF/port2" 80 3 "$PORT2" >> "$TF/server2.log" 2>&1 ) & P3=$!
+  run_fetch big.bin "http://127.0.0.1:$PORT2/m/throttle=1000000/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
+  pkill -P "$P3" 2>/dev/null || true; kill "$P3" 2>/dev/null || true; wait "$P3" 2>/dev/null || true
+  log_has "resuming in"; log_lacks "giving up"; STATS=""
+  NOTE="40 s outage survived"; end
 fi
 if want e-redirect; then   # (e) a redirect hop: resolved once by the probe; the 8 ranges go straight to the target
   begin e-redirect; run_fetch big.bin "$U/r/plain/big.bin" "$BIG_SHA"; expect_ok big.bin "$BIG_SHA"
@@ -186,10 +260,7 @@ fi
 if want h-interrupt-fg; then   # Ctrl-C (SIGINT to the process group) during a ranged fetch in the main shell
   begin h-interrupt-fg
   t0=$(now)
-  python3 -I -c 'import os, signal, subprocess, sys, time
-p = subprocess.Popen(sys.argv[2:], start_new_session=True)
-time.sleep(float(sys.argv[1])); os.killpg(p.pid, signal.SIGINT); p.wait(timeout=60)' \
-    3 "$BASH" "$0" --child-fg big.bin "$U/m/throttle=1000000/big.bin" "$BIG_SHA" >> "$TF/case.log" 2>&1 || add "child did not exit"
+  interrupt "$BASH" "$0" --child-fg big.bin "$U/m/throttle=1000000/big.bin" "$BIG_SHA" >> "$TF/case.log" 2>&1 || add "child did not exit"
   left=$(procs); [ -z "$left" ] || { sleep 1; left=$(procs); }
   [ -z "$left" ] || { add "orphaned curl processes: $left"; kill $left 2>/dev/null || true; }
   [ -f "$DL/big.bin.part.layout" ] || add "range state not kept for a re-run"
@@ -201,10 +272,7 @@ time.sleep(float(sys.argv[1])); os.killpg(p.pid, signal.SIGINT); p.wait(timeout=
 fi
 if want h-interrupt-job; then   # Ctrl-C while the fetch runs in a background job: the installer's cleanup kills the tree
   begin h-interrupt-job
-  python3 -I -c 'import os, signal, subprocess, sys, time
-p = subprocess.Popen(sys.argv[2:], start_new_session=True)
-time.sleep(float(sys.argv[1])); os.killpg(p.pid, signal.SIGINT); p.wait(timeout=60)' \
-    3 "$BASH" "$0" --child-job big.bin "$U/m/throttle=1000000/big.bin" "$BIG_SHA" >> "$TF/case.log" 2>&1 || add "child did not exit"
+  interrupt "$BASH" "$0" --child-job big.bin "$U/m/throttle=1000000/big.bin" "$BIG_SHA" >> "$TF/case.log" 2>&1 || add "child did not exit"
   left=$(procs); [ -z "$left" ] || { sleep 1; left=$(procs); }
   [ -z "$left" ] || { add "orphaned curl processes: $left"; kill $left 2>/dev/null || true; }
   [ -f "$DL/big.bin.part.layout" ] || add "range state not kept for a re-run"
@@ -214,10 +282,26 @@ if want fail-404; then   # a permanent error fails at once, with the installer's
   begin fail-404; run_fetch nope.bin "$U/m/plain/nope.bin" "$BIG_SHA"; expect_fail "download failed: $U/m/plain/nope.bin"
   awk -v s="$SECS" 'BEGIN { exit !(s < 5) }' || add "took ${SECS}s"; NOTE="fails fast"; end
 fi
-if want fail-offline; then   # nothing listening: bounded attempts (MU_DL_MAX_IDLE=3, backoff 1 s), then fail
-  begin fail-offline; export MU_DL_MAX_IDLE=3 MU_DL_BACKOFF_MAX=1
+if want fail-offline; then   # nothing listening: bounded by time without data (MU_DL_IDLE_S=4, backoff 1 s), then fail
+  begin fail-offline; export MU_DL_IDLE_S=4 MU_DL_BACKOFF_MAX=1
   run_fetch small.bin "http://127.0.0.1:9/small.bin" "$SMALL_SHA"; expect_fail "download failed"
-  log_has "giving up after 3 attempts"; NOTE="gave up after 3 idle attempts"; end
+  log_has "giving up after"; awk -v s="$SECS" 'BEGIN { exit !(s >= 3 && s < 15) }' || add "took ${SECS}s"   # (whole seconds: 3-4 s)
+  NOTE="gave up after 4 s without data"; end
+fi
+if want fail-outage-ranges; then   # the server goes away for good during a ranged fetch (MU_DL_IDLE_S=4, backoff 1 s):
+  # every range gives up 4 s after the last byte, no second round (the data stopped for all), and the range state stays
+  begin fail-outage-ranges; export MU_DL_IDLE_S=4 MU_DL_BACKOFF_MAX=1; rm -f "$TF/port3"
+  python3 -I "$REPO/tools/test-fetch/server.py" "$TF/srv" "$TF/port3" > "$TF/server3.log" 2>&1 & P3=$!
+  disown "$P3" 2>/dev/null || true
+  for _ in $(seq 1 100); do [ -s "$TF/port3" ] && break; sleep 0.1; done
+  ( trap - ERR; set +e; sleep 2; kill "$P3" ) &
+  run_fetch big.bin "http://127.0.0.1:$(cat "$TF/port3")/m/throttle=1000000/big.bin" "$BIG_SHA"; wait $! || true
+  [ "$RC" != 0 ] || add "fetch succeeded"; [ -z "$OUT" ] || add "stdout not empty: '$OUT'"
+  grep -q "download failed" "$TF/fail.msg" || add "no 'download failed' message"; no_err_trap
+  [ -f "$DL/big.bin.part.layout" ] || add "range state not kept for a re-run"
+  case " $(leftovers) " in *.hdr*|*norange*) add "files left: $(leftovers)" ;; esac
+  awk -v s="$SECS" 'BEGIN { exit !(s >= 4 && s < 15) }' || add "took ${SECS}s"; log_lacks "round 2"
+  STATS=""; NOTE="gave up 4 s after the last byte; ranges kept"; end
 fi
 if want fail-sha; then   # a wrong checksum: fails with both values, removes the bad file
   begin fail-sha; run_fetch small.bin "$U/m/plain/small.bin" 0000000000000000000000000000000000000000000000000000000000000000

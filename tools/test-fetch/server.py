@@ -1,8 +1,8 @@
 """Fault-injecting HTTP server for the installer's download tests (stdlib only; run with python3 -I).
 
-    python3 -I server.py DIR PORTFILE [BIG_MB] [SMALL_MB]
+    python3 -I server.py DIR PORTFILE [BIG_MB] [SMALL_MB] [PORT]
 
-Writes DIR/big.bin and DIR/small.bin (random bytes) if missing, listens on 127.0.0.1 (a free port, written to
+Writes DIR/big.bin and DIR/small.bin (random bytes) if missing, listens on 127.0.0.1 (PORT, or a free port; written to
 PORTFILE) and serves the files with byte-range support. The URL path selects the behaviour:
 
     /m/<spec>/<file>        the file, with the faults in <spec>
@@ -11,6 +11,8 @@ PORTFILE) and serves the files with byte-range support. The URL path selects the
                             release URLs); a token is valid for expire=S seconds, then answers 403
     /_stats                 counters since the last reset (key=value lines)
     /_reset                 zero the counters and the per-spec fault state
+    /_proxyfault/N          the server is also an HTTP CONNECT proxy (for curl --proxytunnel): close the Nth tunnel
+                            right after "200 Connection established" (0: none). Counted from the last /_reset.
 
 <spec> is "plain" or faults joined by "+":
     drop=KxN        the first N data requests send K body bytes, then close the connection (curl 18)
@@ -22,11 +24,15 @@ PORTFILE) and serves the files with byte-range support. The URL path selects the
     norange         ignore Range (always 200 with the whole file; Accept-Ranges: bytes is still advertised)
     rangeprobe      honour only the "bytes=0-0" probe; any other range gets the whole file (200)
     r416            any Range gets 416
+    maxconn=K       at most K data responses of this spec at a time; more get 503 (a per-client connection limit)
+    full200=A-B     data requests A..B (numbered from 1) ignore their Range: 200 with the whole file (a CDN cache miss)
+    dropnth=N:K     data request N sends K body bytes, then closes the connection
     expire=S        (with /gh/) a signed token is valid for S seconds (checked when a request starts)
 A "data request" is any GET of a file except the 1-byte probe (Range: bytes=0-0).
 """
 import io
 import os
+import select
 import socket
 import socketserver
 import struct
@@ -40,6 +46,8 @@ LOCK = threading.Lock()
 STATS = {}
 STATE = {}       # spec -> number of data requests seen (for drop/stall "first N")
 TOKENS = {}      # token -> time issued
+ACTIVE = {}      # spec -> data responses in progress (maxconn)
+PROXY = {"fault": 0, "n": 0}
 STOP = threading.Event()
 
 
@@ -79,6 +87,44 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def do_CONNECT(self):
+        """A forwarding CONNECT proxy (only to 127.0.0.1). The Nth tunnel (see /_proxyfault) closes right after the
+        proxy's 200, before the server's answer: a TLS reset or timeout behind a corporate proxy looks like this."""
+        host, _, port = self.path.rpartition(":")
+        with LOCK:
+            PROXY["n"] += 1
+            broken = PROXY["n"] == PROXY["fault"]
+        bump("proxy_tunnels")
+        self.close_connection = True
+        if host not in ("127.0.0.1", "localhost"):
+            return self.send_simple(403, b"")
+        self.send_response(200, "Connection established")
+        self.end_headers()
+        self.wfile.flush()
+        if broken:
+            bump("proxy_faults")
+            return
+        try:
+            up = socket.create_connection(("127.0.0.1", int(port)))
+        except OSError:
+            return
+        a, b = self.connection, up
+        socks = [a, b]
+        try:
+            while True:
+                r, _, _ = select.select(socks, [], [], 1.0)
+                if STOP.is_set():
+                    return
+                for s in r:
+                    data = s.recv(65536)
+                    if not data:
+                        return
+                    (b if s is a else a).sendall(data)
+        except OSError:
+            return
+        finally:
+            up.close()
+
     def do_GET(self):
         parts = self.path.split("/")
         if self.path == "/_stats":
@@ -87,7 +133,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_simple(200, body)
         if self.path == "/_reset":
             with LOCK:
-                STATS.clear(); STATE.clear(); TOKENS.clear()
+                STATS.clear(); STATE.clear(); TOKENS.clear(); PROXY["n"] = 0; PROXY["fault"] = 0
+            return self.send_simple(200, b"ok\n")
+        if len(parts) == 3 and parts[1] == "_proxyfault":
+            with LOCK:
+                PROXY["fault"] = int(parts[2]); PROXY["n"] = 0
             return self.send_simple(200, b"ok\n")
         # /r/<spec>/<file> and /gh/<spec>/<file>: redirects
         if len(parts) == 4 and parts[1] == "r":
@@ -129,9 +179,31 @@ class Handler(BaseHTTPRequestHandler):
             if time.time() - issued > float(f.get("expire", "1e9")):
                 bump("status_403")
                 return self.send_simple(403, b"signature expired\n")
+        if not probe and "maxconn" in f:
+            with LOCK:
+                busy = ACTIVE.get(spec, 0) >= int(f["maxconn"])
+                if not busy:
+                    ACTIVE[spec] = ACTIVE.get(spec, 0) + 1
+            if busy:
+                bump("status_503")
+                return self.send_simple(503, b"too many connections\n")
+            try:
+                return self.serve(f, spec, path, size, rng, probe, nth)
+            finally:
+                with LOCK:
+                    ACTIVE[spec] -= 1
+        return self.serve(f, spec, path, size, rng, probe, nth)
+
+    def serve(self, f, spec, path, size, rng, probe, nth):
+        ignore = False
+        if "full200" in f and not probe:
+            a, _, b = f["full200"].partition("-")
+            ignore = int(a) <= nth <= int(b or a)
+            if ignore and rng:
+                bump("ranges_ignored")
         start, end = 0, size  # [start, end)
         partial = False
-        if rng and "norange" not in f and not ("rangeprobe" in f and not probe):
+        if rng and "norange" not in f and not ("rangeprobe" in f and not probe) and not ignore:
             if "r416" in f:
                 bump("status_416")
                 return self.send_simple(416, b"", [("Content-Range", "bytes */%d" % size)])
@@ -143,8 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             start = int(a)
             end = min(int(b) + 1, size) if b.isdigit() else size
             partial = True
-        if not probe and start == 0:
-            bump("from_zero")  # requests that (re)start the file from its first byte
+        if not probe and (not rng or rng.startswith("bytes=0-")):
+            bump("from_zero")  # requests that ask for the file from its first byte (a start or restart)
         self.send_response(206 if partial else 200)
         bump("status_%d" % (206 if partial else 200))
         self.send_header("Accept-Ranges", "bytes")
@@ -161,6 +233,10 @@ class Handler(BaseHTTPRequestHandler):
                 k, _, n = f[key].partition("x")
                 if not probe and nth <= int(n or 1):
                     limit, mode = int(k), key
+        if "dropnth" in f and not probe:
+            n, _, k = f["dropnth"].partition(":")
+            if nth == int(n):
+                limit, mode = int(k), "drop"
         bps = int(f["throttle"]) if "throttle" in f else 0
         sent = 0
         t0 = time.time()
@@ -236,7 +312,8 @@ def main():
                     fh.write(os.urandom(1 << 20))
             os.replace(p + ".tmp", p)
     Handler.root = root
-    srv = Server(("127.0.0.1", 0), Handler)
+    port = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+    srv = Server(("127.0.0.1", port), Handler)
     with open(portfile + ".tmp", "w") as fh:
         fh.write(str(srv.server_address[1]))
     os.replace(portfile + ".tmp", portfile)
