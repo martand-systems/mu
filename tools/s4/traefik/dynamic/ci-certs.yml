@@ -1,0 +1,7 @@
+# CI only, no production counterpart: a certificate from the throw-away test CA for the relay host, loaded the
+# way Dokploy loads custom certificates (file provider). With a certificate already covering the host, Traefik
+# does not start an ACME order for it; clients verify it with --tls-ca.
+tls:
+  certificates:
+    - certFile: /etc/dokploy/traefik/dynamic/certificates/relay.crt
+      keyFile: /etc/dokploy/traefik/dynamic/certificates/relay.key

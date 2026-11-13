@@ -1,0 +1,92 @@
+# S4 (docs/PLAN.md §16): chisel through Dokploy's Traefik. Each job builds a replica of the server on the runner's
+# Docker (Dokploy's Traefik start line and static config, the labels Dokploy adds, relay/compose.yaml as it is in
+# git) and runs tools/s4/run.sh in it, once per Traefik version Dokploy has shipped since v0.29. Nothing here
+# contacts the real server: relay.martand.systems resolves to the runner inside the test containers.
+name: s4-relay
+on:
+  push:
+    paths:
+      - "relay/**"
+      - "tools/s4/**"
+      - ".github/workflows/s4-relay.yml"
+  workflow_dispatch:
+    inputs:
+      idle:
+        description: "idle period, seconds"
+        required: false
+        default: "240"
+      blob_mb:
+        description: "payload each way, MB"
+        required: false
+        default: "100"
+permissions:
+  contents: read
+concurrency:
+  group: s4-relay-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  config:
+    name: credentials and entrypoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: tools/s4/test-config.sh
+
+  relay:
+    name: Traefik v${{ matrix.traefik }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dokploy's pinned Traefik: 3.6.7 up to v0.29.14, 3.6.25 in v0.30.x, 3.7.16 from v0.31.0.
+        traefik: ["3.6.7", "3.6.25", "3.7.16"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replica and tests
+        env:
+          TRAEFIK_VERSION: ${{ matrix.traefik }}
+          S4_IDLE: ${{ github.event.inputs.idle || '240' }}
+          S4_BLOB_MB: ${{ github.event.inputs.blob_mb || '100' }}
+        run: tools/s4/run.sh
+      - name: Summary
+        if: always()
+        run: cat .scratch/s4/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s4-traefik-${{ matrix.traefik }}
+          # logs and results only: the throw-away credentials (env/, cred/, *.env) are not uploaded
+          path: |
+            .scratch/s4/summary.md
+            .scratch/s4/results.tsv
+            .scratch/s4/logs/
+            .scratch/s4/out/
+          include-hidden-files: true
+          retention-days: 14
+
+  # The test of the test: with the wrong container port in the labels the relay is not reachable, and run.sh has to
+  # say so (exit 1, row A1 FAIL) instead of passing.
+  must-fail:
+    name: fails when routing is broken
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run with the wrong container port
+        env:
+          TRAEFIK_VERSION: "3.6.25"
+          S4_BREAK: port
+          S4_IDLE: "5"
+          S4_BLOB_MB: "1"
+        run: |
+          rc=0; tools/s4/run.sh || rc=$?
+          echo "run.sh exit $rc"
+          [ "$rc" = 1 ] || { echo "::error::expected exit 1 (a failed check), got $rc"; exit 1; }
+          grep -q "^FAIL"$'\t'"A1"$'\t' .scratch/s4/results.tsv || { echo "::error::row A1 did not fail"; exit 1; }
+          [ "$(grep -c '^FAIL' .scratch/s4/results.tsv)" = 1 ] || { echo "::error::other rows failed too"; exit 1; }
+          grep -q "^PASS"$'\t'"T2"$'\t' .scratch/s4/results.tsv || { echo "::error::row T2 did not pass"; exit 1; }
+      - name: Summary
+        if: always()
+        run: cat .scratch/s4/summary.md >> "$GITHUB_STEP_SUMMARY" || true

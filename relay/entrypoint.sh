@@ -15,6 +15,7 @@
 # The auth file is written to a tmpfs (/run/relay); the root filesystem is read-only. Nothing secret is printed.
 set -eu
 umask 077
+export LC_ALL=C   # byte-wise character ranges in the checks below, whatever shell runs this
 fail() { echo "relay: $*" >&2; exit 64; }
 
 RUN_DIR="${RELAY_RUN_DIR:-/run/relay}"

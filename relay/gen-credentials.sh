@@ -21,6 +21,9 @@
 # connected clients reconnect by themselves, and the fingerprint only changes with rotate-key.
 set -euo pipefail
 umask 077
+# Byte-wise character ranges: in a UTF-8 locale [a-z] also matches upper-case letters in bash on macOS, and a name
+# like "Mac" would be accepted here and then refused by the relay's entrypoint at start-up.
+export LC_ALL=C
 
 ENV_FILE="${MU_RELAY_ENV:-$HOME/.config/mu/relay.env}"
 URL="${MU_RELAY_URL:-https://relay.martand.systems}"
