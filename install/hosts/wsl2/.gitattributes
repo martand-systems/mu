@@ -1,0 +1,2 @@
+# Shell scripts run inside Linux (the Windows script also normalises line endings when it copies one in)
+*.sh text eol=lf
