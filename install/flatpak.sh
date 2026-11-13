@@ -6,14 +6,15 @@
 #   fp_deploy DIR URL KEY REF@COMMIT...    builds a flatpak installation at DIR from the cache, with no network
 #   fp ARGS                                flatpak with a session D-Bus
 #
-# Download cache: $MU_CACHE/flatpak/repo, an OSTree repository in archive mode (objects stay compressed, as Flathub
-# serves them). A pinned commit is pulled from Flathub straight at that commit (ostree pull flathub REF@COMMIT; never
-# "latest, then update"). Two checks protect it: the commit ID is a SHA-256 over the commit object, which names its root
-# tree by hash, which names every file by hash (a Merkle tree), so every object pulled is verified against the pin; and
-# Flathub's signature on the commit is checked with Flathub's key, pinned in the recipe (KEY), not fetched. The pull
-# resumes where it stopped (objects already fetched are kept; ostree marks the commit partial until it is complete).
-# A ref mu/REF/COMMIT, written last, marks a complete commit: then the network is never used again for it. One pull at a
-# time per cache (flock), so two installs never download the same commit twice. mu gc deletes the refs that no
+# Download cache: $MU_CACHE/flatpak, a flatpak installation used only to download (its repo/ is an OSTree repository).
+# flatpak itself does every download from Flathub (Flathub refuses other OSTree clients), straight at the pinned commit:
+# `flatpak update --commit=PIN --no-deploy REF`. That command needs REF to be installed, so REF is first installed from
+# an empty placeholder commit made locally (no download; it is never run) and stays installed in the cache. Flatpak checks
+# Flathub's signature on the summary and the commit with Flathub's key, pinned in the recipe (KEY), and the commit ID
+# (a SHA-256 over the commit, which names its file tree by hash, which names every file by hash: a Merkle tree) verifies
+# every object pulled. An interrupted pull resumes (fetched objects are kept; the commit stays marked partial until it is
+# complete). A ref mu/REF/COMMIT, written last, marks a complete commit: then the network is never used again for it.
+# One download at a time per cache (flock), so two installs never fetch the same commit twice. mu gc deletes the refs no
 # installed version pins, then the objects no ref reaches (ostree prune).
 #
 # Layer: a private flatpak installation. Its repository (bare-user-only, flatpak's own mode for a user installation)
@@ -23,6 +24,7 @@
 # GL drivers, codecs) are not needed by the headless CLI and are not pinned, so they would make the layer depend on
 # the day it was built. The layer is a copy, not hard links into the cache: sealing a layer (chmod a-w) would change
 # modes that are part of a bare-user-only object's checksum, and deleting the cache must never touch a layer.
+# All ostree commands here are local (no network).
 
 FP_REMOTE=flathub
 
@@ -43,7 +45,7 @@ fp_fetch() {
   command -v ostree >/dev/null 2>&1 || fail "ostree is not installed (it comes with: sudo ./install.sh --system)"
   mkdir -p "$MU_CACHE/flatpak"
   # one result line: ok, or the reason ("|| true": a signal that ends it must not trip the ERR trap)
-  res="$(_fp_pull "$C" "$ref" "$commit" "$url" "$key" || true)"
+  res="$(_fp_pull "$ref" "$commit" "$url" "$key" || true)"
   case "$res" in
     ok) ;;
     "") fail "the flatpak download of $ref was interrupted" ;;
@@ -51,39 +53,60 @@ fp_fetch() {
   esac
 }
 
-# _fp_pull REPO REF COMMIT URL KEY: in a subshell without the ERR trap or errexit; ostree's output goes to stderr (the
+# _fp_placeholder REF: install REF in the cache installation from an empty local commit (see above). Prints nothing.
+_fp_placeholder() {
+  local ref="$1" repo="$MU_CACHE/flatpak/repo" d c rest id arch branch
+  rest="${ref#*/}"; id="${rest%%/*}"; rest="${rest#*/}"; arch="${rest%%/*}"; branch="${rest#*/}"
+  d="$(mktemp -d "${TMPDIR:-/tmp}/mu-fp.XXXXXX")"; mkdir -p "$d/files"
+  case "$ref" in
+    app/*) printf '[Application]\nname=%s\nruntime=%s/%s/%s\n' "$id" "$id" "$arch" "$branch" > "$d/metadata" ;;
+    *)     printf '[Runtime]\nname=%s\n' "$id" > "$d/metadata" ;;
+  esac
+  c="$(ostree --repo="$repo" commit --orphan --tree=dir="$d" --bind-ref="$ref" --timestamp=@86400 --no-xattrs \
+         --canonical-permissions --add-metadata-string=xa.metadata="$(cat "$d/metadata")" \
+         -s "μ placeholder: lets flatpak update --commit download a pinned commit directly")" || { rm -rf "$d"; return 1; }
+  rm -rf "$d"
+  ostree --repo="$repo" refs --create="mu-placeholder/$ref" "$c" >&2 || return 1
+  _fp_set_remote_ref "$repo" "$ref" "$c"
+  fp --user install -y --noninteractive --no-pull --no-deps --no-related "$FP_REMOTE" "$ref" >&2
+}
+_fp_set_remote_ref() { mkdir -p "$1/refs/remotes/$FP_REMOTE/$(dirname "$2")" && echo "$3" > "$1/refs/remotes/$FP_REMOTE/$2"; }
+
+# _fp_pull REF COMMIT URL KEY: in a subshell without the ERR trap or errexit; flatpak's output goes to stderr (the
 # log), and one result line to stdout
 _fp_pull() {
   ( trap - ERR; set +e
-    C="$1"; ref="$2"; commit="$3"; url="$4"; key="$5"
-    exec 9>"$MU_CACHE/flatpak/lock"
+    ref="$1"; commit="$2"; url="$3"; key="$4"; C="$MU_CACHE/flatpak/repo"
+    export FLATPAK_USER_DIR="$MU_CACHE/flatpak"
+    exec 9>"$MU_CACHE/flatpak.lock"
     if ! flock -n 9; then
       echo "waiting for another install's flatpak download" >&2
-      flock -w 14400 9 || { echo "timed out waiting for another install's flatpak download ($MU_CACHE/flatpak/lock)"; exit 1; }
+      flock -w 14400 9 || { echo "timed out waiting for another install's flatpak download ($MU_CACHE/flatpak.lock)"; exit 1; }
     fi
-    if fp_cached "$C" "$ref" "$commit"; then echo ok; exit 0; fi   # the other install pulled it
-    if [ ! -f "$C/config" ]; then
-      rm -rf "$C.new"
-      { ostree init --mode=archive --repo="$C.new" >&2 && mv "$C.new" "$C"; } || { echo "could not create the cache $C"; exit 1; }
+    if fp_cached "$C" "$ref" "$commit"; then echo ok; exit 0; fi   # the other install downloaded it
+    # Flathub, verified with the pinned key (set again every time, so a changed URL or key takes effect)
+    if fp --user remotes --columns=name 2>/dev/null | grep -qx "$FP_REMOTE"; then
+      fp --user remote-modify --url="$url" --gpg-import="$key" "$FP_REMOTE" >&2
+    else
+      fp --user remote-add --gpg-import="$key" "$FP_REMOTE" "$url" >&2
+    fi || { echo "could not set up the $FP_REMOTE remote in $MU_CACHE/flatpak ($(net_hint "$url"))"; exit 1; }
+    if ! ostree --repo="$C" rev-parse "mu-placeholder/$ref" >/dev/null 2>&1 || ! fp --user info "$ref" >/dev/null 2>&1; then
+      _fp_placeholder "$ref" || { echo "could not prepare the download of $ref in $MU_CACHE/flatpak"; exit 1; }
     fi
-    # Flathub, verified with the pinned key (set again on every pull, so a changed URL or key takes effect)
-    ostree --repo="$C" remote delete --if-exists "$FP_REMOTE" >&2
-    ostree --repo="$C" remote add --set=gpg-verify=true --gpg-import="$key" "$FP_REMOTE" "$url" >&2 \
-      || { echo "could not configure the $FP_REMOTE remote in $C"; exit 1; }
     kb0=$(du -sk "$C/objects" 2>/dev/null | cut -f1); t0=$(date +%s)
-    echo "flatpak: pulling $ref@$commit from $url into $C" >&2
+    echo "flatpak: downloading $ref@$commit from $url into $C" >&2
     ok=0; i=1
     while [ "$i" -le 4 ]; do
-      # ostree retries network errors itself; a pull that still fails resumes on the next attempt (fetched objects stay)
-      if ostree --repo="$C" pull "$FP_REMOTE" "$ref@$commit" >&2; then ok=1; break; fi
-      echo "flatpak: pull attempt $i failed" >&2
+      # a pull that fails resumes on the next attempt (fetched objects stay)
+      if fp --user update -y --noninteractive --no-deploy --no-related --no-deps --commit="$commit" "$ref" >&2 \
+         && ostree --repo="$C" show "$commit" >/dev/null 2>&1 && [ ! -e "$C/state/$commit.commitpartial" ]; then ok=1; break; fi
+      echo "flatpak: download attempt $i failed" >&2
       [ "$i" -lt 4 ] && sleep $((i * 15))
       i=$((i + 1))
     done
+    # back to the placeholder: the cache keeps commits by its own refs only (several versions may pin one ref)
+    _fp_set_remote_ref "$C" "$ref" "$(ostree --repo="$C" rev-parse "mu-placeholder/$ref")"
     if [ "$ok" = 0 ]; then echo "could not download $ref at commit ${commit:0:12} ($(net_hint "$url"))"; exit 1; fi
-    # the pull wrote a remote ref; the cache keeps commits by its own refs only (several versions may pin one ref)
-    ostree --repo="$C" refs --delete "$FP_REMOTE:$ref" >&2
-    [ ! -e "$C/state/$commit.commitpartial" ] || { echo "the pull of $ref@${commit:0:12} is incomplete"; exit 1; }
     ostree --repo="$C" refs --create="mu/$ref/$commit" "$commit" >&2 || { echo "could not record $ref@${commit:0:12} in $C"; exit 1; }
     kb1=$(du -sk "$C/objects" 2>/dev/null | cut -f1)
     echo "flatpak: cached $ref@${commit:0:12}: +$(( (${kb1:-0} - ${kb0:-0}) / 1024 )) MB in the cache, $(( $(date +%s) - t0 )) s" >&2

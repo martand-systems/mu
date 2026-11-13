@@ -1,6 +1,6 @@
 #!/bin/bash
 # S2 probe: PrusaSlicer 2.9.7 from Flathub pinned by commit, through μ's flatpak download cache (install/flatpak.sh):
-# a cold pull (interrupted once, then resumed, with a second fetch waiting on the lock), then two flatpak installations
+# flatpak downloads straight at the pinned commits into the cache (interrupted once, then resumed, with a second fetch waiting on the lock), then two flatpak installations
 # built from the cache with no network at all (unshare -n), then headless CLI slicing.
 . /w/tools/s2/common.sh
 REF=app/com.prusa3d.PrusaSlicer/x86_64/stable
@@ -29,7 +29,7 @@ log "cold pull of the runtime, interrupted after 20 s"
 r0=$(rx); t=$SECONDS
 ( u "fp_fetch $RTREF $RT_COMMIT \$URL \$KEY" > "$OUT/pull-interrupted.txt" 2>&1 ) & p=$!
 # like Ctrl-C / a closed terminal: the installer and its ostree pull both stop
-sleep 20; pkill -KILL -f "lib.sh; fp_fetch" || true; pkill -INT -f "ostree --repo=/home/mu/cache/repo pull" || true; wait $p || true
+sleep 20; pkill -KILL -f "lib.sh; fp_fetch" || true; pkill -INT -f "flatpak --user update" || true; wait $p || true
 log "interrupted: $(du -sm /home/mu/cache | cut -f1) MB in the cache"; tail -5 "$OUT/pull-interrupted.txt"
 log "resume, with a second fetch of the same commit waiting on the lock"
 ( u "fp_fetch $RTREF $RT_COMMIT \$URL \$KEY" > "$OUT/pull-waiter.txt" 2>&1 ) & w=$!
@@ -37,7 +37,7 @@ u "fp_fetch $RTREF $RT_COMMIT \$URL \$KEY; fp_fetch $REF $APP_COMMIT \$URL \$KEY
 wait $w && log "waiting fetch: ok"; cat "$OUT/pull-waiter.txt"
 r1=$(rx)
 res pull_s $((SECONDS - t)); res pull_rx_MB $(( (r1 - r0) / 1048576 )); res cache_MB "$(du -sm /home/mu/cache | cut -f1)"
-as_user ostree --repo=/home/mu/cache/repo refs | tee -a "$OUT/results.txt"
+as_user ostree --repo=/home/mu/cache/flatpak/repo refs | tee -a "$OUT/results.txt"
 
 log "warm cache: fetch again (must not pull)"
 r0=$(rx); u "fp_fetch $RTREF $RT_COMMIT \$URL \$KEY; fp_fetch $REF $APP_COMMIT \$URL \$KEY"; res warm_fetch_rx_bytes $(( $(rx) - r0 ))

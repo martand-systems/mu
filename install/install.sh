@@ -30,7 +30,9 @@
 # PATH line in your shell profile, OpenFOAM's temporary read-only mount at /Volumes/OpenFOAM-v2606 (macOS) and the
 # Ubuntu packages of --system (Linux), nothing is written outside MU_HOME.
 set -Eeuo pipefail
-LAYER_FORMAT="mu-layer-2"     # bump when the way layers are built changes (forces new layer hashes)
+LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
+FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
+                              # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
 DISPATCHER_REV=6              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -172,8 +174,11 @@ trap 'exit 130' INT TERM
 
 # downloads: fetch (resumable, parallel byte ranges for large files), sha256, sha256_stdin, net_hint
 . "$RECIPE/install/download.sh"
+# Flatpak apps (Linux): fp_fetch (download cache of pinned OSTree commits), fp_deploy (offline installation), fp
+. "$RECIPE/install/flatpak.sh"
+# mu_disk_free DIR: free GB (on WSL2, the smaller of the virtual disk and the Windows drive holding it)
+. "$RECIPE/install/disk.sh"
 clone_tree() { if [ "$FAMILY" = macos ]; then cp -cR "$1" "$2" 2>/dev/null || ditto "$1" "$2"; else cp -a --reflink=auto "$1" "$2"; fi; }
-free_gb() { df -Pk "$1" | awk 'NR==2{print int($4/1048576)}'; }
 used_mb() { df -Pk "$1" | awk 'NR==2{print int($3/1024)}'; }
 human() { awk -v m="$1" 'BEGIN{ if (m >= 1024) printf "%.1f GB", m/1024; else printf "%d MB", m }'; }
 
@@ -271,10 +276,12 @@ awk -F'"' -v plat="$PLAT" '
   END { out() }
 ' "$R/toolchain/apps.toml" > "$WORK/apps.tsv"
 app() { awk -F'\t' -v n="$1" -v c="$2" '$1==n{print $c}' "$WORK/apps.tsv"; }   # app NAME COLUMN
-appkey() {   # app-<name>-<16 hex>: the archive hash; for several archives, or a build, a hash over all its inputs
+appkey() {   # app-<name>-<16 hex>: the archive hash; for several archives, a build or a flatpak, a hash over all its inputs
   local s; s="$(app "$1" 4)"; case "$s" in *" "*) s="$(printf '%s' "$s" | sha256_stdin)" ;; esac
   if [ "$(app "$1" 5)" = build ]; then   # source + build recipe + the Python it is built for
     s="$(printf '%s\n%s\n%s\n' "$s" "$(sha256 "$R/$(app "$1" 6)")" "$(grep -E '/python-3[.0-9]+-' "$R/toolchain/$PLAT/env.explicit.txt")" | sha256_stdin)"
+  elif [ "$(app "$1" 5)" = flatpak ]; then   # the app's commit + the runtime's ref@commit + how the layer is built
+    s="$(printf '%s\n%s\n%s\n' "$FLATPAK_FORMAT" "$s" "$(app "$1" 10)" | sha256_stdin)"
   fi
   echo "app-$1-$(printf '%s' "$s" | cut -c1-16)"
 }
@@ -299,6 +306,8 @@ CAM_KEY="$(layer_key cam "$(appkey freecad) uv:$(app uv 4)" $OS/cam-venv.pip.txt
 APP_NAMES="$(awk -F'\t' '$5!="binary" && $5!="tar.bin" && $1!="uv"{print $1}' "$WORK/apps.tsv")"
 LAYERS="$ENV_KEY $CAM_KEY"; for a in $APP_NAMES; do LAYERS="$LAYERS $(appkey "$a")"; done
 printf '%s\n' $LAYERS > "$T/LAYERS"   # written early: `mu gc` never removes layers an install is using
+# download-cache entries this version pins (mu gc keeps them while the version is installed): "flatpak REF@COMMIT"
+awk -F'\t' '$5 == "flatpak" { print "flatpak " $2 "@" $4; if ($10 != "") print "flatpak " $10 }' "$WORK/apps.tsv" > "$T/CACHE_REFS"
 have_layer() { [ -f "$STORE/$1/.mu-layer" ]; }
 # layers are read-only once built: nothing (a tool's bytecode cache, a stray pip install) can change a shared layer
 seal() { chmod -R a-w "$1"; }
@@ -322,14 +331,16 @@ if [ "$REBUILD" = 1 ]; then
 fi
 MISSING=""; for k in $LAYERS; do have_layer "$k" || MISSING="$MISSING $k"; done
 
-avail_gb=$(free_gb "$MU_HOME")
+IFS="$(printf '\t')" read -r avail_gb disk_where <<EOF
+$(mu_disk_free "$MU_HOME")
+EOF
 need_gb=1
 case "$MISSING" in *env-*) need_gb=$((need_gb + 6)) ;; esac
 case "$MISSING" in *cam-*) need_gb=$((need_gb + 2)) ;; esac
 case "$MISSING" in *app-*) need_gb=$((need_gb + 9)) ;; esac
-[ "$avail_gb" -ge "$need_gb" ] || fail "need about $need_gb GB free on this disk (have $avail_gb GB)"
+[ "$avail_gb" -ge "$need_gb" ] || fail "need about $need_gb GB free on this disk (have $avail_gb GB${disk_where:+ on $disk_where})"
 n_missing=$(echo $MISSING | wc -w | tr -d ' '); n_layers=$(echo $LAYERS | wc -w | tr -d ' ')
-ok "$OSNAME · $avail_gb GB free · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
+ok "$OSNAME · $avail_gb GB free${disk_where:+ on $disk_where} · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
 printf '  %sinstalling μ %s%s %s→ %s%s\n' "$B" "$VERSION" "$N" "$DIM" "${T/#$HOME/~}" "$N" >&3
 
 # ================================================================ downloads
@@ -410,26 +421,22 @@ build_layer() {
   seal "$tmp"; unseal_rm "$STORE/$key"; mv "$tmp" "$STORE/$key"
 }
 
-# flatpak_layer NAME (Linux): a private flatpak installation holding the app and its runtime at pinned commits (the
-# commit ids are SHA-256 values flatpak verifies). Built at its final path; complete when .mu-layer exists.
+# flatpak_layer NAME (Linux): a private flatpak installation holding exactly the app and its runtime at their pinned
+# commits (install/flatpak.sh). Each commit is downloaded once per machine into the download cache, then the layer is
+# built from the cache with no network. Built at its final path; complete when .mu-layer exists.
 flatpak_layer() {
-  local name="$1" id url commit rt rtref rtcommit L key
-  id="$(app "$1" 2)"; url="$(app "$1" 3)"; commit="$(app "$1" 4)"; rt="$(app "$1" 10)"; key="$(appkey "$1")"
-  rtref="${rt%@*}"; rtcommit="${rt#*@}"
+  local name="$1" ref url commit rt key L fkey="$R/toolchain/$PLAT/flathub.gpg"
+  ref="$(app "$1" 2)"; url="$(app "$1" 3)"; commit="$(app "$1" 4)"; rt="$(app "$1" 10)"; key="$(appkey "$1")"
   command -v flatpak >/dev/null 2>&1 || fail "flatpak is not installed (it comes with: sudo ./install.sh --system)"
-  L="$STORE/$key"; unseal_rm "$L"; mkdir -p "$L"
-  export FLATPAK_USER_DIR="$L/$(app "$1" 7)"
-  # flatpak needs a session bus (dbus-run-session gives one) and the system bus (WSL2/systemd has it; containers don't)
-  fp() { if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then flatpak "$@"; else dbus-run-session -- flatpak "$@"; fi; }
   [ -S /run/dbus/system_bus_socket ] || [ -S /var/run/dbus/system_bus_socket ] \
     || fail "flatpak needs the system D-Bus, which is not running (in a container: dbus-daemon --system --fork)"
-  fp --user remote-add --if-not-exists flathub "$url"
-  fp --user install -y --noninteractive flathub "$id" || fail "flatpak could not install $id ($(net_hint https://dl.flathub.org/repo/))"
-  fp --user update -y --noninteractive --commit="$commit" "$id"
-  fp --user update -y --noninteractive --commit="$rtcommit" "$rtref"
-  [ "$(fp --user info --show-commit "$id")" = "$commit" ] || fail "$id is not at the pinned commit"
-  [ "$(fp --user info --show-commit "$rtref")" = "$rtcommit" ] || fail "$rtref is not at the pinned commit"
-  printf 'app=%s\ncommit=%s\nruntime=%s\nbuilt=%s\n' "$name" "$commit" "$rt" "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
+  fp_fetch "${rt%@*}" "${rt##*@}" "$url" "$fkey"
+  fp_fetch "$ref" "$commit" "$url" "$fkey"
+  echo "installing $name from the download cache (offline)"
+  L="$STORE/$key"; unseal_rm "$L"; mkdir -p "$L"
+  fp_deploy "$L/$(app "$1" 7)" "$url" "$fkey" "$rt" "$ref@$commit"
+  printf 'app=%s\nref=%s\ncommit=%s\nruntime=%s\nformat=%s\nbuilt=%s\n' "$name" "$ref" "$commit" "$rt" "$FLATPAK_FORMAT" \
+    "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
   seal "$L"
 }
 
