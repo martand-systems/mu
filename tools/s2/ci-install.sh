@@ -46,6 +46,13 @@ if [ "$rc1" = 0 ]; then
   else log "install #2: no flatpak download ($(grep -c 'installing prusaslicer from the download cache' "$l2") layer rebuilt from the cache)"; fi
   run_user bash -c '~/.local/bin/mu versions; cd ~/mu && ~/.local/bin/mu version; ~/.local/bin/mu doctor --json; ~/.local/bin/mu gc' > $OUT/mu-status.txt 2>&1
   [ "$rc2" = 0 ] || rc1=$rc2
+  log "mu gc --yes prunes cached flatpak commits no installed version pins (a stale one is added first)"
+  run_user bash -c 'R=~/.cache/mu/flatpak/repo; c=$(ostree --repo=$R rev-parse mu-placeholder/app/com.prusa3d.PrusaSlicer/x86_64/stable)
+    ostree --repo=$R refs --create=mu/app/org.example.Stale/x86_64/stable/$c $c
+    ~/.local/bin/mu gc --yes; echo "refs after gc:"; ostree --repo=$R refs | sort' > $OUT/gc.txt 2>&1; cat $OUT/gc.txt
+  if grep -q "org.example.Stale" <(sed -n '/refs after gc/,$p' $OUT/gc.txt) || [ "$(grep -c '^mu/' $OUT/gc.txt)" != 2 ]; then
+    log "gc: FAIL"; rc1=1
+  else log "gc: the stale commit was pruned, the 2 pinned commits kept"; fi
 fi
 set -e
 cp $M/logs/*.log $OUT/ 2>/dev/null || true

@@ -44,8 +44,10 @@ Layers build in parallel: the DMGs expand on every core and the CAM environment 
 Python packages install with `uv`, as APFS clones from its cache. With warm caches nothing touches the network: every
 step tries offline first.
 
-**Integrity:** every app archive, conda package and PyPI package is pinned by hash (SHA-256 / MD5). Layers are sealed
-read-only once built, and `mu doctor` checks that they are.
+**Integrity:** every app archive, conda package and PyPI package is pinned by hash (SHA-256 / MD5). On Linux,
+PrusaSlicer comes from Flathub pinned by OSTree commit (also a SHA-256), downloaded once per machine into
+`~/.cache/mu/flatpak` (flatpak checks Flathub's signature with the key in the recipe) and installed from there with no
+network. Layers are sealed read-only once built, and `mu doctor` checks that they are.
 
 ## Use
 
@@ -121,7 +123,8 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
     ~/Library/Mu/state/                  tool state and caches (text-to-cad, FreeCAD, ParaView, bytecode, benchmarks)
     ~/Library/Mu/logs/                   install and auto-update logs
     ~/Library/Mu/autoupdate.conf         auto-update settings (mu autoupdate)
-    ~/Library/Caches/Mu/                 downloads, conda packages, uv cache (safe to delete; re-downloads)
+    ~/Library/Caches/Mu/                 downloads, conda packages, uv cache (safe to delete; re-downloads); on Linux
+                                         also flatpak/ (PrusaSlicer's pinned Flathub commits; mu gc prunes it)
 
 ## Status
 
