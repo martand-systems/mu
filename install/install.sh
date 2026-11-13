@@ -11,9 +11,12 @@
 #   --quick                skip the benchmarks if this recipe commit already passed them on this Mac
 #   --skip-tests           skip the benchmarks (mu doctor still runs)
 #   --seed-downloads DIR   reuse archives already on disk (checked against the pinned SHA-256)
-#   --no-modify-path       don't add ~/.local/bin to your shell's PATH
+#   --no-modify-path       don't add ~/.local/bin to your shell's PATH (and don't turn on auto-update)
+#   --no-autoupdate        don't turn on the daily auto-update (mu autoupdate on|off; on by default after an install)
 #   -v, --verbose          show the full build output instead of the progress view
 #   --system               Linux: only install the Ubuntu packages μ needs (apt; run with sudo, once per machine)
+#   --user NAME            with --system: let NAME's systemd user services run without a login (auto-update's timer;
+#                          default: the user who ran sudo)
 #
 # Layout (MU_HOME: ~/Library/Mu on macOS, ~/.local/share/mu on Linux):
 #   toolchains/<version>/  one per version: recipe snapshot, commands, links to its layers, MANIFEST.json
@@ -28,7 +31,7 @@
 # Ubuntu packages of --system (Linux), nothing is written outside MU_HOME.
 set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way layers are built changes (forces new layer hashes)
-DISPATCHER_REV=5              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=6              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
@@ -38,6 +41,7 @@ case "$(uname -s)-$(uname -m)" in
 esac
 MU_LINK_DIR="${MU_LINK_DIR:-$HOME/.local/bin}"
 VERSION=""; SEED=""; SET_DEFAULT=0; FORCE=0; REBUILD=0; TESTS=1; QUICK=0; MODIFY_PATH=1; VERBOSE=0; SYSTEM=0
+AUTOUPDATE=1; LINGER_USER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -50,6 +54,8 @@ while [ $# -gt 0 ]; do
     --no-modify-path) MODIFY_PATH=0; shift ;;
     -v|--verbose) VERBOSE=1; shift ;;
     --system) SYSTEM=1; shift ;;
+    --no-autoupdate) AUTOUPDATE=0; shift ;;
+    --user) LINGER_USER="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,/^set -E/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -66,9 +72,18 @@ apt_install() {   # installs the missing packages (as root, or through sudo)
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $miss
 }
+[ -z "$LINGER_USER" ] || [ "$SYSTEM" = 1 ] || { echo "--user NAME goes with --system (see --help)" >&2; exit 2; }
 if [ "$SYSTEM" = 1 ]; then
   [ "$FAMILY" = linux ] || { echo "--system is only needed on Linux" >&2; exit 0; }
-  apt_install; echo "system packages: ready"; exit 0
+  apt_install; echo "system packages: ready"
+  # auto-update is a systemd user timer; linger runs it without a login (the WSL compute node's user never logs in)
+  lu="${LINGER_USER:-${SUDO_USER:-}}"
+  case "$lu" in ""|root) ;; -*|*[!A-Za-z0-9._-]*) echo "--user: invalid user name '$lu'" >&2; exit 2 ;;
+    *) if [ "$(id -u)" = 0 ] && id -u "$lu" >/dev/null 2>&1 && loginctl enable-linger "$lu" 2>/dev/null; then
+         echo "user services: $lu's run without a login (systemd linger, for μ auto-update)"
+       else echo "note: could not enable systemd linger for $lu (not root, no such user, or no systemd): μ auto-update runs only while $lu is logged in"; fi ;;
+  esac
+  exit 0
 fi
 
 # ================================================================ terminal UI
@@ -125,6 +140,8 @@ fail() {
   fi
   # a generic "command failed" in the main shell usually follows a subshell's specific reason
   case "$*" in "command failed"*) [ -s "$WORK/lasterr" ] && set -- "$(cat "$WORK/lasterr")" ;; esac
+  # for mu autoupdate: the stage that failed (preflight, doctor, bench, ...) and why
+  [ -z "${MU_INSTALL_RESULT:-}" ] || printf '%s\t%s\n' "${STAGE_KEY:-preflight}" "$(printf '%s' "$*" | tr '\n\t' '  ')" > "$MU_INSTALL_RESULT" 2>/dev/null || true
   spinner_stop
   printf '  %s✗%s %s\n\n' "$RED" "$N" "${STAGE_TITLE:-install}" >&3
   printf '%sμ install failed:%s %s\n' "$B$RED" "$N" "$*" >&4
@@ -659,5 +676,13 @@ rm -f "$T/.installing"
 spinner_stop
 printf '\n  %sμ %s is ready%s in %s s %s· %s of new disk · log %s%s\n' "$B$G" "$VERSION" "$N" "$TOTAL" "$DIM" "$(human "$DISK_MB")" "${LOG/#$HOME/~}" "$N" >&3
 [ -z "$PATH_MSG" ] || printf '  %s!%s %s\n' "$Y" "$N" "$PATH_MSG" >&3
+# auto-update: on by default for a person's install; not for CI or --no-modify-path, and never over an earlier off
+# (while it says on, this sets the scheduler up again, e.g. after systemd or linger became available)
+if [ "$AUTOUPDATE" = 1 ] && [ "$MODIFY_PATH" = 1 ] && [ "${MU_NO_AUTOUPDATE:-}" != 1 ] && [ "${CI:-}" != true ] \
+   && ! grep -Eqs '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*off' "$MU_HOME/autoupdate.conf"; then
+  au_rc=0; "$MU_HOME/bin/mu" autoupdate on --quiet > "$WORK/autoupdate.txt" 2>&5 || au_rc=$?
+  au_line="$(head -1 "$WORK/autoupdate.txt")"; [ -n "$au_line" ] || au_line="auto-update could not be turned on (see the log): mu autoupdate on"
+  if [ "$au_rc" = 0 ]; then printf '  %s\n' "$au_line" >&3; else printf '  %s!%s %s\n' "$Y" "$N" "$au_line" >&3; fi
+fi
 printf '\n  Next:  %smu%s                    status and common commands\n' "$B" "$N" >&3
 printf '         %scd <project> && mu link%s  connect a project (mu.toml) for Claude Code\n\n' "$B" "$N" >&3
