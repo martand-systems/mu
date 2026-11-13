@@ -1,8 +1,9 @@
 # μ job layer, first version: OpenSSH inside the relay tunnel
 
 The specification for stage 1 of `docs/PLAN.md` §6.4a. It replaces the design note of 2026-11-13 and corrects it
-with what was measured on 2026-11-14 (§17) and read in sources (§18). Nothing here is implemented yet; nothing has
-run on the office PC. What can only be checked at the PC is listed, in order, in §19.
+with what was measured on 2026-11-14 (§17) and read in sources (§18). Stage 1 is implemented on branch `job-layer`
+and proven in CI (§21, which also lists where the implementation differs from the text above); nothing has run on
+the office PC. What can only be checked at the PC is listed, in order, in §19.
 
 Sections: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Where the code lives](#3-where-the-code-lives) ·
 [4 Workstation](#4-workstation-files-and-commands) · [5 The connection](#5-the-connection) · [6 Upload](#6-upload-a-git-snapshot) ·
@@ -10,7 +11,8 @@ Sections: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Whe
 [9 Durability](#9-durability-and-recovery) · [10 Limits](#10-limits-and-queue) · [11 Outputs](#11-outputs-logs-run-records) ·
 [12 Versions](#12-toolchain-versions) · [13 Root steps](#13-what-needs-root-on-the-node) · [14 Security](#14-who-can-do-what) ·
 [15 Stages](#15-stages) · [16 Tests](#16-tests-and-how-each-is-shown-to-fail) · [17 Verified](#17-verified-by-experiment) ·
-[18 Read](#18-read-in-sources-not-run) · [19 PC](#19-still-unverified-until-the-pc) · [20 Changes](#20-changes-from-the-design-note-and-from-plan-v6)
+[18 Read](#18-read-in-sources-not-run) · [19 PC](#19-still-unverified-until-the-pc) · [20 Changes](#20-changes-from-the-design-note-and-from-plan-v6) ·
+[21 Implemented](#21-implemented-stage-1-in-ci)
 
 ## 1. Summary
 
@@ -57,8 +59,9 @@ pass as the node: the host key is pinned.
 | `src/mu/cli.py` | entry point of those commands: puts `recipe/src` on `sys.path`, parses arguments, `--json`, exit codes |
 | `src/mu/jobs.py` | workstation side: pairing, ssh invocation, the proxy, snapshot, submit, status, log, fetch, cancel, run records |
 | `src/mu/node.py` | node side: `serve` (the verbs), `run` (the runner), `run-job` (the shim), `enable`, `disable`, `selftest` |
-| `src/mu/durable.py` | `write_durable`, `seal`, `read_record` (§9), used by both sides |
-| `install/hosts/wsl2/mu-node-gate` | the forced command, POSIX `sh`, installed root-owned (§7.1) |
+| `src/mu/durable.py` | `write_durable`, `seal`, `read_record` (§9), used by both sides; the test faults |
+| `src/mu/proto.py` | what both sides share: protocol number, exit codes, name rules, job id, globs, `MuError` |
+| `install/hosts/wsl2/mu-node-gate` | the forced command, POSIX `sh`, installed root-owned (§7.1); the host script replaces `@MU_BIN@` and `@MU_KEYS@` |
 | `install/hosts/wsl2/mu-wsl2-distro.sh` | new root steps (§13) |
 | `install/hosts/wsl2/mu-wsl2-host.ps1` | passes the distro's drive letter to the distro script (§13.4); nothing else changes on Windows |
 | `toolchain/apps.toml`, `install/install.sh` | the chisel client, pinned (§5.4) |

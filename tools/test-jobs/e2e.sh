@@ -262,8 +262,9 @@ r_nosecret() {
     sleep 0.1
   done
   wait
-  local nproxy; nproxy="$(pgrep -u ws -f 'chisel client' | wc -l)"
-  M="$hits of 30 scans of every process's command line found a relay password (workstation chisel processes: $nproxy)"
+  local nproxy authflag; nproxy="$(pgrep -u ws -f 'chisel client' | wc -l)"
+  authflag="$(pgrep -u ws -af 'chisel client' | grep -c -- ' --auth ')"
+  M="$hits of 30 scans of every process's command line found a relay password (workstation chisel processes: $nproxy, with --auth: $authflag)"
   [ "$hits" = 0 ] && [ "$nproxy" -ge 1 ]
 }
 f_argv_on() { WSF=auth-in-argv; close_master; }
@@ -611,6 +612,8 @@ collect() {
   sudo journalctl -u mu-sshd -u mu-tunnel --no-pager > "$WORK/logs/system-units.log" 2>&1 || true
   sudo journalctl _UID="$MU_UID" --no-pager > "$WORK/logs/mu-user.log" 2>&1 || true
   sudo cp /srv/mu/audit.log "$WORK/logs/audit.log" 2>/dev/null || true
+  asmu systemctl --user show-environment 2>&1 | sed 's/=.*//' > "$WORK/logs/mu-manager-env-names.txt" || true
+  asmu systemctl --user status mu-node.service --no-pager > "$WORK/logs/mu-node-status.txt" 2>&1 || true
   sudo sh -c 'for d in /srv/mu/jobs/*/; do echo "== $d"; cat "$d/events.log" 2>/dev/null; done' > "$WORK/logs/events.log" 2>&1 || true
   sudo cp "$WSH/logs/compute-office-pc.log" "$WORK/logs/ws-chisel.log" 2>/dev/null || true
   docker logs "$(relay_ctr)" > "$WORK/logs/relay.log" 2>&1 || true

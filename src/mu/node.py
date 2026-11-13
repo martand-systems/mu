@@ -125,9 +125,20 @@ class Lock:
 
 # ------------------------------------------------------------------------------------------------ systemd
 def user_env():
+    """The environment for systemctl --user and systemd-run --user: this user's runtime folder and bus. An inherited
+    XDG_RUNTIME_DIR or DBUS_SESSION_BUS_ADDRESS of another user (a system-wide /etc/environment, as on the CI runner,
+    reaches the user manager through PAM) gives "Failed to connect to bus: Permission denied"."""
     e = dict(os.environ)
-    if not e.get("XDG_RUNTIME_DIR"):
-        e["XDG_RUNTIME_DIR"] = "/run/user/%d" % os.getuid()
+    mine = "/run/user/%d" % os.getuid()
+    x = e.get("XDG_RUNTIME_DIR", "")
+    try:
+        ours = bool(x) and os.stat(x).st_uid == os.getuid()
+    except OSError:
+        ours = False
+    if not ours:
+        e["XDG_RUNTIME_DIR"] = mine
+    if e.get("DBUS_SESSION_BUS_ADDRESS") and e["XDG_RUNTIME_DIR"] not in e["DBUS_SESSION_BUS_ADDRESS"]:
+        e.pop("DBUS_SESSION_BUS_ADDRESS")
     return e
 
 
