@@ -55,12 +55,49 @@ read-only once built, and `mu doctor` checks that they are.
     cd <project> && mu link connect a project (mu.toml) for Claude Code
     mu versions             installed versions, the default, and which projects pin each
     mu update               install the latest release and make it the default
+    mu autoupdate           automatic updates: status (on, off, run, set: see Updates)
     mu pin [V]              pin this project to a version (mu.toml) and relink it
     mu gc --yes             remove versions and layers nothing uses
     mu help                 everything
 
 A project pins its version in `mu.toml` (`[mu] version = "v2026.11.3"`). `mu` picks that version inside the project,
 so projects on different versions coexist.
+
+## Updates
+
+The installer turns on a **daily auto-update**. Each day, at an early-morning time picked at random per machine, μ
+checks the repo for a newer release tag (`vYYYY.MM.N`). It installs that release the same way `mu update` does,
+including `mu doctor` and the benchmark suite, and makes it the default **only if they pass**. Nothing else changes:
+
+- **Projects keep their pins.** A project's `mu.toml` is never edited. Move one with `cd <project> && mu pin`.
+- **A failing release changes nothing.** The old default stays, `mu` shows a warning with the log, and you get a
+  notification on macOS. That release is tried at most 3 times. A newer release resets the count.
+- **It waits** while on battery (macOS), while less than `min_free_gb` (12 GB) is free, while an install is running,
+  and while `~/Library/Mu/state/busy` exists. Compute jobs hold that file: write your pid on its first line, or leave
+  it empty, and remove it when you're done.
+- **Old versions are cleaned up after a switch.** It keeps the new default, the previous one (roll back with
+  `mu use <previous>`) and every version a registered project pins.
+
+Commands:
+
+    mu autoupdate                 status: on or off, schedule, next run, last check and result (--json)
+    mu autoupdate on | off        turn it on or off (off is remembered: reinstalling doesn't turn it back on)
+    mu autoupdate run [--force]   check now (--force: also on battery, and after 3 failures)
+    mu autoupdate set KEY VALUE   policy switch|install-only, min_free_gb, gc on|off, keep_previous, hour, minute
+
+Settings live in `~/Library/Mu/autoupdate.conf` (plain `key=value`), state in `state/autoupdate.state` and logs in
+`logs/autoupdate-*.log` (the newest 20 are kept). `policy=install-only` installs and checks new releases but leaves the
+default alone. To opt out at install time, use `./install.sh --no-autoupdate`. CI runs (`CI=true`, `MU_NO_AUTOUPDATE=1`,
+`--no-modify-path`) never turn it on. Before deleting μ by hand, run `mu autoupdate off`.
+
+**Scheduler.** On macOS it's a LaunchAgent, `~/Library/LaunchAgents/systems.martand.mu.autoupdate.plist`. A check
+missed while the Mac sleeps runs when it wakes. On Linux it's a systemd user timer, `~/.config/systemd/user/mu-autoupdate.timer`,
+with `Persistent=true`, so a check missed while the machine was off runs at the next boot. A user timer runs only while
+that user's systemd manager runs. For an account that never logs in, such as the WSL compute node's agent user, enable
+linger once as root: `sudo ./install.sh --system --user <name>` (or `sudo loginctl enable-linger <name>`).
+`sudo ./install.sh --system` does this for the user who ran sudo. WSL needs `[boot] systemd=true` in `/etc/wsl.conf`.
+`mu autoupdate` tells you when either is missing. The source repo must be readable without a prompt (Keychain,
+`gh auth` or a deploy key): the check never asks for credentials.
 
 ## Layout
 
@@ -69,7 +106,8 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
     ~/Library/Mu/toolchains/<version>/   recipe snapshot, commands, MANIFEST.json, links to its layers
     ~/Library/Mu/store/                  shared read-only layers: env-<hash>, cam-<hash>, app-<name>-<sha>
     ~/Library/Mu/state/                  tool state and caches (text-to-cad, FreeCAD, ParaView, bytecode, benchmarks)
-    ~/Library/Mu/logs/                   install logs
+    ~/Library/Mu/logs/                   install and auto-update logs
+    ~/Library/Mu/autoupdate.conf         auto-update settings (mu autoupdate)
     ~/Library/Caches/Mu/                 downloads, conda packages, uv cache (safe to delete; re-downloads)
 
 ## Status

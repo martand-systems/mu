@@ -322,6 +322,9 @@ The installer:
 - Power plan never sleeps.
 - BIOS restores power after a power cut.
 - Windows Update automatic restart is allowed; the agent comes back through the startup task.
+- μ keeps itself on the latest release with `mu autoupdate` (§9): a systemd user timer for the agent user. That user
+  never logs in, so the timer needs linger, set once as root: `sudo ./install.sh --system --user mu`. The agent holds
+  `state/busy` while jobs run, and updates wait for it.
 
 **Performance:**
 - Workspaces are on the WSL ext4 disk (`/srv/mu/jobs`), never on `/mnt/c`.
@@ -608,6 +611,14 @@ It's included in every project as the `org/` submodule. Updating it is a deliber
 - **Installer gate:** every install (laptop, office PC) runs the suite before it's marked ready.
 - **Cross-host check:** the JATAYU `L_final` hub model is run on `local` and `office-pc` and must agree to within < 0.5%.
 - **Upgrades:** `mu upgrade` changes a project's pin, re-runs its validation scripts and diffs `results/*.json`. It's never silent.
+- **Toolchain updates (`mu autoupdate`, 2026-11-13):** once a day every machine looks for a newer `vYYYY.MM.N` tag at its
+  source. It installs that tag the way `mu update` does, so the installer gate (doctor and benchmarks) applies, and
+  makes it the default only if the gate passed. A release that fails keeps the old default, is reported in `mu`, and is
+  tried at most 3 times. A newer tag resets the count. The run waits on battery (macOS), below `min_free_gb`, while an
+  install is running, and while `state/busy` exists. After a switch it removes old versions, keeping the previous
+  default for rollback and every version a registered project pins. It never touches `mu.toml`: moving a project to a
+  new version stays an explicit, reviewed `mu upgrade`. The schedule is a LaunchAgent on macOS and a systemd user timer on
+  Linux. The installer turns it on by default, except in CI and with `--no-modify-path` or `--no-autoupdate`.
 - **Version scheme:** `vYYYY.MM.patch`.
 
 ---
