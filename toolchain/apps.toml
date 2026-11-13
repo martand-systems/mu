@@ -110,13 +110,17 @@ url    = "https://github.com/prusa3d/PrusaSlicer/releases/download/version_2.9.7
 kind   = "dmg"
 source_item = "Original Prusa Drivers/PrusaSlicer.app"   # top-level item in the archive
 target = "PrusaSlicer-2.9.7.app"   # name under <toolchain>/apps/
-[prusaslicer.linux-64]   # Flathub is PrusaSlicer's only Linux channel since 2.9; pinned by OSTree commit (a SHA-256 flatpak verifies)
-file   = "com.prusa3d.PrusaSlicer"
-sha256 = "22caa5995fef8170cbed1d404f993996e5552e47159391666a7b096a85d8f641"
-url    = "https://dl.flathub.org/repo/flathub.flatpakrepo"
-kind   = "flatpak"
+[prusaslicer.linux-64]   # Flathub is PrusaSlicer's only Linux channel since 2.9. Pinned by OSTree commit IDs (SHA-256 over the
+                         # commit, which names every file by hash); signed by Flathub's key, toolchain/linux-64/flathub.gpg
+                         # (fingerprint 6E5C 05D9 79C7 6DAF 93C0  8135 4184 DD4D 907A 7CAE, as in flathub.flatpakrepo).
+                         # Downloaded once per machine into $MU_CACHE/flatpak (install/flatpak.sh). Only the app and its
+                         # runtime are installed: no translations, GL drivers or codecs (the CLI runs headless).
+file    = "app/com.prusa3d.PrusaSlicer/x86_64/stable"   # flatpak ref
+sha256  = "22caa5995fef8170cbed1d404f993996e5552e47159391666a7b096a85d8f641"   # its commit
+url     = "https://dl.flathub.org/repo/"
+kind    = "flatpak"
 runtime = "runtime/org.gnome.Platform/x86_64/50@4337a389125f814785bd83f4ace01da5b6baa80fdcf5a9c81e60dcd03896c067"
-target = "prusaslicer-flatpak"
+target  = "prusaslicer-flatpak"
 
 [freecad]
 version = "1.1.4"

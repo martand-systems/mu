@@ -1,8 +1,8 @@
 #!/bin/bash
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
-# Manages versions itself (status, versions, install, update, use, pin, remove, gc) and hands every other command
+# Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
-MU_DISPATCHER_REV=5   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=6   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -13,7 +13,7 @@ DEFAULT_SOURCE="https://github.com/martand-systems/mu.git"
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then B=$'\033[1m'; DIM=$'\033[2m'; G=$'\033[32m'; Y=$'\033[33m'; RED=$'\033[31m'; N=$'\033[0m'
 else B=""; DIM=""; G=""; Y=""; RED=""; N=""; fi
 die() { printf '%smu:%s %s\n' "$RED" "$N" "$1" >&2; exit "${2:-1}"; }
-tilde() { printf '%s' "${1/#$HOME/~}"; }
+tilde() { case "$1" in "$HOME"|"$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 default_version() { cat "$MU_HOME/default" 2>/dev/null || true; }
 installed() { [ -f "$TC/$1/MANIFEST.json" ]; }
 manifest() { grep -m1 "\"$2\":" "$TC/$1/MANIFEST.json" 2>/dev/null | sed -E 's/^[^:]*: *"?([^"]*)"?,?$/\1/'; }
@@ -74,6 +74,30 @@ latest_tag() {
     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -1 || true
 }
 has_flag() { local f="$1"; shift; local a; for a in "$@"; do [ "$a" = "$f" ] && return 0; done; return 1; }
+# fetch_release V DIR: check out the release TAG V (never a branch that has the same name) from the source into DIR,
+# and check that it is the commit the source lists for that tag. Problems go to stdout.
+fetch_release() {
+  local v="$1" src="$2" git url want got
+  git="$(find_git)"; url="$(source_url)"
+  want="$("$git" ls-remote --tags "$url" 2>/dev/null | V="$v" awk '
+    { c[$2] = $1 } END { t = "refs/tags/" ENVIRON["V"]; print ((t "^{}") in c ? c[t "^{}"] : c[t]) }')"
+  [ -n "$want" ] || { echo "no release tag $v at $url"; return 1; }
+  rm -rf "$src"
+  "$git" -c init.defaultBranch=main init -q "$src" && "$git" -C "$src" remote add origin "$url" \
+    && "$git" -C "$src" fetch -q --depth 1 --no-tags origin "+refs/tags/$v:refs/tags/$v" \
+    && "$git" -C "$src" -c advice.detachedHead=false checkout -q --detach "refs/tags/$v" || return 1
+  got="$("$git" -C "$src" rev-parse HEAD)"
+  [ "$got" = "$want" ] || { echo "tag $v is $want at $url, but $got was downloaded"; return 1; }
+}
+# the release installers replace the shared dispatcher and git-lfs before their checks run: cmd_install keeps copies
+save_dispatcher() { local f; rm -rf "$1"; mkdir -p "$1"; for f in mu git-lfs; do [ ! -f "$MU_HOME/bin/$f" ] || cp -p "$MU_HOME/bin/$f" "$1/$f"; done; }
+restore_dispatcher() {
+  local f; for f in mu git-lfs; do
+    [ -f "$1/$f" ] && ! cmp -s "$1/$f" "$MU_HOME/bin/$f" || continue
+    install -m 755 "$1/$f" "$MU_HOME/bin/$f" && printf 'restored the previous %s (%s)\n' "$f" "$(tilde "$MU_HOME/bin/$f")"
+  done
+}
+kill_tree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c" "${2:-TERM}"; done; kill -"${2:-TERM}" "$1" 2>/dev/null || true; }
 
 cmd_install() {
   local v="${1:-latest}"; [ $# -gt 0 ] && shift
@@ -87,17 +111,26 @@ cmd_install() {
     if has_flag --set-default "$@"; then echo "$v" > "$MU_HOME/default"; printf 'default: μ %s\n' "$v"; fi
     return 0
   fi
-  local git src bak rc=0 rev1
-  git="$(find_git)"; mkdir -p "$MU_CACHE/src"; src="$MU_CACHE/src/$v.$$"; rm -rf "$src"
+  local src bak rc=0 rev1 why
+  mkdir -p "$MU_CACHE/src" 2>/dev/null || true; src="$MU_CACHE/src/$v.$$"
   printf 'downloading the μ %s recipe…\n' "$v"
-  "$git" -c advice.detachedHead=false clone -q --depth 1 --branch "$v" "$(source_url)" "$src" \
-    || die "could not download μ $v from $(source_url) (does the release exist, and can this account read the repo?)"
-  # an older release's installer may carry an older dispatcher: keep this one if it is newer
-  bak="$MU_CACHE/src/mu-dispatcher.$$"; cp "$MU_HOME/bin/mu" "$bak"
+  if ! why="$(fetch_release "$v" "$src" 2>&1)"; then
+    rm -rf "$src"
+    # MU_INSTALL_RESULT (set by mu autoupdate run): the stage that failed and why, as the installer reports it
+    [ -z "${MU_INSTALL_RESULT:-}" ] || printf 'fetch\t%s\n' "$(printf '%s' "$why" | tr '\n\t' '  ')" > "$MU_INSTALL_RESULT"
+    die "could not download μ $v from $(source_url) (does the release exist, and can this account read the repo?)${why:+
+$why}"
+  fi
+  # The installer replaces the shared dispatcher (and git-lfs) before mu doctor and the benchmarks run. Put the copies
+  # back if the install fails or is stopped, whatever their revision (every version and project runs through this
+  # file), and after a good install when an older release's installer carried an older dispatcher.
+  bak="$MU_CACHE/src/dispatcher.$$"; save_dispatcher "$bak"
+  trap 'restore_dispatcher "$bak"; rm -rf "$src" "$bak"; exit 143' TERM INT HUP
   if [ -x "$src/install.sh" ]; then "$src/install.sh" --version "$v" "$@" || rc=$?
   else "$src/install/install-mac.sh" --version "$v" "$@" || rc=$?; fi
-  rev1="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$MU_HOME/bin/mu" | head -1)"
-  [ "${rev1:-0}" -ge "$MU_DISPATCHER_REV" ] || install -m 755 "$bak" "$MU_HOME/bin/mu"
+  trap - TERM INT HUP
+  rev1="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$MU_HOME/bin/mu" 2>/dev/null | head -1)"
+  if [ "$rc" != 0 ] || ! installed "$v" || [ "${rev1:-0}" -lt "$MU_DISPATCHER_REV" ]; then restore_dispatcher "$bak"; fi
   rm -rf "$src" "$bak"
   return $rc
 }
@@ -107,7 +140,9 @@ cmd_update() {
   printf 'checking %s for the latest release…\n' "$(source_url)"
   latest="$(latest_tag)"; [ -n "$latest" ] || die "no releases found at $(source_url) (no network, or no access to the repo?)"
   if [ "$latest" = "$cur" ] && installed "$latest"; then printf 'μ %s is the latest release. Nothing to do.\n' "$cur"; return 0; fi
-  cmd_install "$latest" --set-default "$@"
+  # no --set-default: the installer would move the default before its checks run. Move it only after they passed
+  cmd_install "$latest" "$@"
+  installed "$latest" || die "μ $latest did not install completely; the default stays μ ${cur:-none}"
   echo "$latest" > "$MU_HOME/default"
   stale="$(projects | while IFS= read -r p; do [ "$(toml_version "$p/mu.toml")" = "$latest" ] || printf ' %s' "$(basename "$p")"; done)"
   printf '\n%sdefault is now μ %s.%s\n' "$B" "$latest" "$N"
@@ -154,9 +189,67 @@ prune_store() {
     k="$(basename "$d")"
     case " $2 " in *" $k "*) continue ;; esac
     printf '  remove layer   %-34s %s\n' "$k" "$(du -sh "$d" 2>/dev/null | cut -f1 | tr -d ' ')"
-    [ "$1" = 1 ] && { PRUNED_KB=$((PRUNED_KB + $(kb_of "$d"))); chmod -R u+w "$d" 2>/dev/null || true; rm -rf "$d"; }
+    [ "$1" = 1 ] && { PRUNED_KB=$((PRUNED_KB + $(kb_of "$d"))); find "$d" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true; rm -rf "$d"; }
   done
   return 0
+}
+# prune_cache APPLY VERSIONS: remove from the download cache the flatpak commits nothing pins (Linux: the repository
+# of the download-only flatpak installation $MU_CACHE/flatpak, where a ref mu/<flatpak ref>/<commit> keeps each commit).
+# Kept: the commits VERSIONS pin (toolchains/<v>/CACHE_REFS) and those any installed version of every other MU_HOME
+# pins: MU_CACHE is shared by all of them, and each installer records its MU_HOME in $MU_CACHE/flatpak/homes/ (a record
+# whose MU_HOME no longer exists is dropped). Then the objects no ref reaches are deleted (ostree prune), which also
+# reclaims interrupted downloads, unless a pinned commit is itself half downloaded. The whole prune holds the cache's
+# lock exclusively; if an install is downloading into it or importing from it, nothing is pruned. Other downloads in
+# $MU_CACHE are not pruned (all of it is safe to delete; it is downloaded again).
+prune_cache() {
+  local repo="$MU_CACHE/flatpak/repo" rc=0
+  [ -f "$repo/config" ] && command -v ostree >/dev/null 2>&1 || return 0
+  [ "$1" = 1 ] || { prune_cache_locked 0 "$2"; return 0; }
+  exec 9>"$MU_CACHE/flatpak.lock"
+  if flock -n 9; then prune_cache_locked 1 "$2" || rc=$?; else echo "  (the flatpak download cache is in use by an install: not pruned)"; fi
+  exec 9>&-
+  return "$rc"
+}
+cache_pins() {   # cache_pins APPLY VERSIONS: "REF@COMMIT" lines that must stay in the download cache
+  local v f h me
+  me="$(cd "$MU_HOME" 2>/dev/null && pwd -P || echo "$MU_HOME")"
+  { for v in $2; do cat "$TC/$v/CACHE_REFS" 2>/dev/null || true; done
+    for f in "$MU_CACHE/flatpak/homes"/*; do
+      [ -f "$f" ] || continue
+      h="$(head -1 "$f")"; [ -n "$h" ] && [ "$h" != "$me" ] || continue
+      if [ -d "$h/toolchains" ]; then cat "$h"/toolchains/*/CACHE_REFS 2>/dev/null || true
+      elif [ ! -e "$h" ]; then [ "$1" = 0 ] || rm -f "$f"   # that MU_HOME was deleted
+      fi
+    done; } | awk '$1 == "flatpak" {print $2}'
+}
+prune_cache_locked() {
+  local repo="$MU_CACHE/flatpak/repo" keep r c ref p k0 k1
+  keep=" $(cache_pins "$1" "$2" | tr '\n' ' ') "
+  for r in $(ostree --repo="$repo" refs 2>/dev/null | grep '^mu/' || true); do
+    c="${r##*/}"; ref="${r#mu/}"; ref="${ref%/*}"
+    case "$keep" in *" $ref@$c "*) continue ;; esac
+    printf '  remove cached  %-34s %s\n' "$(echo "$ref" | cut -d/ -f2)" "${c:0:12} (flatpak ${ref%%/*})"
+    [ "$1" = 1 ] || continue
+    ostree --repo="$repo" refs --delete "$r" >/dev/null 2>&1 || true
+  done
+  [ "$1" = 1 ] || return 0
+  # a download killed after flatpak updated its remote ref (before the installer reset it to the placeholder) leaves
+  # refs/remotes/flathub/<ref> on a real commit, which would keep it forever: back to the placeholder
+  for r in $(ostree --repo="$repo" refs 2>/dev/null | grep '^mu-placeholder/' || true); do
+    c="$(ostree --repo="$repo" rev-parse "$r" 2>/dev/null)" || continue; ref="${r#mu-placeholder/}"
+    [ -f "$repo/refs/remotes/flathub/$ref" ] && [ "$(cat "$repo/refs/remotes/flathub/$ref")" != "$c" ] || continue
+    echo "$c" > "$repo/refs/remotes/flathub/$ref"
+  done
+  # a pinned commit half downloaded: its objects (reachable from no ref yet) are kept for the install that resumes it
+  for p in $keep; do
+    [ -e "$repo/state/${p##*@}.commitpartial" ] || continue
+    echo "  (a pinned flatpak commit is half downloaded: the cache's unused objects are pruned once it is complete)"; return 0
+  done
+  k0=$(kb_of "$repo")
+  ostree --repo="$repo" prune --refs-only >/dev/null 2>&1 || true
+  k1=$(kb_of "$repo"); [ "$k1" -le "$k0" ] || k1=$k0
+  PRUNED_KB=$((PRUNED_KB + k0 - k1))
+  [ "$k0" = "$k1" ] || printf '  pruned the flatpak download cache: %s MB\n' "$(( (k0 - k1) / 1024 ))"
 }
 remove_version() { rm -rf "${TC:?}/$1" "$MU_HOME/state/cad/$1" "$MU_HOME/state/bench/install-$1"; }
 
@@ -173,6 +266,7 @@ cmd_remove() {
   f0=$(kb_of "$TC/$v")
   remove_version "$v"; printf 'removed μ %s\n' "$v"
   prune_store 1 "$(refs_of $(versions))"
+  prune_cache 1 "$(versions)"
   report_removed $((f0 + PRUNED_KB))
 }
 
@@ -190,6 +284,7 @@ cmd_gc() {
     [ "$apply" = 0 ] || { f0=$((f0 + $(kb_of "$TC/$v"))); remove_version "$v"; }
   done
   prune_store "$apply" "$(refs_of $kept)"
+  prune_cache "$apply" "$kept"
   if [ "$apply" = 1 ]; then
     { ls -t "$MU_HOME/logs"/install-*.log 2>/dev/null || true; } | tail -n +21 | while IFS= read -r l; do rm -f "$l"; done
     if [ -f "$MU_HOME/projects.txt" ]; then projects > "$MU_HOME/projects.txt.tmp"; mv "$MU_HOME/projects.txt.tmp" "$MU_HOME/projects.txt"; fi
@@ -225,6 +320,7 @@ cmd_status() {
   fi
   others="$(versions | grep -vx "$V" | tr '\n' ' ' || true)"
   [ -z "$others" ] || printf '%salso installed: %s%s\n' "$DIM" "$others" "$N"
+  au_status_line
   cat <<H
 
   ${B}mu run${N} <tool> [args]   run a tool: python, gmsh, ccx, cad, openfoam, pvbatch, prusa-slicer, cam-python, …
@@ -246,7 +342,15 @@ ${B}Versions${N}
   mu use V                 make V the default (used outside projects)
   mu pin [V]               pin this project (mu.toml) to V (default: the default version) and link it
   mu remove V [--force]    uninstall V (refuses the default, and versions projects pin unless --force)
-  mu gc [--yes]            remove versions and layers nothing uses (dry run without --yes)
+  mu gc [--yes]            remove versions, layers and cached flatpak commits nothing uses (dry run without --yes)
+
+${B}Updates${N}
+  mu autoupdate [status]   automatic updates: on or off, schedule, last check and result (--json)
+  mu autoupdate on|off     a daily check that installs a newer release, runs mu doctor and the benchmarks, and
+                           makes it the default only if they pass. Projects keep their pins
+  mu autoupdate run        check now (--force: also on battery, and after 3 failed tries)
+  mu autoupdate set K V    settings: policy switch|install-only, min_free_gb, gc on|off, keep_previous, hour, minute,
+                           max_hours. Updates wait while $(tilde "$AU_BUSY") exists (a job runner holds it)
 
 ${B}Tools${N} (from the version this folder uses)
 H
@@ -257,6 +361,757 @@ H
   printf '\nThe version comes from $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.\n'
 }
 
+# ---------------------------------------------------------------- auto-update
+# The scheduler (launchd on macOS, a systemd user timer on Linux) runs `mu autoupdate run --scheduled` every hour at
+# the configured minute. A scheduled run does nothing until the day's check is due (from hour:minute on; a machine that
+# was asleep or off checks when it is back), and a check that could not happen (battery, disk, busy, offline) is tried
+# again the next hour. The check installs a newer release through the same path as `mu update` (download, build,
+# mu doctor, benchmarks) and makes it the default only if that passed. Projects keep their mu.toml pins.
+# Settings: autoupdate.conf (key=value, read as text, never sourced). State: state/autoupdate.state. Logs:
+# logs/autoupdate-*.log (newest 20). A job runner holds state/busy (optionally with its pid on the first line) to hold
+# updates back: it creates the file before it resolves a toolchain version and removes it when its jobs are done.
+# Test hooks (tools/test-autoupdate): MU_LAUNCHCTL, MU_SYSTEMCTL, MU_LOGINCTL, MU_PMSET, MU_OSASCRIPT, MU_CAFFEINATE,
+# MU_LAUNCH_AGENTS_DIR, MU_SYSTEMD_USER_DIR, MU_AUTOUPDATE_SCHEDULER, MU_RUN_USER_DIR, MU_SYSTEMD_RUN_DIR,
+# MU_AUTOUPDATE_TIMEOUT_S, MU_AUTOUPDATE_RETRY_S.
+AU_CONF="$MU_HOME/autoupdate.conf"; AU_STATE="$MU_HOME/state/autoupdate.state"; AU_BUSY="$MU_HOME/state/busy"
+AU_LOCK="$MU_HOME/.autoupdate.lock"; AU_LOG=""; AU_WHY=""
+AU_MAX_TRIES=3     # a release that fails its checks (or hangs, or is stopped mid-install) is tried this often
+AU_MAX_ERRORS=7    # a release that fails to download or build is tried once a day this often
+AU_RETRY_S="${MU_AUTOUPDATE_RETRY_S:-60}"
+AU_LABEL="systems.martand.mu.autoupdate"; AU_UNIT="mu-autoupdate"
+AU_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+LAUNCHCTL="${MU_LAUNCHCTL:-launchctl}"; SYSTEMCTL="${MU_SYSTEMCTL:-systemctl}"; LOGINCTL="${MU_LOGINCTL:-loginctl}"
+
+is_release() {   # vYYYY.MM.N (digits only, three parts)
+  case "$1" in v[0-9]*) ;; *) return 1 ;; esac
+  case "${1#v}" in *[!0-9.]*|*..*|*.) return 1 ;; esac
+  local d="${1//[!.]/}"; [ "${#d}" = 2 ]
+}
+ver_gt() {   # ver_gt A B: release A is newer than release B (numeric per part)
+  local a="${1#v}." b="${2#v}." x y i
+  for i in 1 2 3; do
+    x="${a%%.*}"; a="${a#*.}"; y="${b%%.*}"; b="${b#*.}"
+    [ "$((10#$x))" -gt "$((10#$y))" ] && return 0
+    [ "$((10#$x))" -lt "$((10#$y))" ] && return 1
+  done
+  return 1
+}
+au_ahead() {   # au_ahead V DEFAULT: V is a release newer than the default (or there is no release default)
+  [ -n "$1" ] && is_release "$1" && { [ -z "$2" ] || ! is_release "$2" || ver_gt "$1" "$2"; }
+}
+now() { date '+%Y-%m-%d %H:%M'; }
+ep_fmt() { date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$1" '+%Y-%m-%d %H:%M'; }
+# kv_get FILE KEY / kv_set FILE KEY VALUE: plain key=value files (comments and unknown keys are kept; nothing is evaluated)
+kv_get() {
+  [ -f "$1" ] || return 0
+  K="$2" awk '{ sub(/\r$/, ""); t = $0; sub(/^[[:space:]]+/, "", t) } t ~ /^#/ { next }
+    { i = index(t, "="); if (!i) next; k = substr(t, 1, i - 1); sub(/[[:space:]]+$/, "", k); if (k != ENVIRON["K"]) next
+      v = substr(t, i + 1); sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+(#.*)?$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2); val = v }
+    END { printf "%s", val }' "$1"
+}
+kv_set() {
+  local f="$1"; mkdir -p "$(dirname "$f")"; [ -f "$f" ] || : > "$f"
+  K="$2" V="$(printf '%s' "$3" | tr '\n\r' '  ')" awk '{ t = $0; sub(/^[[:space:]]+/, "", t); i = index(t, "="); k = i ? substr(t, 1, i - 1) : ""
+      sub(/[[:space:]]+$/, "", k)
+      if (t !~ /^#/ && k == ENVIRON["K"]) { if (!done) print ENVIRON["K"] "=" ENVIRON["V"]; done = 1; next } print }
+    END { if (!done) print ENVIRON["K"] "=" ENVIRON["V"] }' "$f" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"
+}
+st_get() { kv_get "$AU_STATE" "$1"; }
+st_set() { kv_set "$AU_STATE" "$1" "$2"; }
+st_num() { local n; n="$(st_get "$1")"; case "$n" in ''|*[!0-9]*) n=0 ;; esac; echo "$n"; }
+au_valid() {   # au_valid KEY VALUE: is VALUE allowed for setting KEY
+  case "$1=$2" in
+    enabled=on|enabled=off|gc=on|gc=off|policy=switch|policy=install-only) return 0 ;;
+    min_free_gb=*|keep_previous=*) case "$2" in ''|*[!0-9]*) return 1 ;; esac; [ "${#2}" -le 6 ] ;;
+    hour=*) case "$2" in [0-9]|[01][0-9]|2[0-3]) return 0 ;; esac; return 1 ;;
+    minute=*) case "$2" in [0-9]|[0-5][0-9]) return 0 ;; esac; return 1 ;;
+    max_hours=*) case "$2" in [1-9]|1[0-9]|20) return 0 ;; esac; return 1 ;;
+    *) return 1 ;;
+  esac
+}
+au_conf() {   # au_conf KEY: the setting, or its default when missing or invalid
+  local v; v="$(kv_get "$AU_CONF" "$1")"
+  if au_valid "$1" "$v"; then printf '%s' "$v"; return 0; fi
+  case "$1" in enabled) echo off ;; gc) echo on ;; policy) echo switch ;; min_free_gb) echo 12 ;; keep_previous) echo 1 ;;
+    hour) echo 4 ;; minute) echo 0 ;; max_hours) echo 6 ;; esac
+}
+au_hhmm() { printf '%02d:%02d' "$((10#$(au_conf hour)))" "$((10#$(au_conf minute)))"; }
+au_init_conf() {
+  if [ -f "$AU_CONF" ]; then [ -n "$(kv_get "$AU_CONF" minute)" ] || kv_set "$AU_CONF" minute "$((RANDOM % 60))"; return 0; fi
+  mkdir -p "$MU_HOME"
+  cat > "$AU_CONF" <<C
+# μ auto-update settings. Plain key=value (read as text, never executed). Change with: mu autoupdate set KEY VALUE
+# enabled: on|off. policy: switch (install, then make it the default) | install-only (install, keep the default).
+# min_free_gb: skip while less is free (a release with new locks needs about 7 GB). gc: on|off, after a switch remove
+# versions nothing uses; keep_previous: previous defaults kept for rollback (mu use <version>). Pinned versions stay.
+# hour, minute: local time of the daily check (the minute is random per machine; a check that can't run then is
+# retried every hour at that minute). max_hours: an install that takes longer is stopped and counts as a failed try.
+enabled=off
+policy=switch
+min_free_gb=12
+gc=on
+keep_previous=1
+hour=4
+minute=$((RANDOM % 60))
+max_hours=6
+C
+}
+au_sched() {
+  if [ -n "${MU_AUTOUPDATE_SCHEDULER:-}" ]; then echo "$MU_AUTOUPDATE_SCHEDULER"; return 0; fi
+  case "$(uname -s)" in Darwin) echo launchd ;; *) echo systemd ;; esac
+}
+au_plist() { echo "${MU_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}/$AU_LABEL.plist"; }
+au_unitdir() { echo "${MU_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"; }
+au_safe_path() {   # scheduler files quote paths; refuse the characters they can't carry
+  case "$1" in *'"'*|*'\'*|*$'\n'*|*$'\r'*) die "auto-update can't be scheduled for a path with quotes, backslashes or line breaks: $1" ;; esac
+}
+xml_esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+sd_pct() { printf '%s' "$1" | sed -e 's/%/%%/g'; }                    # systemd specifiers
+sd_exec() { printf '%s' "$1" | sed -e 's/%/%%/g' -e 's/\$/$$/g'; }   # ... and ExecStart's $VAR expansion
+
+au_launchd_plist() {   # the LaunchAgent: every hour at :minute (launchd runs one missed in sleep on wake); the run
+                       # itself decides whether the day's check is due
+  cat <<P
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$AU_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$(xml_esc "$MU_HOME/bin/mu")</string>
+		<string>autoupdate</string>
+		<string>run</string>
+		<string>--scheduled</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>MU_HOME</key>
+		<string>$(xml_esc "$MU_HOME")</string>
+		<key>MU_CACHE</key>
+		<string>$(xml_esc "$MU_CACHE")</string>
+		<key>PATH</key>
+		<string>$AU_PATH</string>
+	</dict>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Minute</key>
+		<integer>$((10#$(au_conf minute)))</integer>
+	</dict>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>$(xml_esc "$MU_HOME/logs/launchd-autoupdate.log")</string>
+	<key>StandardErrorPath</key>
+	<string>$(xml_esc "$MU_HOME/logs/launchd-autoupdate.log")</string>
+</dict>
+</plist>
+P
+}
+au_systemd_service() {   # TimeoutStartSec is a backstop: the run stops an install itself after max_hours (at most 20)
+  cat <<S
+[Unit]
+Description=μ toolchain auto-update (mu autoupdate run)
+
+[Service]
+Type=oneshot
+Environment="MU_HOME=$(sd_pct "$MU_HOME")"
+Environment="MU_CACHE=$(sd_pct "$MU_CACHE")"
+ExecStart="$(sd_exec "$MU_HOME/bin/mu")" autoupdate run --scheduled
+Nice=10
+TimeoutStartSec=1d
+S
+}
+au_systemd_timer() {   # hourly at :minute; Persistent: a run missed while the machine was off runs at the next start
+  cat <<S
+[Unit]
+Description=μ auto-update check (daily from $(au_hhmm), retried hourly until it is done)
+
+[Timer]
+OnCalendar=*-*-* *:$(printf '%02d' "$((10#$(au_conf minute)))"):00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+S
+}
+au_linger() { "$LOGINCTL" show-user "$(id -un)" -p Linger --value 2>/dev/null || true; }
+au_linger_hint() { printf 'once, as root: sudo loginctl enable-linger %s  (or: sudo ./install.sh --system --user %s)' "$(id -un)" "$(id -un)"; }
+au_user_bus() {   # `sudo -u`, `su -` and runuser shells have no XDG_RUNTIME_DIR: use this user's /run/user/UID if it exists
+  local r; r="${MU_RUN_USER_DIR:-/run/user}/$(id -u)"
+  if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -O "$XDG_RUNTIME_DIR" ]; then return 0; fi
+  { [ -d "$r" ] && [ -O "$r" ]; } || return 0
+  export XDG_RUNTIME_DIR="$r"; unset DBUS_SESSION_BUS_ADDRESS
+}
+au_running() {   # another `mu autoupdate run` holds the lock and is alive
+  local p; p="$(cat "$AU_LOCK/pid" 2>/dev/null || true)"
+  [ -n "$p" ] && [ "$p" != "$$" ] || return 1
+  case "$(ps -p "$p" -o command= 2>/dev/null || true)" in *autoupdate*) return 0 ;; esac
+  return 1
+}
+
+au_schedule() {   # install and load the scheduler; problems go to stderr (and AU_WHY); returns 1 if nothing will run it
+  local f d uid dom err
+  AU_WHY=""
+  au_safe_path "$MU_HOME"; au_safe_path "$MU_CACHE"
+  mkdir -p "$MU_HOME/logs"
+  case "$(au_sched)" in
+    launchd)
+      f="$(au_plist)"; uid="$(id -u)"; mkdir -p "$(dirname "$f")"
+      au_launchd_plist > "$f.tmp.$$"
+      if command -v plutil >/dev/null 2>&1 && ! plutil -lint -s "$f.tmp.$$" >&2; then
+        rm -f "${f:?}.tmp.$$"; die "the generated LaunchAgent is not a valid plist"
+      fi
+      mv "$f.tmp.$$" "$f"
+      # reloading stops the job, and with it a running update: leave a running one alone
+      if au_running; then
+        st_set reload_pending 1
+        printf 'an auto-update is running now: the new schedule is saved; run  mu autoupdate on  again when it is done\n' >&2
+        return 0
+      fi
+      st_set reload_pending ""
+      "$LAUNCHCTL" bootout "gui/$uid/$AU_LABEL" >/dev/null 2>&1 || "$LAUNCHCTL" bootout "user/$uid/$AU_LABEL" >/dev/null 2>&1 || true
+      # the login session's domain (notifications, keychain, ssh-agent); user/UID only when nobody is logged in
+      dom="user/$uid"; if "$LAUNCHCTL" print "gui/$uid" >/dev/null 2>&1; then dom="gui/$uid"; fi
+      if ! err="$("$LAUNCHCTL" bootstrap "$dom" "$f" 2>&1)"; then
+        printf 'could not load %s into %s (%s): launchd loads it at the next login\n' "$(tilde "$f")" "$dom" "$err" >&2
+      fi ;;
+    systemd)
+      au_user_bus
+      if ! "$SYSTEMCTL" --user show-environment >/dev/null 2>&1; then
+        if [ ! -d "${MU_SYSTEMD_RUN_DIR:-/run/systemd/system}" ]; then
+          AU_WHY="no systemd on this machine (a container, or WSL without [boot] systemd=true in /etc/wsl.conf)"
+          printf '%s.\nNothing runs the check yet: once systemd runs, run  mu autoupdate on  again (or run  mu autoupdate run  from cron).\n' "$AU_WHY" >&2
+        else
+          AU_WHY="this shell can't reach $(id -un)'s systemd user manager (no login session, and linger is off)"
+          printf '%s.\nNothing runs the check yet. Fix: %s; then run  mu autoupdate on  again.\n' "$AU_WHY" "$(au_linger_hint)" >&2
+        fi
+        return 1
+      fi
+      d="$(au_unitdir)"; mkdir -p "$d"
+      au_systemd_service > "$d/$AU_UNIT.service"; au_systemd_timer > "$d/$AU_UNIT.timer"
+      if ! { "$SYSTEMCTL" --user daemon-reload && "$SYSTEMCTL" --user enable --now "$AU_UNIT.timer" >/dev/null 2>&1; }; then
+        AU_WHY="systemctl --user could not enable $AU_UNIT.timer"; printf '%s\n' "$AU_WHY" >&2; return 1
+      fi
+      if [ "$(au_linger)" != yes ]; then
+        printf 'The timer runs only while %s is logged in. To run it always, %s\n' "$(id -un)" "$(au_linger_hint)" >&2
+      fi ;;
+    *) die "unknown scheduler '$(au_sched)'" ;;
+  esac
+}
+au_unschedule() {
+  local f d uid
+  case "$(au_sched)" in
+    launchd)
+      f="$(au_plist)"; uid="$(id -u)"; rm -f "${f:?}"
+      if au_running; then   # unloading would stop it mid-install; with enabled=off the loaded job does nothing
+        printf 'an auto-update is running now: it finishes first. The scheduler is gone after the next login (until then it does nothing).\n' >&2
+        return 0
+      fi
+      "$LAUNCHCTL" bootout "gui/$uid/$AU_LABEL" >/dev/null 2>&1 || "$LAUNCHCTL" bootout "user/$uid/$AU_LABEL" >/dev/null 2>&1 || true ;;
+    systemd)   # stopping the timer doesn't stop a running service
+      au_user_bus; d="$(au_unitdir)"
+      "$SYSTEMCTL" --user disable --now "$AU_UNIT.timer" >/dev/null 2>&1 || true
+      rm -f "${d:?}/$AU_UNIT.service" "${d:?}/$AU_UNIT.timer"
+      "$SYSTEMCTL" --user daemon-reload >/dev/null 2>&1 || true ;;
+  esac
+}
+au_scheduled() {   # loaded | installed (not loaded) | not installed
+  local uid; uid="$(id -u)"
+  case "$(au_sched)" in
+    launchd)
+      [ -f "$(au_plist)" ] || { echo "not installed"; return 0; }
+      if "$LAUNCHCTL" print "gui/$uid/$AU_LABEL" >/dev/null 2>&1 || "$LAUNCHCTL" print "user/$uid/$AU_LABEL" >/dev/null 2>&1; then echo loaded
+      else echo "installed (not loaded)"; fi ;;
+    systemd)
+      au_user_bus
+      [ -f "$(au_unitdir)/$AU_UNIT.timer" ] || { echo "not installed"; return 0; }
+      if [ "$("$SYSTEMCTL" --user is-enabled "$AU_UNIT.timer" 2>/dev/null)" = enabled ]; then echo loaded; else echo "installed (not loaded)"; fi ;;
+  esac
+}
+au_boundary() {   # the start (epoch seconds) of the current check day: the latest hour:minute that has passed
+  local d now b; d="$(date +%Y-%m-%d) $(au_hhmm)"; now="$(date +%s)"
+  b="$(date -j -f '%Y-%m-%d %H:%M:%S' "$d:00" +%s 2>/dev/null || date -d "$d" +%s)"
+  [ "$b" -le "$now" ] || b=$((b - 86400))
+  echo "$b"
+}
+au_due() { [ "$(st_num done_epoch)" -lt "$(au_boundary)" ]; }
+au_done() { st_set done_epoch "$(date +%s)"; }   # the day's check is complete (a skip or deferral is not)
+au_next() {
+  if au_due; then printf 'due: the next hourly run (at :%02d)' "$((10#$(au_conf minute)))"; else ep_fmt $(($(au_boundary) + 86400)); fi
+}
+
+au_note() {   # au_note RESULT MESSAGE: report and record this run's outcome
+  printf '%s: %s\n' "$1" "$2"
+  st_set last_check "$(now)"; st_set last_result "$1"; st_set last_message "$2"; st_set last_log "$AU_LOG"
+}
+au_notify() {   # au_notify TITLE TEXT: macOS notification, best effort (text goes in as arguments, never as code)
+  local o="${MU_OSASCRIPT:-}"
+  if [ -z "$o" ]; then { [ "$(uname -s)" = Darwin ] && command -v osascript >/dev/null 2>&1; } || return 0; o=osascript; fi
+  "$o" -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' "$1" "$2" \
+    >/dev/null 2>&1 || true
+}
+au_busy() {   # the busy marker holds updates back; one naming a pid that has exited is stale
+  [ -e "$AU_BUSY" ] || return 1
+  local p; p="$(head -1 "$AU_BUSY" 2>/dev/null | tr -cd '0-9')"
+  if [ -n "$p" ] && ! ps -p "$p" >/dev/null 2>&1; then echo "ignoring a stale busy marker (pid $p has exited)"; return 1; fi
+  return 0
+}
+au_on_battery() {
+  local p="${MU_PMSET:-}"
+  if [ -z "$p" ]; then { [ "$(uname -s)" = Darwin ] && command -v pmset >/dev/null 2>&1; } || return 1; p=pmset; fi
+  case "$("$p" -g batt 2>/dev/null | head -1)" in *"Battery Power"*) return 0 ;; esac
+  return 1
+}
+# Free disk space. On WSL2 df sees only the inside of the distro's virtual disk, which can be far larger than the
+# Windows drive holding it: mu_disk_free counts the smaller of the two (see install/disk.sh, which explains it in full).
+# >>> mu_disk_free (keep identical in install/disk.sh and bin/mu)
+_mu_is_wsl() {
+  case "${MU_WSL:-}" in 1) return 0 ;; 0) return 1 ;; esac
+  [ -n "${WSL_DISTRO_NAME:-}" ] && return 0
+  [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] && return 0
+  [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ] && return 0
+  case "$(uname -r 2>/dev/null)" in *[Mm]icrosoft*) return 0 ;; esac
+  return 1
+}
+# (every helper returns 0, even when df or awk fails: callers run under set -E with an ERR trap)
+_mu_kb_free() { { df -Pk "$1" 2>/dev/null || true; } | awk 'NR==2 && $4 ~ /^[0-9]+$/ {print $4}'; }
+# _mu_drive_mount LETTER: where that Windows drive is mounted (drvfs, over 9p or virtiofs), or nothing
+_mu_drive_mount() {
+  local l u
+  l="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"; u="$(printf '%s' "$1" | tr 'a-z' 'A-Z')"
+  { awk -v l="$l" -v u="$u" '
+      $3 == "9p" || $3 == "drvfs" || $3 == "virtiofs" {
+        s = substr($1, 1, 2)
+        if (s == u ":" || s == l ":" || index($4, "path=" u ":") || index($4, "path=" l ":") || $2 == "/mnt/" l) { print $2; exit }
+      }' "${MU_PROC_MOUNTS:-/proc/mounts}" 2>/dev/null || true; } | sed 's/\\040/ /g'
+}
+# _mu_wsl_drives: one line. "sure L": drive L holds this distro's virtual disk. "unsure L M...": this distro is not
+# among the registered ones by name (no $WSL_DISTRO_NAME), so it is on one of these drives. "nodrive": its BasePath has no
+# drive letter. Nothing: no answer from Windows.
+_mu_wsl_drives() {
+  local IFS=" $(printf '\t')
+" reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
+  [ -x "$reg" ] || return 0
+  command -v timeout >/dev/null 2>&1 && t="timeout 15"
+  # reg.exe writes CRLF lines (and UTF-16 in some setups): drop NULs and CRs, then read DistributionName / BasePath
+  # per subkey. BasePath may be \\?\C:\..., C:\..., or a UNC path (no drive letter).
+  { $t "$reg" query "$key" /s 2>/dev/null < /dev/null || true; } | LC_ALL=C tr -d '\000\r' | LC_ALL=C awk -v want="${WSL_DISTRO_NAME:-}" '
+    function flush() { if (base != "") { n++; nm[n] = name; b[n] = base }; name = ""; base = "" }
+    /^HKEY_/ { flush(); next }
+    { v = $0; sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v) }
+    v ~ /^DistributionName[ \t]+REG_SZ[ \t]/ { sub(/^DistributionName[ \t]+REG_SZ[ \t]+/, "", v); name = v }
+    v ~ /^BasePath[ \t]+REG_(EXPAND_)?SZ[ \t]/ { sub(/^BasePath[ \t]+REG_(EXPAND_)?SZ[ \t]+/, "", v); base = v }
+    END {
+      flush(); m = 0; k = 0; out = ""
+      for (i = 1; i <= n; i++) if (want != "" && nm[i] == want) m = i
+      for (i = 1; i <= n; i++) {
+        if (m && i != m) continue
+        p = b[i]; if (substr(p, 1, 4) == "\\\\?\\") p = substr(p, 5)
+        d = toupper(substr(p, 1, 1))
+        if (substr(p, 2, 1) == ":" && d ~ /^[A-Z]$/ && !(d in seen)) { seen[d] = 1; k++; out = out " " d }
+      }
+      if (n == 0) exit
+      if (k == 0) { print "nodrive"; exit }
+      # sure: this distro found by name, or every registered distro is on the one drive
+      print ((m || (want == "" && k == 1)) ? "sure" : "unsure") out
+    }'
+}
+# mu_disk_free DIR: sets MU_FREE_GB (the free GB to check; empty if df failed), MU_FREE_WHERE (where: empty unless WSL)
+# and, when the Windows drive could not be confirmed and has less free space than the virtual disk, MU_FREE_NOTE_GB and
+# MU_FREE_NOTE (that drive's free GB, to show or warn about but not to enforce)
+mu_disk_free() {
+  local d="$1" kb ans state drives why="" l m k best="" bl="" all="" IFS=" $(printf '\t')
+"   # callers may have changed IFS
+  MU_FREE_GB=""; MU_FREE_WHERE=""; MU_FREE_NOTE=""; MU_FREE_NOTE_GB=""
+  while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
+  kb="$(_mu_kb_free "$d")"
+  [ -z "$kb" ] || MU_FREE_GB=$((kb / 1048576))
+  _mu_is_wsl || return 0
+  ans="$(_mu_wsl_drives)"; state="${ans%% *}"; drives="${ans#"$state"}"
+  case "$state" in
+    sure) ;;
+    unsure) why="WSL_DISTRO_NAME is not set"; [ -z "${WSL_DISTRO_NAME:-}" ] || why="no distro named $WSL_DISTRO_NAME in the registry" ;;
+    nodrive) state=unsure; drives=C; why="its folder has no drive letter, so C: is assumed" ;;
+    *) state=unsure; drives=C; why="no answer from Windows (reg.exe), so C: is assumed" ;;
+  esac
+  for l in $drives; do
+    all="$all $l:"
+    m="$(_mu_drive_mount "$l")"; [ -n "$m" ] || continue
+    k="$(_mu_kb_free "$m")"; [ -n "$k" ] || continue
+    if [ -z "$best" ] || [ "$k" -lt "$best" ]; then best="$k"; bl="$l"; fi
+  done
+  if [ -z "$best" ]; then MU_FREE_WHERE="the WSL virtual disk (Windows drive not found)"; return 0; fi
+  if [ "$state" = sure ]; then
+    # the smaller of the two; the VHD itself can be the limit (its maximum size is nearly used up)
+    if [ -n "$kb" ] && [ "$kb" -lt "$best" ]; then MU_FREE_WHERE="the WSL virtual disk (at its size limit)"
+    else MU_FREE_GB=$((best / 1048576)); MU_FREE_WHERE="$bl: (WSL disk)"; fi
+    return 0
+  fi
+  # not confirmed: only the virtual disk is checked; the drive's figure is reported when it is the smaller one
+  MU_FREE_WHERE="the WSL virtual disk"
+  [ "$(printf '%s' "$all" | wc -w)" -le 1 ] || why="$why; the least free of$all"
+  if [ -z "$kb" ] || [ "$best" -lt "$kb" ]; then
+    MU_FREE_NOTE_GB=$((best / 1048576)); MU_FREE_NOTE="$MU_FREE_NOTE_GB GB free on $bl: if the WSL disk is there ($why)"
+  fi
+  return 0
+}
+# <<< mu_disk_free
+au_caffeinate() {   # macOS: keep the system awake while PID runs, on AC power only (-s); the battery rule covers the rest
+  local c="${MU_CAFFEINATE:-}"
+  if [ -z "$c" ]; then [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/caffeinate ] || return 0; c=/usr/bin/caffeinate; fi
+  "$c" -i -s -w "$1" >/dev/null 2>&1 &
+}
+au_git_env() {   # never prompt (nobody is there to answer) and give up on a stalled connection
+  export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
+  [ -z "${GIT_SSH:-}" ] && [ -z "${GIT_SSH_COMMAND:-}" ] || return 0
+  local base; base="$("$(find_git)" config --get core.sshCommand 2>/dev/null || true)"   # e.g. a deploy key
+  export GIT_SSH_COMMAND="${base:-ssh} -o BatchMode=yes -o ConnectTimeout=30"
+}
+
+au_gc() {   # au_gc NEW PREV: remove releases older than NEW that nothing needs. Keeps NEW, PREV (plus keep_previous-1
+            # more of the newest older releases), every version a registered project pins, and everything not a release
+  local new="$1" prev="$2" n keep v removed="" f0=0 p unread=""
+  if install_running; then echo "gc: skipped (an install is running)"; return 0; fi
+  if au_busy >/dev/null; then echo "gc: skipped ($(tilde "$AU_BUSY") exists)"; return 0; fi
+  # a registered project whose mu.toml can't be read now (unmounted drive, other branch) may pin anything: keep all
+  if [ -f "$MU_HOME/projects.txt" ]; then
+    while IFS= read -r p; do [ -z "$p" ] || [ -r "$p/mu.toml" ] || unread="$unread $(tilde "$p")"; done < "$MU_HOME/projects.txt"
+  fi
+  if [ -n "$unread" ]; then
+    echo "gc: skipped: can't read the mu.toml of registered project(s)$unread, so their pins are unknown (mu gc --yes forgets projects that are gone)"
+    return 0
+  fi
+  n="$(au_conf keep_previous)"
+  keep=" $new $(pinned_versions | tr '\n' ' ') "
+  if [ "$n" -gt 0 ] && [ -n "$prev" ]; then case "$keep" in *" $prev "*) ;; *) keep="$keep$prev " ;; esac; n=$((n - 1)); fi
+  for v in $(versions | sort -t. -k1.2,1nr -k2,2nr -k3,3nr); do
+    { is_release "$v" && ver_gt "$new" "$v"; } || continue
+    case "$keep" in *" $v "*) continue ;; esac
+    if [ "$n" -gt 0 ]; then keep="$keep$v "; n=$((n - 1)); continue; fi
+    installed "$v" || continue
+    f0=$((f0 + $(kb_of "$TC/$v"))); remove_version "$v"; removed="$removed $v"
+  done
+  PRUNED_KB=0; prune_store 1 "$(refs_of $(versions))"; prune_cache 1 "$(versions)"
+  printf 'gc: kept%s; removed:%s · ' "$(echo "$keep" | tr -s ' ' | sed 's/ $//')" "${removed:- no versions}"
+  report_removed $((f0 + PRUNED_KB))
+}
+au_switch() {   # au_switch OLD NEW: make NEW (installed and checked) the default, unless a job holds the busy marker
+  local old="$1" new="$2"
+  if au_busy >/dev/null; then
+    st_set pending_switch "$new"
+    au_note deferred "μ $new is installed and passed its checks; it becomes the default once $(tilde "$AU_BUSY") is gone"
+    return 0
+  fi
+  echo "$new" > "$MU_HOME/default.tmp.$$"; mv "$MU_HOME/default.tmp.$$" "$MU_HOME/default"
+  st_set previous_default "$old"; st_set last_installed "$new"; st_set last_installed_time "$(now)"; st_set pending_switch ""
+  au_note installed "μ $new is the default${old:+ (was μ $old; roll back with: mu use $old)}"; au_done
+  au_notify "μ $new installed" "It passed its checks and is now the default.${old:+ Projects keep their pins. Roll back: mu use $old}"
+  if [ "$(au_conf gc)" = on ]; then au_gc "$new" "$old"; fi
+}
+
+au_run_body() {
+  local force="$1" cur latest policy fc ec free where need rc t0 i lim res tflag ipid c stage why kind reason msg other
+  local p_fv p_fc p_ft p_fl p_fr
+  printf '== μ auto-update  %s  (pid %s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
+  if [ "$(au_conf enabled)" != on ] && [ "$force" = 0 ]; then echo "auto-update is off (mu autoupdate on, or: mu autoupdate run --force)"; return 0; fi
+  # one run at a time; a lock whose pid is gone, or is no longer an auto-update, is stale
+  if ! mkdir "$AU_LOCK" 2>/dev/null; then
+    if au_running; then echo "another auto-update is running (pid $(cat "$AU_LOCK/pid" 2>/dev/null)): skipped"; return 0; fi
+    other="$(cat "$AU_LOCK/pid" 2>/dev/null || true)"
+    if [ -z "$other" ] && [ -n "$(find "$AU_LOCK" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then echo "another auto-update is starting: skipped"; return 0; fi
+    rm -rf "${AU_LOCK:?}"; mkdir "$AU_LOCK" || { echo "could not take the lock $AU_LOCK"; return 1; }
+  fi
+  echo "$$" > "$AU_LOCK/pid"; trap 'rm -rf "${AU_LOCK:?}"' EXIT
+
+  cur="$(default_version)"; policy="$(au_conf policy)"
+  printf 'default: %s · policy: %s · source: %s\n' "${cur:-none}" "$policy" "$(source_url)"
+  au_git_env
+  # a run at wake-up often starts before the network is back
+  latest=""
+  for i in 1 2 3; do
+    latest="$(latest_tag)" || latest=""
+    [ -z "$latest" ] || break
+    [ "$i" = 3 ] || { printf 'could not list releases (try %s of 3): retrying in %s s\n' "$i" "$AU_RETRY_S"; sleep "$AU_RETRY_S"; }
+  done
+  if [ -z "$latest" ]; then au_note error "could not list releases at $(source_url) (offline, or this account can't read the repo)"; return 1; fi
+  st_set latest_seen "$latest"
+  if [ -n "$cur" ] && ! is_release "$cur"; then
+    au_note skipped "the default is $cur, a development build: auto-update only follows releases (mu use <release> to opt in)"; au_done; return 0
+  fi
+  if [ -n "$cur" ] && ! ver_gt "$latest" "$cur"; then st_set pending_switch ""; au_note up-to-date "μ $cur is the latest release"; au_done; return 0; fi
+  if [ -n "$cur" ] && installed "$latest" && [ "$policy" = install-only ]; then
+    au_note up-to-date "μ $latest is installed; the default stays μ $cur (policy install-only; switch with: mu use $latest)"; au_done; return 0
+  fi
+  if au_busy; then au_note deferred "busy ($(tilde "$AU_BUSY") exists): μ $latest waits for a later run"; return 0; fi
+  if install_running; then au_note deferred "an install is running: μ $latest waits for a later run"; return 0; fi
+  if installed "$latest"; then echo "μ $latest is already installed (it passed its checks then)"; au_switch "$cur" "$latest"; return 0; fi
+
+  fc="$(st_num fail_count)"; [ "$(st_get fail_version)" = "$latest" ] || fc=0
+  ec="$(st_num err_count)"; [ "$(st_get err_version)" = "$latest" ] || ec=0
+  if [ "$fc" -ge "$AU_MAX_TRIES" ] && [ "$force" = 0 ]; then
+    au_note skipped "μ $latest failed $fc times: not retried until a newer release (or: mu autoupdate run --force)"; au_done; return 0
+  fi
+  if [ "$ec" -ge "$AU_MAX_ERRORS" ] && [ "$force" = 0 ]; then
+    au_note skipped "μ $latest could not be installed $ec times: not retried until a newer release (or: mu autoupdate run --force)"; au_done; return 0
+  fi
+  if [ "$force" = 0 ] && au_on_battery; then au_note skipped "on battery power: μ $latest installs on AC power (or: mu autoupdate run --force)"; return 0; fi
+  need="$(au_conf min_free_gb)"; mu_disk_free "$MU_HOME"; free="$MU_FREE_GB"; where="$MU_FREE_WHERE"
+  [ -z "$MU_FREE_NOTE" ] || echo "note: $MU_FREE_NOTE (not enforced)"
+  if [ -z "$free" ]; then echo "could not measure the free disk space; continuing (the installer checks it too)"
+  elif [ "$free" -lt "$need" ]; then
+    au_note skipped "$free GB free${where:+ on $where}, auto-update waits for $need GB (min_free_gb; mu gc --yes frees space)"; return 0
+  fi
+  if install_running; then au_note deferred "an install is running: μ $latest waits for a later run"; return 0; fi
+
+  # Count this try before it starts: a run that is killed or hangs still uses one up. A failure that isn't the
+  # release's (download, preflight, another install) gives it back below.
+  p_fv="$(st_get fail_version)"; p_fc="$(st_get fail_count)"; p_ft="$(st_get fail_time)"; p_fl="$(st_get fail_log)"; p_fr="$(st_get fail_reason)"
+  st_set fail_version "$latest"; st_set fail_count "$((fc + 1))"; st_set fail_time "$(now)"; st_set fail_log "$AU_LOG"
+  st_set fail_reason interrupted
+  res="$MU_HOME/state/.autoupdate-result.$$"; tflag="$MU_HOME/state/.autoupdate-timeout.$$"; rm -f "$res" "$tflag"
+  lim="${MU_AUTOUPDATE_TIMEOUT_S:-$(($(au_conf max_hours) * 3600))}"
+  printf '\ninstalling μ %s: download, build, mu doctor, benchmarks (stopped after %s s)…\n' "$latest" "$lim"
+  t0=$SECONDS
+  set +e
+  ( set -e; export MU_NO_AUTOUPDATE=1 MU_INSTALL_RESULT="$res"; cmd_install "$latest" --no-modify-path ) & ipid=$!
+  au_caffeinate "$ipid"
+  while kill -0 "$ipid" 2>/dev/null; do   # the time limit: stop the installer (TERM, then KILL a minute later)
+    if [ $((SECONDS - t0)) -ge "$lim" ]; then
+      if [ ! -e "$tflag" ]; then
+        : > "$tflag"; printf '\nμ %s: no result after %s s: stopping the install\n' "$latest" "$lim"
+        for c in $(pgrep -P "$ipid" 2>/dev/null); do kill_tree "$c" TERM; done
+      elif [ $((SECONDS - t0)) -ge $((lim + 60)) ]; then
+        for c in $(pgrep -P "$ipid" 2>/dev/null); do kill_tree "$c" KILL; done
+      fi
+    fi
+    sleep 1
+  done
+  wait "$ipid"; rc=$?
+  set -e
+  # the default moves only below, after the checks passed (an older installer moved it early with --set-default)
+  if [ -n "$cur" ] && [ "$(default_version)" != "$cur" ]; then echo "$cur" > "$MU_HOME/default"; fi
+  if [ "$rc" = 0 ] && installed "$latest" && [ ! -f "$TC/$latest/.installing" ]; then
+    rm -f "$res" "$tflag"
+    printf 'μ %s passed mu doctor and the benchmarks (%s s)\n' "$latest" "$((SECONDS - t0))"
+    for i in fail_version fail_count fail_time fail_log fail_reason err_version err_count err_time err_log; do st_set "$i" ""; done
+    if [ -n "$cur" ] && [ "$policy" = install-only ]; then
+      st_set last_installed "$latest"; st_set last_installed_time "$(now)"
+      au_note installed "μ $latest is installed; the default stays μ $cur (policy install-only; switch with: mu use $latest)"; au_done
+      au_notify "μ $latest installed" "It passed its checks. The default stays μ $cur (mu use $latest)."
+      return 0
+    fi
+    au_switch "$cur" "$latest"; return 0
+  fi
+
+  # what failed: the release (its checks, a hang, a stop mid-install), or something around it
+  stage=""; why=""
+  if [ -f "$res" ]; then stage="$(head -1 "$res" | cut -f1)"; why="$(head -1 "$res" | cut -f2-)"; fi
+  reason=""
+  if [ -e "$tflag" ]; then kind=release; reason=timeout
+  else
+    case "$stage" in
+      doctor|bench) kind=release; reason=checks ;;
+      fetch|preflight) kind=env ;;   # download of the recipe, platform/packages, disk, another install running
+      "") if [ "$rc" -ge 128 ]; then kind=release; reason=interrupted; elif [ ! -d "$TC/$latest" ]; then kind=env; else kind=build; fi ;;
+      *) kind=build ;;               # downloads and builds of the layers
+    esac
+  fi
+  rm -f "$res" "$tflag"
+  if [ -z "$cur" ] && ! installed "$(default_version)"; then rm -f "${MU_HOME:?}/default"; fi
+  if [ -d "$TC/$latest" ] && ! installed "$latest" && ! install_running; then
+    rm -rf "${TC:?}/${latest:?}"; echo "removed the incomplete μ $latest (layers it finished stay in the store for the next try)"
+  fi
+  if [ "$kind" = release ]; then
+    st_set fail_reason "$reason"; fc=$((fc + 1))
+    case "$reason" in
+      checks) msg="failed its checks" ;;
+      timeout) msg="did not finish within $lim s (stopped)" ;;
+      *) msg="was stopped while installing" ;;
+    esac
+    au_note failed "μ $latest $msg (attempt $fc of $AU_MAX_TRIES, exit $rc$([ "$fc" -lt "$AU_MAX_TRIES" ] || echo "; not retried until a newer release")); still on μ ${cur:-none}"
+    au_done
+    au_notify "μ $latest $msg" "Still on μ ${cur:-none}. Log: $(tilde "$AU_LOG")"
+    return 1
+  fi
+  # not the release's fault: give the try back
+  st_set fail_version "$p_fv"; st_set fail_count "$p_fc"; st_set fail_time "$p_ft"; st_set fail_log "$p_fl"; st_set fail_reason "$p_fr"
+  if [ "$kind" = env ]; then
+    case "$why" in
+      *"install.sh --system"*)
+        au_note needs-admin "μ $latest needs a one-time admin step: $why (still on μ ${cur:-none})"; au_done ;;
+      *) au_note error "μ $latest could not start installing (${why:-exit $rc}); tried again at the next run, still on μ ${cur:-none}" ;;
+    esac
+    return 1
+  fi
+  ec=$((ec + 1))
+  st_set err_version "$latest"; st_set err_count "$ec"; st_set err_time "$(now)"; st_set err_log "$AU_LOG"
+  au_note error "μ $latest could not be installed (${why:-exit $rc}; try $ec of $AU_MAX_ERRORS, once a day); still on μ ${cur:-none}"
+  au_done
+  [ "$ec" -lt "$AU_MAX_ERRORS" ] || au_notify "μ $latest could not be installed" "Tried $ec times. Still on μ ${cur:-none}. Log: $(tilde "$AU_LOG")"
+  return 1
+}
+au_run() {
+  local force=0 sched=0 a rc l keep1 keep2
+  for a in "$@"; do case "$a" in --force) force=1 ;; --scheduled) sched=1 ;; *) die "usage: mu autoupdate run [--force]" 2 ;; esac; done
+  mkdir -p "$MU_HOME/logs" "$MU_HOME/state"
+  # the scheduler fires hourly: only the day's first check (or a retry of one that couldn't happen) does anything
+  if [ "$sched" = 1 ]; then
+    [ "$(au_conf enabled)" = on ] || return 0
+    au_due || return 0
+    ! au_running || return 0
+  fi
+  keep1="$(st_get fail_log)"; keep2="$(st_get err_log)"
+  { ls -t "$MU_HOME/logs"/autoupdate-[0-9]*.log 2>/dev/null || true; } | tail -n +20 | while IFS= read -r l; do
+    [ "$l" = "$keep1" ] || [ "$l" = "$keep2" ] || rm -f "$l"
+  done
+  l="$MU_HOME/logs/launchd-autoupdate.log"   # launchd's catch-all (each run logs to its own file): keep it small
+  if [ -n "$(find "$l" -size +1024k 2>/dev/null)" ]; then : > "$l"; fi
+  AU_LOG="$MU_HOME/logs/autoupdate-$(date +%Y%m%d-%H%M%S).log"
+  [ ! -e "$AU_LOG" ] || AU_LOG="${AU_LOG%.log}-$$.log"
+  set +e
+  if [ -t 1 ]; then ( set -e; au_run_body "$force" ) 2>&1 | tee -a "$AU_LOG"; rc=${PIPESTATUS[0]}
+  else
+    ( set -e; au_run_body "$force" ) >> "$AU_LOG" 2>&1; rc=$?
+    # not a terminal (the scheduler, or a script/agent): one line with the outcome
+    if [ "$(st_get last_log)" = "$AU_LOG" ]; then
+      printf '%s: %s (log: %s)\n' "$(st_get last_result)" "$(st_get last_message)" "$(tilde "$AU_LOG")"
+    else printf '%s (log: %s)\n' "$(tail -1 "$AU_LOG")" "$(tilde "$AU_LOG")"; fi
+  fi
+  set -e
+  return "$rc"
+}
+
+json_s() { printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\000-\037')"; }
+json_b() { if [ "$1" = yes ]; then echo true; else echo false; fi; }
+au_fail_text() {   # why the failing release failed, from fail_reason
+  case "$(st_get fail_reason)" in timeout) echo "did not finish installing" ;; interrupted) echo "was stopped while installing" ;; *) echo "failed its checks" ;; esac
+}
+au_status() {
+  local json=0 en sch def fv fc ev ec next="" busy=no linger="" running=no
+  [ "${1:-}" = "--json" ] && json=1
+  en="$(au_conf enabled)"; sch="$(au_scheduled)"; def="$(default_version)"
+  fv="$(st_get fail_version)"; fc="$(st_num fail_count)"; ev="$(st_get err_version)"; ec="$(st_num err_count)"
+  if au_running; then running=yes; fi
+  { au_ahead "$fv" "$def" && [ "$fc" -gt 0 ]; } || { fv=""; fc=0; }
+  [ "$running" = no ] || [ "$(st_get fail_reason)" != interrupted ] || { fv=""; fc=0; }   # that is the try running now
+  { au_ahead "$ev" "$def" && [ "$ec" -gt 0 ]; } || { ev=""; ec=0; }
+  if au_busy >/dev/null; then busy=yes; fi
+  [ "$(au_sched)" != systemd ] || linger="$(au_linger)"
+  [ "$sch" != loaded ] || next="$(au_next)"
+  if [ "$json" = 1 ]; then
+    printf '{"enabled": %s, "configured": %s, "scheduler": %s, "scheduler_state": %s, "time": %s, "next_run": %s, "running": %s, ' \
+      "$(json_b "$([ "$en" = on ] && echo yes)")" "$(json_b "$([ -f "$AU_CONF" ] && echo yes)")" "$(json_s "$(au_sched)")" \
+      "$(json_s "$sch")" "$(json_s "$(au_hhmm)")" "$(json_s "$next")" "$(json_b "$running")"
+    printf '"policy": %s, "gc": %s, "keep_previous": %s, "min_free_gb": %s, "max_hours": %s, "default": %s, "latest_seen": %s, ' \
+      "$(json_s "$(au_conf policy)")" "$(json_s "$(au_conf gc)")" "$(au_conf keep_previous)" "$(au_conf min_free_gb)" \
+      "$(au_conf max_hours)" "$(json_s "$def")" "$(json_s "$(st_get latest_seen)")"
+    printf '"last_check": %s, "last_result": %s, "last_message": %s, "last_log": %s, "previous_default": %s, "pending_switch": %s, ' \
+      "$(json_s "$(st_get last_check)")" "$(json_s "$(st_get last_result)")" "$(json_s "$(st_get last_message)")" \
+      "$(json_s "$(st_get last_log)")" "$(json_s "$(st_get previous_default)")" "$(json_s "$(st_get pending_switch)")"
+    printf '"failing_version": %s, "fail_count": %s, "fail_reason": %s, "fail_log": %s, "error_version": %s, "error_count": %s, ' \
+      "$(json_s "$fv")" "$fc" "$(json_s "$([ -z "$fv" ] || st_get fail_reason)")" "$(json_s "$([ -z "$fv" ] || st_get fail_log)")" \
+      "$(json_s "$ev")" "$ec"
+    printf '"busy": %s, "linger": %s, "settings": %s}\n' "$(json_b "$busy")" "$(json_s "$linger")" "$(json_s "$AU_CONF")"
+    return 0
+  fi
+  printf '%sauto-update: %s%s' "$B" "$en" "$N"
+  [ "$en" != on ] || printf '  %s(policy %s · gc %s, keeps %s previous · needs %s GB free)%s' "$DIM" "$(au_conf policy)" \
+    "$(au_conf gc)" "$(au_conf keep_previous)" "$(au_conf min_free_gb)" "$N"
+  printf '\n'
+  if [ "$en" = on ]; then
+    printf '  schedule    daily from %s, retried hourly until the check is done (%s: %s)\n' "$(au_hhmm)" "$(au_sched)" "$sch"
+    if [ -n "$next" ]; then printf '  next check  %s\n' "$next"
+    else printf '  %s!%s nothing runs it yet: mu autoupdate on\n' "$Y" "$N"; fi
+    [ "$(au_sched)" != systemd ] || [ "$linger" = yes ] || printf '  %s!%s runs only while %s is logged in: %s\n' "$Y" "$N" "$(id -un)" "$(au_linger_hint)"
+    [ -z "$(st_get reload_pending)" ] || printf '  %s!%s a schedule change is waiting: mu autoupdate on\n' "$Y" "$N"
+  fi
+  [ "$running" = no ] || printf '  running     now (pid %s)\n' "$(cat "$AU_LOCK/pid" 2>/dev/null)"
+  if [ -n "$(st_get last_check)" ]; then
+    printf '  last check  %s · %s: %s\n' "$(st_get last_check)" "$(st_get last_result)" "$(st_get last_message)"
+    [ -z "$(st_get last_log)" ] || printf '  last log    %s\n' "$(tilde "$(st_get last_log)")"
+  else printf '  last check  never\n'; fi
+  [ -z "$fv" ] || printf '  %s!%s μ %s %s (%s of %s tries; last %s; log %s)\n' "$Y" "$N" "$fv" "$(au_fail_text)" "$fc" "$AU_MAX_TRIES" \
+    "$(st_get fail_time)" "$(tilde "$(st_get fail_log)")"
+  [ -z "$ev" ] || printf '  %s!%s μ %s could not be installed (%s of %s tries; last %s; log %s)\n' "$Y" "$N" "$ev" "$ec" "$AU_MAX_ERRORS" \
+    "$(st_get err_time)" "$(tilde "$(st_get err_log)")"
+  [ "$busy" = no ] || printf '  busy        %s exists: updates wait\n' "$(tilde "$AU_BUSY")"
+  printf '  settings    %s  (mu autoupdate set KEY VALUE)\n' "$(tilde "$AU_CONF")"
+}
+au_status_line() {   # one line for `mu`, once auto-update is configured
+  [ -f "$AU_CONF" ] || return 0
+  local def fv r msg ev
+  def="$(default_version)"; fv="$(st_get fail_version)"; ev="$(st_get err_version)"; r="$(st_get last_result)"
+  if au_running; then printf '%sauto-update: checking for a new release now%s\n' "$DIM" "$N"; return 0; fi
+  if au_ahead "$fv" "$def" && [ "$(st_num fail_count)" -gt 0 ]; then
+    printf '%sauto-update: %s %s (log: %s); still on %s%s\n' "$Y" "$fv" "$(au_fail_text)" "$(tilde "$(st_get fail_log)")" "${def:-none}" "$N"
+    return 0
+  fi
+  if [ "$r" = needs-admin ]; then printf '%sauto-update: %s%s\n' "$Y" "$(st_get last_message)" "$N"; return 0; fi
+  if au_ahead "$ev" "$def" && [ "$(st_num err_count)" -gt 0 ]; then
+    printf '%sauto-update: %s could not be installed (%s×, log: %s); still on %s%s\n' "$Y" "$ev" "$(st_num err_count)" \
+      "$(tilde "$(st_get err_log)")" "${def:-none}" "$N"
+    return 0
+  fi
+  if [ "$(au_conf enabled)" != on ]; then printf '%sauto-update: off (mu autoupdate on)%s\n' "$DIM" "$N"; return 0; fi
+  msg="auto-update: on"
+  [ -z "$(st_get last_check)" ] || msg="$msg, last check $(st_get last_check)"
+  case "$r" in
+    installed) msg="$msg, μ $(st_get last_installed) installed" ;;
+    up-to-date) msg="$msg, up to date" ;;
+    "") msg="$msg, first check at $(au_hhmm)" ;;
+    *) msg="$msg, $(st_get last_message)" ;;
+  esac
+  printf '%s%s%s\n' "$DIM" "$msg" "$N"
+}
+
+cmd_autoupdate() {
+  local sub="${1:-status}" q=0 rev f; [ $# -gt 0 ] && shift
+  [ "$(au_sched)" != systemd ] || au_user_bus
+  case "$sub" in
+    status) au_status "$@" ;;
+    run) au_run "$@" ;;
+    on)
+      [ "${1:-}" != "--quiet" ] || q=1
+      f="$MU_HOME/bin/mu"; [ -x "$f" ] || die "μ isn't installed in $(tilde "$MU_HOME") (the scheduler runs $(tilde "$f"))"
+      rev="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$f" | head -1)"
+      [ "${rev:-0}" -ge 6 ] || die "$(tilde "$f") is an older dispatcher without auto-update: run mu update first"
+      # the choice is recorded even when nothing can schedule it yet: the installer runs `on` again while it says on
+      au_init_conf; kv_set "$AU_CONF" enabled on
+      if ! au_schedule; then
+        [ "$q" = 0 ] || printf 'auto-update: on, but not scheduled: %s\n' "${AU_WHY:-see mu autoupdate status}"
+        return 1
+      fi
+      if [ "$q" = 1 ]; then
+        printf 'auto-update: on, daily from %s (mu autoupdate off to opt out)' "$(au_hhmm)"
+        [ "$(au_sched)" != systemd ] || [ "$(au_linger)" = yes ] \
+          || printf '. It runs only while %s is logged in; to run it always, once as root: sudo loginctl enable-linger %s' "$(id -un)" "$(id -un)"
+        printf '\n'
+      else
+        printf 'auto-update: on. Daily from %s μ checks %s for a newer release, installs it, runs\n' "$(au_hhmm)" "$(source_url)"
+        printf 'mu doctor and the benchmarks, and makes it the default only if they pass (policy %s). Projects keep their pins.\n' "$(au_conf policy)"
+        printf 'mu autoupdate status · mu autoupdate off · settings: %s\n' "$(tilde "$AU_CONF")"
+      fi ;;
+    off)
+      au_init_conf; kv_set "$AU_CONF" enabled off; au_unschedule
+      printf 'auto-update: off (the default stays μ %s; mu update installs the latest by hand)\n' "$(default_version)" ;;
+    set)
+      [ $# -eq 2 ] || die "usage: mu autoupdate set KEY VALUE   (keys: policy min_free_gb gc keep_previous hour minute max_hours)" 2
+      [ "$1" != enabled ] || die "use: mu autoupdate on|off" 2
+      au_valid "$1" "$2" || die "invalid: $1=$2 (policy switch|install-only, gc on|off, min_free_gb and keep_previous whole numbers, hour 0-23, minute 0-59, max_hours 1-20)" 2
+      au_init_conf; kv_set "$AU_CONF" "$1" "$2"; printf '%s=%s\n' "$1" "$2"
+      # the scheduler fires at :minute; the hour is read by each run
+      if [ "$(au_conf enabled)" = on ] && [ "$1" = minute ]; then au_schedule; fi ;;
+    *) die "usage: mu autoupdate [status [--json] | on | off | run [--force] | set KEY VALUE]" 2 ;;
+  esac
+}
+
+# The installers replace this file while it may be running (mu update, mu autoupdate run): the braces make bash read
+# all of the dispatch before running it, and exit before it reads further.
+{
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   "")                     cmd_status ;;
@@ -268,6 +1123,9 @@ case "$cmd" in
   pin)                    cmd_pin "$@" ;;
   remove|uninstall|rm)    cmd_remove "$@" ;;
   gc)                     cmd_gc "$@" ;;
+  autoupdate|auto-update) cmd_autoupdate "$@" ;;
   --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
   *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
 esac
+exit
+}

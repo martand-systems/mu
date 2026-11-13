@@ -11,9 +11,12 @@
 #   --quick                skip the benchmarks if this recipe commit already passed them on this Mac
 #   --skip-tests           skip the benchmarks (mu doctor still runs)
 #   --seed-downloads DIR   reuse archives already on disk (checked against the pinned SHA-256)
-#   --no-modify-path       don't add ~/.local/bin to your shell's PATH
+#   --no-modify-path       don't add ~/.local/bin to your shell's PATH (and don't turn on auto-update)
+#   --no-autoupdate        don't turn on the daily auto-update (mu autoupdate on|off; on by default after an install)
 #   -v, --verbose          show the full build output instead of the progress view
 #   --system               Linux: only install the Ubuntu packages μ needs (apt; run with sudo, once per machine)
+#   --user NAME            with --system: let NAME's systemd user services run without a login (auto-update's timer;
+#                          default: the user who ran sudo)
 #
 # Layout (MU_HOME: ~/Library/Mu on macOS, ~/.local/share/mu on Linux):
 #   toolchains/<version>/  one per version: recipe snapshot, commands, links to its layers, MANIFEST.json
@@ -27,8 +30,10 @@
 # PATH line in your shell profile, OpenFOAM's temporary read-only mount at /Volumes/OpenFOAM-v2606 (macOS) and the
 # Ubuntu packages of --system (Linux), nothing is written outside MU_HOME.
 set -Eeuo pipefail
-LAYER_FORMAT="mu-layer-2"     # bump when the way layers are built changes (forces new layer hashes)
-DISPATCHER_REV=5              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
+FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
+                              # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
+DISPATCHER_REV=6              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
@@ -38,6 +43,7 @@ case "$(uname -s)-$(uname -m)" in
 esac
 MU_LINK_DIR="${MU_LINK_DIR:-$HOME/.local/bin}"
 VERSION=""; SEED=""; SET_DEFAULT=0; FORCE=0; REBUILD=0; TESTS=1; QUICK=0; MODIFY_PATH=1; VERBOSE=0; SYSTEM=0
+AUTOUPDATE=1; LINGER_USER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
@@ -50,6 +56,8 @@ while [ $# -gt 0 ]; do
     --no-modify-path) MODIFY_PATH=0; shift ;;
     -v|--verbose) VERBOSE=1; shift ;;
     --system) SYSTEM=1; shift ;;
+    --no-autoupdate) AUTOUPDATE=0; shift ;;
+    --user) LINGER_USER="${2:-}"; shift 2 ;;
     -h|--help) sed -n '2,/^set -E/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -66,9 +74,18 @@ apt_install() {   # installs the missing packages (as root, or through sudo)
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $miss
 }
+[ -z "$LINGER_USER" ] || [ "$SYSTEM" = 1 ] || { echo "--user NAME goes with --system (see --help)" >&2; exit 2; }
 if [ "$SYSTEM" = 1 ]; then
   [ "$FAMILY" = linux ] || { echo "--system is only needed on Linux" >&2; exit 0; }
-  apt_install; echo "system packages: ready"; exit 0
+  apt_install; echo "system packages: ready"
+  # auto-update is a systemd user timer; linger runs it without a login (the WSL compute node's user never logs in)
+  lu="${LINGER_USER:-${SUDO_USER:-}}"
+  case "$lu" in ""|root) ;; -*|*[!A-Za-z0-9._-]*) echo "--user: invalid user name '$lu'" >&2; exit 2 ;;
+    *) if [ "$(id -u)" = 0 ] && id -u "$lu" >/dev/null 2>&1 && loginctl enable-linger "$lu" 2>/dev/null; then
+         echo "user services: $lu's run without a login (systemd linger, for μ auto-update)"
+       else echo "note: could not enable systemd linger for $lu (not root, no such user, or no systemd): μ auto-update runs only while $lu is logged in"; fi ;;
+  esac
+  exit 0
 fi
 
 # ================================================================ terminal UI
@@ -94,7 +111,7 @@ spinner_start() {
     frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); i=0; dl=""
     while :; do
       if [ $((i % 8)) = 0 ]; then
-        kb=$(du -skc "$MU_CACHE"/downloads/*.part 2>/dev/null | tail -1 | cut -f1)
+        kb=$(du -skc "$MU_CACHE"/downloads/*.part "$MU_CACHE"/downloads/*.part.[0-9][0-9] 2>/dev/null | tail -1 | cut -f1)
         if [ "${kb:-0}" -gt 1024 ]; then dl=" · ↓ $((kb / 1024)) MB"; else dl=""; fi
       fi
       printf '%s  %s %-20s %s%s%s%s  %ss' "$CLR" "${frames[$((i % 10))]}" "$STAGE_TITLE" "$DIM" \
@@ -125,6 +142,8 @@ fail() {
   fi
   # a generic "command failed" in the main shell usually follows a subshell's specific reason
   case "$*" in "command failed"*) [ -s "$WORK/lasterr" ] && set -- "$(cat "$WORK/lasterr")" ;; esac
+  # for mu autoupdate: the stage that failed (preflight, doctor, bench, ...) and why
+  [ -z "${MU_INSTALL_RESULT:-}" ] || printf '%s\t%s\n' "${STAGE_KEY:-preflight}" "$(printf '%s' "$*" | tr '\n\t' '  ')" > "$MU_INSTALL_RESULT" 2>/dev/null || true
   spinner_stop
   printf '  %s✗%s %s\n\n' "$RED" "$N" "${STAGE_TITLE:-install}" >&3
   printf '%sμ install failed:%s %s\n' "$B$RED" "$N" "$*" >&4
@@ -141,6 +160,8 @@ cleanup() {
   spinner_stop
   [ "$TTY" = 1 ] && printf '\033[?25h' >&3
   if [ -n "${JOBS:-}" ]; then
+    # background jobs ignore SIGINT: stop their trees, children first (a download's range workers also stop each
+    # other's curl on TERM; their partial files stay in the cache for the next run)
     for e in $JOBS; do kill_tree "${e#*:}"; done
     sleep 0.5; detach_under "$STORE"
   fi
@@ -151,20 +172,13 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 [ "$TTY" = 1 ] && printf '\033[?25l' >&3   # hide the cursor while the spinner runs
 
-# Explain a failed download in plain words (captive portals and HTTPS-intercepting proxies are the usual cause)
-net_hint() {
-  local out; out="$(curl -sSI --max-time 10 "$1" 2>&1 >/dev/null || true)"
-  case "$out" in
-    *certificate*|*SSL*|*ssl*) echo "the network is intercepting HTTPS (captive portal, proxy or filtering VPN): sign in to the network or switch networks, then re-run" ;;
-    *resolve*) echo "no internet connection (DNS lookup failed)" ;;
-    *timed\ out*|*Timeout*) echo "the connection timed out (offline or very slow network)" ;;
-    *) echo "${out:-download failed}" ;;
-  esac
-}
-if command -v sha256sum >/dev/null 2>&1; then sha256() { sha256sum "$1" | cut -d' ' -f1; }; sha256_stdin() { sha256sum | cut -d' ' -f1; }
-else sha256() { /usr/bin/openssl dgst -sha256 -r "$1" | cut -d' ' -f1; }; sha256_stdin() { /usr/bin/openssl dgst -sha256 -r | cut -d' ' -f1; }; fi
+# downloads: fetch (resumable, parallel byte ranges for large files), sha256, sha256_stdin, net_hint
+. "$RECIPE/install/download.sh"
+# Flatpak apps (Linux): fp_fetch (download cache of pinned OSTree commits), fp_deploy (offline installation), fp
+. "$RECIPE/install/flatpak.sh"
+# mu_disk_free DIR: free GB (on WSL2, the smaller of the virtual disk and the Windows drive holding it)
+. "$RECIPE/install/disk.sh"
 clone_tree() { if [ "$FAMILY" = macos ]; then cp -cR "$1" "$2" 2>/dev/null || ditto "$1" "$2"; else cp -a --reflink=auto "$1" "$2"; fi; }
-free_gb() { df -Pk "$1" | awk 'NR==2{print int($4/1048576)}'; }
 used_mb() { df -Pk "$1" | awk 'NR==2{print int($3/1024)}'; }
 human() { awk -v m="$1" 'BEGIN{ if (m >= 1024) printf "%.1f GB", m/1024; else printf "%d MB", m }'; }
 
@@ -262,10 +276,12 @@ awk -F'"' -v plat="$PLAT" '
   END { out() }
 ' "$R/toolchain/apps.toml" > "$WORK/apps.tsv"
 app() { awk -F'\t' -v n="$1" -v c="$2" '$1==n{print $c}' "$WORK/apps.tsv"; }   # app NAME COLUMN
-appkey() {   # app-<name>-<16 hex>: the archive hash; for several archives, or a build, a hash over all its inputs
+appkey() {   # app-<name>-<16 hex>: the archive hash; for several archives, a build or a flatpak, a hash over all its inputs
   local s; s="$(app "$1" 4)"; case "$s" in *" "*) s="$(printf '%s' "$s" | sha256_stdin)" ;; esac
   if [ "$(app "$1" 5)" = build ]; then   # source + build recipe + the Python it is built for
     s="$(printf '%s\n%s\n%s\n' "$s" "$(sha256 "$R/$(app "$1" 6)")" "$(grep -E '/python-3[.0-9]+-' "$R/toolchain/$PLAT/env.explicit.txt")" | sha256_stdin)"
+  elif [ "$(app "$1" 5)" = flatpak ]; then   # the app's commit + the runtime's ref@commit + how the layer is built
+    s="$(printf '%s\n%s\n%s\n' "$FLATPAK_FORMAT" "$s" "$(app "$1" 10)" | sha256_stdin)"
   fi
   echo "app-$1-$(printf '%s' "$s" | cut -c1-16)"
 }
@@ -290,6 +306,10 @@ CAM_KEY="$(layer_key cam "$(appkey freecad) uv:$(app uv 4)" $OS/cam-venv.pip.txt
 APP_NAMES="$(awk -F'\t' '$5!="binary" && $5!="tar.bin" && $1!="uv"{print $1}' "$WORK/apps.tsv")"
 LAYERS="$ENV_KEY $CAM_KEY"; for a in $APP_NAMES; do LAYERS="$LAYERS $(appkey "$a")"; done
 printf '%s\n' $LAYERS > "$T/LAYERS"   # written early: `mu gc` never removes layers an install is using
+# download-cache entries this version pins (mu gc keeps them while the version is installed): "flatpak REF@COMMIT"
+awk -F'\t' '$5 == "flatpak" { print "flatpak " $2 "@" $4; if ($10 != "") print "flatpak " $10 }' "$WORK/apps.tsv" > "$T/CACHE_REFS"
+# the download cache is shared by every MU_HOME: record this one in it, so mu gc in another keeps these pins too
+[ ! -s "$T/CACHE_REFS" ] || fp_register
 have_layer() { [ -f "$STORE/$1/.mu-layer" ]; }
 # layers are read-only once built: nothing (a tool's bytecode cache, a stray pip install) can change a shared layer
 seal() { chmod -R a-w "$1"; }
@@ -300,7 +320,8 @@ detach_under() {
     case "$m" in "$1"/*) hdiutil detach "$m" -quiet 2>/dev/null || hdiutil detach "$m" -force -quiet 2>/dev/null || true ;; esac
   done
 }
-unseal_rm() { [ -e "$1" ] || return 0; detach_under "$1"; chmod -R u+w "$1" 2>/dev/null || true; rm -rf "${1:?}"; }
+# (only directories need to be writable to delete: file modes are never changed)
+unseal_rm() { [ -e "$1" ] || return 0; detach_under "$1"; find "$1" -type d ! -perm -u+w -exec chmod u+w {} + 2>/dev/null || true; rm -rf "${1:?}"; }
 detach_under "$STORE"
 for d in "$STORE"/.*.partial; do [ -e "$d" ] && unseal_rm "$d"; done
 if [ "$REBUILD" = 1 ]; then
@@ -313,33 +334,26 @@ if [ "$REBUILD" = 1 ]; then
 fi
 MISSING=""; for k in $LAYERS; do have_layer "$k" || MISSING="$MISSING $k"; done
 
-avail_gb=$(free_gb "$MU_HOME")
+mu_disk_free "$MU_HOME"; avail_gb="$MU_FREE_GB"; disk_where="$MU_FREE_WHERE"
 need_gb=1
 case "$MISSING" in *env-*) need_gb=$((need_gb + 6)) ;; esac
 case "$MISSING" in *cam-*) need_gb=$((need_gb + 2)) ;; esac
 case "$MISSING" in *app-*) need_gb=$((need_gb + 9)) ;; esac
-[ "$avail_gb" -ge "$need_gb" ] || fail "need about $need_gb GB free on this disk (have $avail_gb GB)"
+[ -z "$avail_gb" ] || [ "$avail_gb" -ge "$need_gb" ] \
+  || fail "need about $need_gb GB free on this disk (have $avail_gb GB${disk_where:+ on $disk_where})"
 n_missing=$(echo $MISSING | wc -w | tr -d ' '); n_layers=$(echo $LAYERS | wc -w | tr -d ' ')
-ok "$OSNAME · $avail_gb GB free · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
+ok "$OSNAME · ${avail_gb:-?} GB free${disk_where:+ on $disk_where} · $((n_layers - n_missing)) of $n_layers layers already on $THIS"
+# WSL, Windows drive not confirmed: its figure is shown, and warned about when low, but never enforced (install/disk.sh)
+if [ -n "$MU_FREE_NOTE" ]; then
+  printf '  note: %s\n' "$MU_FREE_NOTE" >&5
+  if [ "$MU_FREE_NOTE_GB" -ge "$need_gb" ]; then printf '    %s%s%s\n' "$DIM" "$MU_FREE_NOTE" "$N" >&3
+  else printf '  %s!%s %s; this install needs about %s GB\n' "$Y" "$N" "$MU_FREE_NOTE" "$need_gb" >&3; fi
+fi
 printf '  %sinstalling μ %s%s %s→ %s%s\n' "$B" "$VERSION" "$N" "$DIM" "${T/#$HOME/~}" "$N" >&3
 
 # ================================================================ downloads
-# fetch NAME URL SHA256 -> prints the cached path. Downloads once (resumable), verifies SHA-256, can reuse a seed folder.
-fetch() {
-  local name="$1" url="$2" sha="$3" dest="$MU_CACHE/downloads/$1"
-  if [ -f "$dest" ] && [ "$(sha256 "$dest")" = "$sha" ]; then echo "$dest"; return 0; fi
-  if [ -n "$SEED" ] && [ -f "$SEED/$name" ] && [ "$(sha256 "$SEED/$name")" = "$sha" ]; then
-    cp "$SEED/$name" "$dest"; echo "$dest"; return 0
-  fi
-  echo "downloading $name" >&2
-  if ! curl -fL --retry 4 --retry-delay 2 --connect-timeout 20 -C - -sS -o "$dest.part" "$url" >&2; then
-    rm -f "$dest.part"   # a stale partial file can make the resume itself fail: try once more from scratch
-    curl -fL --retry 2 --connect-timeout 20 -sS -o "$dest.part" "$url" >&2 || fail "download failed: $url ($(net_hint "$url"))"
-  fi
-  local got; got="$(sha256 "$dest.part")"
-  [ "$got" = "$sha" ] || { rm -f "$dest.part"; fail "SHA-256 mismatch for $name: got $got, expected $sha"; }
-  mv "$dest.part" "$dest"; echo "$dest"
-}
+# fetch NAME URL SHA256 -> prints the cached path (install/download.sh). Downloads once (resumed after failures; large
+# files as parallel byte ranges), verifies SHA-256, can reuse a seed folder.
 
 # app_layer NAME: unpack an app into the store (atomic: build in .partial, then rename). Kinds:
 #   zip, tar (any tar compression), deb (one or more .debs, dpkg-deb -x, no root), appimage (--appimage-extract, no
@@ -415,27 +429,24 @@ build_layer() {
   seal "$tmp"; unseal_rm "$STORE/$key"; mv "$tmp" "$STORE/$key"
 }
 
-# flatpak_layer NAME (Linux): a private flatpak installation holding the app and its runtime at pinned commits (the
-# commit ids are SHA-256 values flatpak verifies). Built at its final path; complete when .mu-layer exists.
+# flatpak_layer NAME (Linux): a private flatpak installation holding exactly the app and its runtime at their pinned
+# commits (install/flatpak.sh). Each commit is downloaded once per machine into the download cache, then the layer is
+# built from the cache with no network, as a copy (no inode shared with the cache). Built at its final path; complete
+# when .mu-layer exists.
 flatpak_layer() {
-  local name="$1" id url commit rt rtref rtcommit L key
-  id="$(app "$1" 2)"; url="$(app "$1" 3)"; commit="$(app "$1" 4)"; rt="$(app "$1" 10)"; key="$(appkey "$1")"
-  rtref="${rt%@*}"; rtcommit="${rt#*@}"
+  local name="$1" ref url commit rt key L fkey="$R/toolchain/$PLAT/flathub.gpg"
+  ref="$(app "$1" 2)"; url="$(app "$1" 3)"; commit="$(app "$1" 4)"; rt="$(app "$1" 10)"; key="$(appkey "$1")"
   command -v flatpak >/dev/null 2>&1 || fail "flatpak is not installed (it comes with: sudo ./install.sh --system)"
-  L="$STORE/$key"; unseal_rm "$L"; mkdir -p "$L"
-  export FLATPAK_USER_DIR="$L/$(app "$1" 7)"
-  # flatpak needs a session bus (dbus-run-session gives one) and the system bus (WSL2/systemd has it; containers don't)
-  fp() { if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then flatpak "$@"; else dbus-run-session -- flatpak "$@"; fi; }
   [ -S /run/dbus/system_bus_socket ] || [ -S /var/run/dbus/system_bus_socket ] \
     || fail "flatpak needs the system D-Bus, which is not running (in a container: dbus-daemon --system --fork)"
-  fp --user remote-add --if-not-exists flathub "$url"
-  fp --user install -y --noninteractive flathub "$id" || fail "flatpak could not install $id ($(net_hint https://dl.flathub.org/repo/))"
-  fp --user update -y --noninteractive --commit="$commit" "$id"
-  fp --user update -y --noninteractive --commit="$rtcommit" "$rtref"
-  [ "$(fp --user info --show-commit "$id")" = "$commit" ] || fail "$id is not at the pinned commit"
-  [ "$(fp --user info --show-commit "$rtref")" = "$rtcommit" ] || fail "$rtref is not at the pinned commit"
-  printf 'app=%s\ncommit=%s\nruntime=%s\nbuilt=%s\n' "$name" "$commit" "$rt" "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
-  seal "$L"
+  fp_fetch "${rt%@*}" "${rt##*@}" "$url" "$fkey"
+  fp_fetch "$ref" "$commit" "$url" "$fkey"
+  echo "installing $name from the download cache (offline)"
+  L="$STORE/$key"; unseal_rm "$L"; mkdir -p "$L"
+  fp_deploy "$L/$(app "$1" 7)" "$url" "$fkey" "$rt" "$ref@$commit"
+  printf 'app=%s\nref=%s\ncommit=%s\nruntime=%s\nformat=%s\nbuilt=%s\n' "$name" "$ref" "$commit" "$rt" "$FLATPAK_FORMAT" \
+    "$(date '+%Y-%m-%d %H:%M:%S')" > "$L/.mu-layer"
+  seal "$L"   # its own copy of every file (fp_deploy), so the cache's file modes are not touched
 }
 
 # tools needed to build: micromamba and uv (small, pinned binaries)
@@ -461,6 +472,8 @@ subst() { sed -e "s|{MU_RECIPE_URL}|$(sed_esc "$(furl "$R")")|g" -e "s|{MU_APPS_
 # uvi PYTHON REQS: install a Python lock (no resolution: every pin is exact). PyPI pins carry SHA-256 hashes and
 # install with --require-hashes; URL/path pins (commit-pinned archives, files from pinned apps) install after them.
 # Offline first, so an install with warm caches never touches the network; falls back to fetching what is missing.
+# On a cold cache the offline attempt fails with a long "requirements are unsatisfiable" report: expected, and marked
+# as such in the log so that it is not mistaken for the real error (a real failure is the online attempt's output).
 uvi() {
   local py="$1" reqs="$2" part flags
   grep -e '--hash=' "$reqs" > "$reqs.hashed" || true
@@ -468,9 +481,16 @@ uvi() {
   for part in hashed plain; do
     [ -s "$reqs.$part" ] || continue
     flags="--no-deps --compile-bytecode"; [ "$part" = hashed ] && flags="$flags --require-hashes"
-    "$UV" pip install --python "$py" $flags --offline -r "$reqs.$part" \
-    || { echo "(some Python packages are not cached; fetching)"; "$UV" pip install --python "$py" $flags -r "$reqs.$part" \
-         || fail "Python packages could not be installed ($(net_hint https://pypi.org/simple/))"; }
+    # its lines are indented and tagged, so that none can pass for the job's "error: " line (see wait_job)
+    echo "--- uv: offline attempt ($(basename "$reqs").$part, cached packages only; failing here is expected on a cold cache)"
+    if "$UV" pip install --python "$py" $flags --offline -r "$reqs.$part" 2>&1 | sed 's/^/    (offline) /'; then
+      echo "--- uv: offline attempt installed everything"
+    else
+      echo "--- uv: end of the expected offline failure above (some packages are not cached yet); online install:"
+      "$UV" pip install --python "$py" $flags -r "$reqs.$part" \
+        || fail "Python packages could not be installed ($(net_hint https://pypi.org/simple/))"
+      echo "--- uv: online install done"
+    fi
   done
 }
 
@@ -672,5 +692,13 @@ rm -f "$T/.installing"
 spinner_stop
 printf '\n  %sμ %s is ready%s in %s s %s· %s of new disk · log %s%s\n' "$B$G" "$VERSION" "$N" "$TOTAL" "$DIM" "$(human "$DISK_MB")" "${LOG/#$HOME/~}" "$N" >&3
 [ -z "$PATH_MSG" ] || printf '  %s!%s %s\n' "$Y" "$N" "$PATH_MSG" >&3
+# auto-update: on by default for a person's install; not for CI or --no-modify-path, and never over an earlier off
+# (while it says on, this sets the scheduler up again, e.g. after systemd or linger became available)
+if [ "$AUTOUPDATE" = 1 ] && [ "$MODIFY_PATH" = 1 ] && [ "${MU_NO_AUTOUPDATE:-}" != 1 ] && [ "${CI:-}" != true ] \
+   && ! grep -Eqs '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*off' "$MU_HOME/autoupdate.conf"; then
+  au_rc=0; "$MU_HOME/bin/mu" autoupdate on --quiet > "$WORK/autoupdate.txt" 2>&5 || au_rc=$?
+  au_line="$(head -1 "$WORK/autoupdate.txt")"; [ -n "$au_line" ] || au_line="auto-update could not be turned on (see the log): mu autoupdate on"
+  if [ "$au_rc" = 0 ]; then printf '  %s\n' "$au_line" >&3; else printf '  %s!%s %s\n' "$Y" "$N" "$au_line" >&3; fi
+fi
 printf '\n  Next:  %smu%s                    status and common commands\n' "$B" "$N" >&3
 printf '         %scd <project> && mu link%s  connect a project (mu.toml) for Claude Code\n\n' "$B" "$N" >&3

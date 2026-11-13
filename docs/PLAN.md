@@ -322,6 +322,10 @@ The installer:
 - Power plan never sleeps.
 - BIOS restores power after a power cut.
 - Windows Update automatic restart is allowed; the agent comes back through the startup task.
+- μ keeps itself on the latest release with `mu autoupdate` (§9): a systemd user timer for the agent user. That user
+  never logs in, so the timer needs linger, set once as root: `sudo ./install.sh --system --user mu`; then install as
+  `mu` (`sudo -iu mu`), which turns the timer on. The agent creates `state/busy` before it resolves a toolchain
+  version for a job and removes it when the queue is empty: updates (install, switch, cleanup) wait for it.
 
 **Performance:**
 - Workspaces are on the WSL ext4 disk (`/srv/mu/jobs`), never on `/mnt/c`.
@@ -608,6 +612,17 @@ It's included in every project as the `org/` submodule. Updating it is a deliber
 - **Installer gate:** every install (laptop, office PC) runs the suite before it's marked ready.
 - **Cross-host check:** the JATAYU `L_final` hub model is run on `local` and `office-pc` and must agree to within < 0.5%.
 - **Upgrades:** `mu upgrade` changes a project's pin, re-runs its validation scripts and diffs `results/*.json`. It's never silent.
+- **Toolchain updates (`mu autoupdate`, 2026-11-13):** once a day every machine looks for a newer `vYYYY.MM.N` tag at its
+  source. It installs that tag the way `mu update` does, so the installer gate (doctor and benchmarks) applies, and
+  makes it the default only if the gate passed. A release that fails keeps the old default, is reported in `mu`, and is
+  tried at most 3 times. A newer tag resets the count. The run waits on battery (macOS), below `min_free_gb`, while an
+  install is running, and while `state/busy` exists, and a check that waited is retried hourly. Only failures of the
+  release count (its checks, a hang past `max_hours`, a stop mid-install); network, lock and missing-package problems
+  don't. A failed release's installer never leaves its `mu` dispatcher behind. After a switch it removes old versions,
+  keeping the previous default for rollback and every version a registered project pins. It never touches `mu.toml`:
+  moving a project to a new version stays an explicit, reviewed `mu upgrade`. The schedule is an hourly LaunchAgent on
+  macOS and an hourly systemd user timer on Linux; the run checks once a day. The installer turns it on by default,
+  except in CI and with `--no-modify-path` or `--no-autoupdate`.
 - **Version scheme:** `vYYYY.MM.patch`.
 
 ---
@@ -767,6 +782,9 @@ specs are written at the start of each phase, and the early spikes below are wha
 | S2 linux-64 provisioning in an Ubuntu 24.04 container on the laptop: conda env, CalculiX, Gmsh, OpenFOAM v2606 (ESI apt repo), ParaView headless, OpenVSP + Python API, PrusaSlicer, FreeCAD 1.1.4 headless + CAM env | Every tool has a working headless Linux route | Mark that tool `local`-only (macOS) until solved. FEA and CFD must pass |
 | S3 WSL2 on the office PC: import Ubuntu, systemd service, starts after a reboot with nobody logged in, memory setting applies | The always-on compute node is feasible | Use a Windows service wrapper that keeps `wsl.exe` running |
 | S4 chisel through Dokploy's Traefik on `relay.martand.systems` (after the DNS record): a reverse tunnel from one client, a forward from another, a long idle period, reconnect | The relay design works with this Traefik | Try frp over WebSocket. Last resort: a high port |
+
+**Spike status (2026-11-13):** S1, S2 and S3 passed, with records in `docs/verification/`. S3 found that a Windows
+restart powers the WSL VM off without a Linux shutdown; the WSL2 host scripts add a clean stop before shutdown. S4 is next.
 
 **Before P1 starts:** answer open items 2 and 3 above (name, shared libraries), or accept the defaults.
 
