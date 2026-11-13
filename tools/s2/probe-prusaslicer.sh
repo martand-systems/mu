@@ -55,7 +55,7 @@ for n in 1 2; do log "offline deploy #$n (unshare -n: no network at all)"; deplo
 res cache_plus_layers_MB "$(du -smc /home/mu/cache /home/mu/store/l1 /home/mu/store/l2 | tail -1 | cut -f1)"
 log "the cache is intact after building and sealing two layers"
 as_user ostree --repo=/home/mu/cache/flatpak/repo fsck --quiet && res cache_fsck ok
-FLATPAK_USER_DIR=/home/mu/store/l1/prusaslicer-flatpak as_user flatpak --user list --columns=ref,commit | tee -a "$OUT/results.txt"
+FLATPAK_USER_DIR=/home/mu/store/l1/prusaslicer-flatpak as_user flatpak --user list --columns=ref,active | tee -a "$OUT/results.txt"
 log "damage one object in the cache: deploy #3 repairs it (downloads it again)"
 obj="$(find /home/mu/cache/flatpak/repo/objects -name '*.file' -size +100k | head -1)"
 chmod u+w "$obj"; printf 'x' >> "$obj"
