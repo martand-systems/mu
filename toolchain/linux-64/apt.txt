@@ -12,7 +12,7 @@ libpciaccess0
 libxml2 libcminpack1
 # building OpenVSP's Python 3.13 API on the device (once per OpenVSP version)
 build-essential cmake swig libxml2-dev libcminpack-dev libglm-dev libeigen3-dev patchelf
-# PrusaSlicer 2.9.7 (Flathub, pinned commits)
-flatpak dbus
+# PrusaSlicer 2.9.7 (Flathub, pinned commits; ostree keeps the download cache)
+flatpak dbus ostree
 # text-to-cad stills (OCCT on Linux is GLX-only)
 xvfb
