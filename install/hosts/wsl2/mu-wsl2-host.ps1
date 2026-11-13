@@ -816,9 +816,12 @@ function Start-DistroViaTask([int]$TimeoutSeconds = 120) {
     Start-Sleep -Seconds 2
     $info = Get-ScheduledTaskInfo -TaskPath $script:TaskPath -TaskName $script:TaskName
     $state = [string](Get-ScheduledTask -TaskPath $script:TaskPath -TaskName $script:TaskName).State
-    $done = ($state -ne 'Running') -and ($busy -or $info.LastRunTime -ge $t0)
+    # 0x41301 (SCHED_S_TASK_RUNNING) and 0x41325 (SCHED_S_TASK_QUEUED) are what LastTaskResult reads while a run has
+    # not finished; State can already say Ready for a moment after Start-ScheduledTask (seen on the office PC)
+    $res = [int64]$info.LastTaskResult
+    $done = ($state -ne 'Running') -and ($busy -or $info.LastRunTime -ge $t0) -and ($res -ne 0x41301) -and ($res -ne 0x41325)
   } while (-not $done -and (Get-Date) -lt $deadline)
-  if (-not $done) { return $false }
+  if (-not $done) { Write-Note "the startup task's run did not finish within $TimeoutSeconds s"; return $false }
   if ([int64]$info.LastTaskResult -ne 0) { Write-Note ("the startup task's run ended with result 0x{0:X}" -f [int64]$info.LastTaskResult); return $false }
   while ($true) {
     if (Test-DistroRunning) { return $true }
@@ -1585,7 +1588,7 @@ function Invoke-TestStop {
   $log = Join-Path (Join-Path $MuRoot 'logs') 'mu-wsl-shutdown.log'
   if (Test-Path $log) { Get-Content -Path $log -Tail 4 | ForEach-Object { Write-Host "    $_" } }
   Write-Host "  starting $Distro again through the startup task"
-  if (-not (Start-DistroViaTask)) { throw "$Distro did not start again within 2 minutes" }
+  if (-not (Start-DistroViaTask)) { throw "$Distro was not started again through the startup task (see the note above)" }
   Write-Host ''
   Write-Host "Inside $Distro (expect last-stop: a clean stop, and no NUL bytes in the heartbeat log):"
   $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $script:DistroScriptTarget, 'status', '--offline', '--user', $User)
