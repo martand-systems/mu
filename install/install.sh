@@ -331,9 +331,7 @@ if [ "$REBUILD" = 1 ]; then
 fi
 MISSING=""; for k in $LAYERS; do have_layer "$k" || MISSING="$MISSING $k"; done
 
-IFS="$(printf '\t')" read -r avail_gb disk_where <<EOF
-$(mu_disk_free "$MU_HOME")
-EOF
+avail_gb="$(mu_disk_free "$MU_HOME")"; disk_where="${avail_gb#*$(printf '\t')}"; avail_gb="${avail_gb%%$(printf '\t')*}"
 need_gb=1
 case "$MISSING" in *env-*) need_gb=$((need_gb + 6)) ;; esac
 case "$MISSING" in *cam-*) need_gb=$((need_gb + 2)) ;; esac

@@ -224,6 +224,37 @@ eq "default unchanged" "$(def)" v2026.11.4
 mu autoupdate set min_free_gb 0 >/dev/null; mu autoupdate run >/dev/null
 eq "with room: installs" "$(def)" v2026.11.5
 
+section "free disk check on WSL (the Windows drive under the virtual disk counts)"
+mkrepo wsldisk "v2026.11.4:success v2026.11.5:success"
+fresh wsldisk wsldisk
+mkdir -p "$ROOT/mnt/c"
+# reg.exe answers in CRLF; drvfs C: is mounted at $ROOT/mnt/c; a df stub reports 5 GB free there (the VHD: 900 GB)
+cat > "$STUBS/reg.exe" <<'S'
+#!/bin/sh
+sed 's/$/\r/' <<'R'
+
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Lxss\{1}
+    DistributionName    REG_SZ    Ubuntu-24.04
+    BasePath    REG_SZ    C:\Users\u\WSL
+R
+S
+chmod +x "$STUBS/reg.exe"
+printf 'C:\\134 %s 9p rw,aname=drvfs;path=C:\\ 0 0\n' "$(printf '%s' "$ROOT/mnt/c" | sed 's/ /\\040/g')" > "$ROOT/mounts"
+cat > "$STUBS/df" <<S
+#!/bin/sh
+case "\$2" in "$ROOT/mnt/c"*) a=5242880 ;; *) a=943718400 ;; esac
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfake 999999999 1 %s 1%% %s\n' "\$a" "\$2"
+S
+chmod +x "$STUBS/df"
+mu autoupdate set min_free_gb 12 >/dev/null
+out="$(MU_WSL=1 WSL_DISTRO_NAME=Ubuntu-24.04 MU_WSL_REG="$STUBS/reg.exe" MU_PROC_MOUNTS="$ROOT/mounts" mu autoupdate run)"
+eq "WSL: installer not called" "$(calls)" 0
+has "WSL: skipped, naming the Windows drive" "$out" "5 GB free on C: (WSL disk), auto-update waits for 12 GB"
+out="$(MU_WSL=0 mu autoupdate run)"
+eq "not WSL (same df): installs" "$(def)" v2026.11.5
+rm -f "$STUBS/df" "$STUBS/reg.exe"
+mu autoupdate set min_free_gb 0 >/dev/null
+
 section "battery (pmset stub)"
 mkrepo batt "v2026.11.4:success v2026.11.5:success"
 fresh batt batt

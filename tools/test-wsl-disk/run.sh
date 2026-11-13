@@ -70,6 +70,7 @@ df() {   # df -Pk PATH with sizes from VHD_GB, C_GB, D_GB, E_GB
   case "$2" in */mnt/c*) g=$C_GB ;; */mnt/d*) g=$D_GB ;; */mnt/e*) g=$E_GB ;; *) g=$VHD_GB ;; esac
   printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfake 999999999 1 %s 1%% %s\n' "$((g * 1048576 + 1000))" "$2"
 }
+[ "${TAB_IFS:-}" != 1 ] || IFS="$(printf '\t')"   # a caller that changed IFS (e.g. IFS=TAB read ... <<< "$(mu_disk_free)")
 mu_disk_free "$1" | tr '\t' '|'
 EOS
 
@@ -99,6 +100,7 @@ for B in $BASHES; do
   t "WSL, UNC base path: C: assumed"            "130|C: (WSL disk, assumed)" WSL_DISTRO_NAME=Debian MU_WSL_REG="$TD/bin/unc.exe"
   t "WSL, no interop, no C: mount: VHD only"    "934|the WSL virtual disk (Windows drive not found)" WSL_DISTRO_NAME=x MU_WSL_REG=/nonexistent MU_PROC_MOUNTS="$TD/mounts-noc"
   t "WSL, drive not mounted: VHD only"          "934|the WSL virtual disk (Windows drive not found)" WSL_DISTRO_NAME=Ubuntu-24.04 MU_PROC_MOUNTS="$TD/mounts-none"
+  t "caller's IFS is a tab"                    "60|D: (WSL disk)"        MU_WSL=1 D_GB=60 TAB_IFS=1
   t "WSL, MU_HOME not created yet: parent dir"  "130|C: (WSL disk)"       WSL_DISTRO_NAME=Ubuntu-24.04
 done
 echo; echo "$PASS passed, $FAILN failed"

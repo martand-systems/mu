@@ -53,19 +53,17 @@ fp_fetch() {
   esac
 }
 
-# _fp_placeholder REF: install REF in the cache installation from an empty local commit (see above). Prints nothing.
+# _fp_placeholder REF: install REF in the cache installation from an empty local commit (see above). Its metadata must
+# be what Flathub's summary lists for REF (flatpak compares them), so it is read from there first.
 _fp_placeholder() {
-  local ref="$1" repo="$MU_CACHE/flatpak/repo" d c rest id arch branch
-  rest="${ref#*/}"; id="${rest%%/*}"; rest="${rest#*/}"; arch="${rest%%/*}"; branch="${rest#*/}"
+  local ref="$1" repo="$MU_CACHE/flatpak/repo" d c
   d="$(mktemp -d "${TMPDIR:-/tmp}/mu-fp.XXXXXX")"; mkdir -p "$d/files"
-  case "$ref" in
-    app/*) printf '[Application]\nname=%s\nruntime=%s/%s/%s\n' "$id" "$id" "$arch" "$branch" > "$d/metadata" ;;
-    *)     printf '[Runtime]\nname=%s\n' "$id" > "$d/metadata" ;;
-  esac
+  fp --user remote-info --show-metadata "$FP_REMOTE" "$ref" > "$d/metadata" && [ -s "$d/metadata" ] || { rm -rf "$d"; return 1; }
   c="$(ostree --repo="$repo" commit --orphan --tree=dir="$d" --bind-ref="$ref" --timestamp=@86400 --no-xattrs \
          --canonical-permissions --add-metadata-string=xa.metadata="$(cat "$d/metadata")" \
          -s "μ placeholder: lets flatpak update --commit download a pinned commit directly")" || { rm -rf "$d"; return 1; }
   rm -rf "$d"
+  ostree --repo="$repo" refs --delete "mu-placeholder/$ref" >&2
   ostree --repo="$repo" refs --create="mu-placeholder/$ref" "$c" >&2 || return 1
   _fp_set_remote_ref "$repo" "$ref" "$c"
   fp --user install -y --noninteractive --no-pull --no-deps --no-related "$FP_REMOTE" "$ref" >&2

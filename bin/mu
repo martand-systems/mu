@@ -655,7 +655,8 @@ _mu_drive_mount() {
 }
 # _mu_wsl_drives: the drive letters holding the distro's VHD (one per line; every distro's if this one isn't known)
 _mu_wsl_drives() {
-  local reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
+  local IFS=" $(printf '\t')
+" reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
   [ -x "$reg" ] || return 0
   command -v timeout >/dev/null 2>&1 && t="timeout 15"
   # reg.exe writes CRLF lines (and UTF-16 in some setups): drop NULs and CRs, then read DistributionName / BasePath
@@ -678,7 +679,8 @@ _mu_wsl_drives() {
     }' | sort -u
 }
 mu_disk_free() {
-  local d="$1" kb best="" where="" drives l m k assumed=""
+  local d="$1" kb best="" where="" drives l m k assumed="" IFS=" $(printf '\t')
+"   # callers may have changed IFS
   while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
   kb="$(_mu_kb_free "$d")"
   if ! _mu_is_wsl; then
@@ -800,9 +802,7 @@ au_run_body() {
     au_note skipped "μ $latest could not be installed $ec times: not retried until a newer release (or: mu autoupdate run --force)"; au_done; return 0
   fi
   if [ "$force" = 0 ] && au_on_battery; then au_note skipped "on battery power: μ $latest installs on AC power (or: mu autoupdate run --force)"; return 0; fi
-  need="$(au_conf min_free_gb)"; IFS="$(printf '\t')" read -r free where <<EOF
-$(mu_disk_free "$MU_HOME")
-EOF
+  need="$(au_conf min_free_gb)"; free="$(mu_disk_free "$MU_HOME")"; where="${free#*$(printf '\t')}"; free="${free%%$(printf '\t')*}"
   if [ -z "$free" ]; then echo "could not measure the free disk space; continuing (the installer checks it too)"
   elif [ "$free" -lt "$need" ]; then
     au_note skipped "$free GB free${where:+ on $where}, auto-update waits for $need GB (min_free_gb; mu gc --yes frees space)"; return 0

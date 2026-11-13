@@ -37,7 +37,8 @@ _mu_drive_mount() {
 }
 # _mu_wsl_drives: the drive letters holding the distro's VHD (one per line; every distro's if this one isn't known)
 _mu_wsl_drives() {
-  local reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
+  local IFS=" $(printf '\t')
+" reg="${MU_WSL_REG:-/mnt/c/Windows/System32/reg.exe}" key='HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss' t=""
   [ -x "$reg" ] || return 0
   command -v timeout >/dev/null 2>&1 && t="timeout 15"
   # reg.exe writes CRLF lines (and UTF-16 in some setups): drop NULs and CRs, then read DistributionName / BasePath
@@ -60,7 +61,8 @@ _mu_wsl_drives() {
     }' | sort -u
 }
 mu_disk_free() {
-  local d="$1" kb best="" where="" drives l m k assumed=""
+  local d="$1" kb best="" where="" drives l m k assumed="" IFS=" $(printf '\t')
+"   # callers may have changed IFS
   while [ ! -d "$d" ]; do d="$(dirname "$d")"; done
   kb="$(_mu_kb_free "$d")"
   if ! _mu_is_wsl; then
