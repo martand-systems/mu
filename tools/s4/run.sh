@@ -171,7 +171,9 @@ dokploy_env() {  # dokploy_env APPNAME CREDENTIAL_FILE [KEY=VALUE...]   the env 
   printf 'APP_NAME="%s"\nCOMPOSE_PROJECT_NAME="%s"\n' "$app" "$app"
   sed -n 's/^\(RELAY_[A-Z]*\)=\(.*\)$/\1="\2"/p' "$cred"
   for kv in "$@"; do printf '%s="%s"\n' "${kv%%=*}" "${kv#*=}"; done
-  printf 'DOCKER_CONFIG="/root/.docker"\n'
+  # Dokploy appends DOCKER_CONFIG=/root/.docker (it deploys as root), and docker compose obeys it. The replica
+  # is not root, so the line points at this user's Docker configuration instead.
+  printf 'DOCKER_CONFIG="%s"\n' "${DOCKER_CONFIG:-$HOME/.docker}"
 }
 inject() {  # inject HOST ROUTER PORT   Dokploy's labels and networks for that Domains entry
   sed -e "s/@HOST@/$1/g" -e "s/@ROUTER@/$2/g" -e "s/@PORT@/$3/g" "$S4/dokploy-inject.yaml.tmpl"
