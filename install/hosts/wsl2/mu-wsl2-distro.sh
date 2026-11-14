@@ -1283,7 +1283,7 @@ ensure_node_enabled() {
   local mubin name cur out rc=0
   mubin="$(mu_bin_of)"
   if ! mu_job_layer; then
-    warn "μ of $MU_USER has no job layer yet (it comes with the release after v2026.11.6; μ updates itself daily, or now: wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu update). Then run install again: it enables the runner"
+    warn "μ of $MU_USER has no job layer yet (it comes with the release after v2026.11.6; μ updates itself daily, or now: wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu update). Then run install again: it enables the runner"
     return 0
   fi
   if ! user_manager_up; then warn "$MU_USER's systemd user manager is not running (linger, a restart of the distro): the runner is enabled by the next install"; return 0; fi
@@ -1686,7 +1686,7 @@ status_jobs() {
   if [ -e "$ETC_MU/test-hooks" ]; then check fail test-fault "$ETC_MU/test-hooks exists: root's pairing client then obeys MU_PAIR_* test hooks, which must never happen on a real node (rm $ETC_MU/test-hooks)"; fi
   # the runner, the limits, the gate's answer
   if ! mu_job_layer; then
-    check warn node.runner "μ of $MU_USER has no job layer yet (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu update; then install again)"
+    check warn node.runner "μ of $MU_USER has no job layer yet (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu update; then install again)"
     return 0
   fi
   if user_manager_up; then
@@ -1695,7 +1695,7 @@ status_jobs() {
     else check fail node.runner "mu-node.service is $v (run install: it runs mu node enable as $MU_USER)"; fi
     info="$(as_mu_sd "$(mu_bin_of)" node info --json 2> /dev/null || true)"
     if [ "$(printf '%s' "$info" | json_get limits.memory)" = true ]; then check pass node.limits "memory limit enforced: $(printf '%s' "$info" | json_get limits.selftest_detail)"
-    else check fail node.limits "memory limit not proven: $(printf '%s' "$info" | json_get limits.selftest_detail) (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu node selftest; §19 step 1)"; fi
+    else check fail node.limits "memory limit not proven: $(printf '%s' "$info" | json_get limits.selftest_detail) (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu node selftest; §19 step 1)"; fi
     free="$(printf '%s' "$info" | json_get disk.free_gb)"; min="$(printf '%s' "$info" | json_get disk.min_free_gb)"
     where="$(printf '%s' "$info" | json_get disk.where)"; host="$(printf '%s' "$info" | json_get disk.host)"
     if [ -n "$free" ] && [ -n "$min" ] && [ "$free" -ge "$min" ]; then check pass node.disk "$free GB free at $where (jobs need $min)${host:+, Windows drive $host}"
