@@ -88,7 +88,7 @@ describe("JobTable", () => {
   it("empty: the command to submit one", () => {
     wrap(<JobTable jobs={[]} nodes={o.nodes} more={{}} firstNode="office-pc" />);
     expect(screen.getByText("No jobs yet")).toBeTruthy();
-    expect(screen.getByText(/mu submit --on office-pc/)).toBeTruthy();
+    expect(screen.getByText(/mu submit --on office-pc/, { selector: "code" })).toBeTruthy();
   });
   it("node text is rendered as text, never as HTML", () => {
     const jobs = o.jobs.map((j) => ({ ...j, name: '<img src=x onerror="window.__xss=1">' }));
