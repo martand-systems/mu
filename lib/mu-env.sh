@@ -40,6 +40,11 @@ export CAD_TELEMETRY=0 CAD_UPDATE_CHECK=0 DO_NOT_TRACK=1
 if [ "$(uname -s)" = Linux ]; then
   export __EGL_VENDOR_LIBRARY_DIRS="${__EGL_VENDOR_LIBRARY_DIRS:-$MU_TOOLCHAIN/env/share/glvnd/egl_vendor.d}"
   [ -n "${DISPLAY:-}" ] || export VTK_DEFAULT_OPENGL_WINDOW="${VTK_DEFAULT_OPENGL_WINDOW:-vtkEGLRenderWindow}"
+  # Software rendering (llvmpipe) unless MU_RENDER_GPU=1. Under WSL2, Mesa otherwise picks its d3d12 (DirectX) driver
+  # or a /dev/dri node; from a systemd user service (the daily auto-update) that failed on the office PC on
+  # 2026-11-14 ("/dev/dri/renderD128: Permission denied", "D3D12: Removing Device", render-png exit 87), so the
+  # post-install benchmarks failed and the update was rolled back. Results are identical; only speed differs.
+  if [ "${MU_RENDER_GPU:-0}" != 1 ]; then export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe; fi
 fi
 
 # OpenVSP's folder (for vsp.SetVSPAEROPath(os.environ["MU_VSPAERO_DIR"])), whatever the platform's app layout
