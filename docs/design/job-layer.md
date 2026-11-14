@@ -2,8 +2,9 @@
 
 The specification for stage 1 of `docs/PLAN.md` §6.4a. It replaces the design note of 2026-11-13 and corrects it
 with what was measured on 2026-11-14 (§17) and read in sources (§18). Stage 1 is implemented on branch `job-layer`
-and proven in CI (§21, which also lists where the implementation differs from the text above); nothing has run on
-the office PC. What can only be checked at the PC is listed, in order, in §19.
+and proven in CI (§21, which also lists where the implementation differs from the text above); the root steps of §13
+are in the host script, which CI uses to make its node (§22). Nothing has run on the office PC. What can only be
+checked at the PC is listed in §19; the owner's visit is `docs/design/first-job-checklist.md`.
 
 Sections: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Where the code lives](#3-where-the-code-lives) ·
 [4 Workstation](#4-workstation-files-and-commands) · [5 The connection](#5-the-connection) · [6 Upload](#6-upload-a-git-snapshot) ·
@@ -12,7 +13,7 @@ Sections: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Whe
 [12 Versions](#12-toolchain-versions) · [13 Root steps](#13-what-needs-root-on-the-node) · [14 Security](#14-who-can-do-what) ·
 [15 Stages](#15-stages) · [16 Tests](#16-tests-and-how-each-is-shown-to-fail) · [17 Verified](#17-verified-by-experiment) ·
 [18 Read](#18-read-in-sources-not-run) · [19 PC](#19-still-unverified-until-the-pc) · [20 Changes](#20-changes-from-the-design-note-and-from-plan-v6) ·
-[21 Implemented](#21-implemented-stage-1-in-ci)
+[21 Implemented](#21-implemented-stage-1-in-ci) · [22 Host script](#22-the-host-script-13-in-mu-wsl2-distrosh-in-ci)
 
 ## 1. Summary
 
@@ -62,8 +63,9 @@ pass as the node: the host key is pinned.
 | `src/mu/durable.py` | `write_durable`, `seal`, `read_record` (§9), used by both sides; the test faults |
 | `src/mu/proto.py` | what both sides share: protocol number, exit codes, name rules, job id, globs, `MuError` |
 | `install/hosts/wsl2/mu-node-gate` | the forced command, POSIX `sh`, installed root-owned (§7.1); the host script replaces `@MU_BIN@` and `@MU_KEYS@` |
-| `install/hosts/wsl2/mu-wsl2-distro.sh` | new root steps (§13) |
-| `install/hosts/wsl2/mu-wsl2-host.ps1` | passes the distro's drive letter to the distro script (§13.4); nothing else changes on Windows |
+| `install/hosts/wsl2/mu-wsl2-distro.sh` | new root steps (§13) and the commands `authorize`, `revoke`, `keys`, `host-key`, `tunnel credential`, `tunnel status`, `windows-reach` (§22) |
+| `install/hosts/wsl2/mu-wsl2-host.ps1` | passes the distro's drive letter to the distro script (§13.4) and copies the gate's source in; nothing else changes on Windows |
+| `docs/design/first-job-checklist.md` | the owner's visit: one sequence, with the expected output of each step |
 | `toolchain/apps.toml`, `install/install.sh` | the chisel client, pinned (§5.4) |
 | `tools/test-jobs/` | tests (§16); `.github/workflows/job-layer.yml` runs them on branch pushes |
 
@@ -1275,3 +1277,83 @@ R09), atomic write (R16), pins agree (R28), bash 3.2 (R29), each with its fault.
   from `main` and two checks that depend on the machine (a leftover `sleep 599`, `systemd-analyze --user verify`).
   `tools/test-fetch` is timing-sensitive (failed once locally and once in CI, passed on the rerun; this branch does
   not touch the downloader) and is not in this workflow.
+
+## 22. The host script: §13 in `mu-wsl2-distro.sh`, in CI
+
+The root steps of §13 are in `install/hosts/wsl2/mu-wsl2-distro.sh`, and CI makes its node with them: since run
+@RUN@ the probe and e2e jobs no longer build the node by hand. The owner's visit is
+`docs/design/first-job-checklist.md` (one sequence, about 15 minutes; it replaces the order of §19, whose points it
+checks one by one).
+
+### 22.1 What `install` does now, and the new commands
+
+`install` adds, after the steps it had (each idempotent, a check in `status`, undone by `uninstall`):
+`ensure_ssh_masked` (before the packages), `openssh-server`, `unattended-upgrades` and `python3` in
+`ensure_packages`, the [interop]/[automount] keys in `ensure_wsl_conf` and `ensure_host_drive` (not with `--no-wsl`),
+then `ensure_node_hostkey`, `ensure_sshd_config`, `ensure_sshd_unit`, `ensure_authorized_keys`, `ensure_gate`,
+`ensure_job_root`, `ensure_cgroup_delegation`, `ensure_tunnel`, `ensure_security_updates`, `ensure_node_enabled`.
+New options: `--host-drive L`, `--node-name N`, `--no-wsl`, `--wait S`. New commands (each with `--json` and
+documented exit codes): `authorize NAME 'KEY'|-`, `revoke NAME`, `keys`, `host-key`, `tunnel credential`
+(`tunnel-credential`), `tunnel status`, `windows-reach`. `mu-wsl2-host.ps1 install` passes `--host-drive` (the
+letter of the distro's registered folder) and copies `mu-node-gate` in with the script.
+
+`status` gains: `ssh.masked`, `openssh-server`, `listeners` (nothing on 22; an sshd only on `127.0.0.1:2222`),
+`node.hostkey`, `sshd.config` (every value `sshd -T -C user=mu,host=localhost,addr=127.0.0.1` reports for the
+installed file, compared with the text §13.1 specifies, plus no `Subsystem` and no `AcceptEnv`), `sshd.service`,
+`keys` (every line has `restrict`), `gate` (byte-equal to what install writes), `jobroot`, `cgroup.delegation`,
+`chisel` (the installed binary's SHA-256), `tunnel.credential` (owner and mode), `tunnel` (the last state in the
+service's journal), `updates`, `test-fault`, `node.runner`, `node.limits`, `node.disk`, `node.hello` (the gate's
+answer, run as sshd runs it); on WSL also `host-drive`, `reach.root`, `reach.mu.interop`, `reach.mu.files`,
+`reach.mu.df`, `disk.sure`. The Windows script shows them as `linux.<name>` without a change.
+
+### 22.2 Where it differs from §13, and why
+
+| # | §13 (or the task) | Built | Why |
+|---|---|---|---|
+| 1 | the task: an sshd drop-in, `ssh.socket` off, `ssh.service` on | §13 as written: `mu-sshd.service`, `/etc/mu/sshd_config`, Ubuntu's units masked | §20 #2 decided it; CI proves the masked units never listen (`P6`, `H1 listeners`) |
+| 2 | `tunnel-credential` | `tunnel credential` (the old name works too) and `tunnel status`. Input: the lines `relay/gen-credentials.sh client <node>` prints, as they are (CR, comments, `RELAY_PORTS`), or `AUTH=`/`RELAY_*` lines. From a terminal it reads to an empty line with echo off | the owner moves one file, unchanged; every refusal names the field, never the value (a unit test checks the password is in no message) |
+| 3 | chisel's archive SHA-256 | the archive's and the unpacked binary's (`811362…2b52`), the binary's checked by `status` | `status` can tell that the installed binary is still the pinned one |
+| 4 | `mu-tunnel.service` as §13.3 | plus `Group=`, `ConditionPathExists=/etc/mu/tunnel.env`, `PrivateDevices`, `ProtectKernelTunables/Modules`, `ProtectControlGroups`, `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `SystemCallArchitectures=native`, empty capability sets, `UMask=0077` | a stronger sandbox for the one process that faces the relay; without a credential the unit is skipped, not failing. Proven on the runner's kernel, not yet on WSL's (§22.4) |
+| 5 | uninstall undoes everything but the host key | it also keeps `/srv/mu` (job data) and the gate's source while the script stays; it removes `openssh-server` and `unattended-upgrades` only if install added them, and unmasks only the units install masked (`/var/lib/mu-wsl2/installed-packages`, `masked-units`) | data is not install's to delete; a reinstall from `/usr/local/sbin` needs the gate's source (CI run 43536617666 found it missing); uninstall must not remove what it did not add |
+| 6 | the gate "with the two machine values written in" | its source travels as `/usr/local/lib/mu/mu-node-gate.in` (root, 0644): `mu-wsl2-host.ps1` copies it in, and a run from a checkout copies it from beside the script | `mu-wsl2-host.ps1` copies only the script itself into the distro |
+| 7 | `ensure_cgroup_delegation` dropped (§20 #10) | kept, as asked, "only if needed": a drop-in only when `mu`'s user manager lacks `memory` or `pids` that the kernel has | on Ubuntu 24.04 it writes nothing (CI); it covers an image whose `user@.service` delegates less |
+| 8 | `ensure_node_enabled` "when mu has a version with the job layer" | as said; its name is `--node-name`, else the relay user of the credential, else the host name; `tunnel credential` renames a node that took the host name | install runs before the credential exists on the PC (checklist 2.5) |
+| 9 | `status` "every line of §13.1 compared with `sshd -T`" | `sshd -T` of the installed file, compared with the text install would write, not with the installed file | an edited file would otherwise agree with itself (`H1` with `PermitTTY yes` shows the check fails) |
+| 10 | `windows-reach` (§19 step 2) | for `mu`, a copy of `whoami.exe` in `/var/lib/mu-wsl2/reach/` (removed after) runs in a `systemd-run --user` unit | `mu` cannot read `/mnt/c` after §13.4, so only interop decides |
+| 11 | unattended upgrades, security pocket only | `/etc/apt/apt.conf.d/52mu-unattended-upgrades` with `#clear` of Ubuntu's lists, then the three security pockets; `apt-daily*.timer` unmasked and enabled if they were not | the runner had both timers disabled; `unattended-upgrade --dry-run` there lists only `noble-security`, `noble-apps-security`, `noble-infra-security` (`H5`) |
+| 12 | — | `python3` among the packages | `status` reads `mu node info --json` |
+| 13 | §19 step 3: `install`, then `test-stop` | `install -NoRestart`, then `test-stop` | install's own restart is `wsl --terminate`; `test-stop` is the clean stop, and it hands WSL to the startup task |
+| 14 | — | from PowerShell, commands as `mu` pass `--cd ~` | after §13.4, `mu` cannot enter the Windows folder PowerShell starts in |
+| 15 | — | `apt-get` is retried for up to 10 minutes while another apt holds a lock | with the daily apt timers on, `apt-daily` may be running `apt-get update`; `DPkg::Lock::Timeout` does not cover the lists lock (CI run 43539220281: a reinstall stopped with exit 100) |
+
+### 22.3 CI (run @RUN@)
+
+`tools/test-jobs/node-setup.sh` runs `mu-wsl2-distro.sh install --no-wsl` from the checkout, then
+`tunnel credential` with the replica's `gen-credentials` output on stdin, then install twice more; `e2e.sh` pairs
+the workstation with `host-key` and `authorize`, runs every row of §21.3 against that sshd, gate and tunnel, and adds:
+
+@TABLE@
+
+Unit level (`tools/test-wsl2-host/run.sh`, macOS bash 3.2 and Linux, plus `ps-tests.ps1` under pwsh): the
+`wsl.conf` merge with the Windows keys, the sshd text and its effective-value check (fixtures, and this machine's real
+`sshd -T` of the generated file and of an edited copy), key names, public key validation (`ssh-keygen` decides: ECDSA,
+two keys, a key cut short, a private key line, shell characters), the key file's put/del/list, `authorize`,
+`revoke`, `keys` end to end on a test folder, the relay settings parser (seven refusals, the password in no message),
+the tunnel log classification on chisel's lines, listeners, delegation, the drive record, the security pocket check,
+the rendered gate, the pinned sums; `Get-HostDriveLetter` in PowerShell. Faults that must make their check fail:
+`sshd-no-effective-check`, `no-name-check`, `no-keygen-check` (twice). `tools/test-jobs/run.sh`: the chisel pins of
+the distro script, with a changed sum shown to fail.
+
+### 22.4 Not tested until the PC
+
+- Everything WSL does: `[interop] enabled=false` and the `[automount]` options after a restart of the distro, the
+  `reach.*` and `disk.sure` checks, the host drive record from `mu-wsl2-host.ps1`, `windows-reach` (CI has no
+  Windows; `--no-wsl` leaves these out).
+- The startup task as `mu` once `mu` cannot enter `/mnt/c/WINDOWS/system32` (WSL is expected to report the failed
+  `chdir` and still run `/bin/true`): checklist 2.7, `task.last-run`.
+- The tunnel's sandbox under WSL's kernel, and the tunnel through the office network and its proxy, if any.
+- `mu-wsl2-host.ps1`'s new code on Windows (`Copy-IntoDistro`, `--host-drive`, the gate on an elevated relaunch from a
+  UNC path): parsed under PowerShell 5.1 rules and its pure function tested under pwsh 7 only.
+- That `install` on the configured PC changes exactly the list in the checklist: CI starts from a fresh runner.
+- `apt-get remove` of `openssh-server` on uninstall is exercised only where the package was preinstalled (the runner),
+  so the removal branch itself ran only for `unattended-upgrades`.

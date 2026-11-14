@@ -561,6 +561,16 @@ print_deploy_key_help() {
 
 # ================================================================ install steps
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"; }
+# apt_get ARGS...: apt-get, waiting up to 10 min while another apt (the daily apt-daily run) holds a lock; the
+# DPkg::Lock::Timeout of APT_OPTS covers dpkg's lock but not the lists lock of `apt-get update`
+apt_get() {
+  local i out rc
+  for i in $(seq 1 40); do
+    rc=0; out="$(DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS "$@" 2>&1)" || rc=$?
+    case "$rc:$out" in 0:*) [ -z "$out" ] || printf '%s\n' "$out"; return 0 ;; *"Could not get lock"*|*"Unable to lock"*) sleep 15 ;; *) printf '%s\n' "$out" >&2; return "$rc" ;; esac
+  done
+  printf '%s\n' "$out" >&2; return "$rc"
+}
 ensure_packages() {
   local miss="" p
   # openssh-server only after ensure_ssh_masked; python3 reads JSON in status; the two marked ones are removed again
@@ -573,10 +583,9 @@ ensure_packages() {
   for p in $miss; do
     case "$p" in openssh-server|unattended-upgrades) grep -qx "$p" "$STATE_DIR/installed-packages" 2>/dev/null || echo "$p" >> "$STATE_DIR/installed-packages" ;; esac
   done
+  apt_get update -qq
   # shellcheck disable=SC2086
-  DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS update -qq
-  # shellcheck disable=SC2086
-  DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS install -y -qq --no-install-recommends $miss
+  apt_get install -y -qq --no-install-recommends $miss
   changed "packages installed:$miss"
 }
 
@@ -1277,7 +1286,7 @@ uninstall_jobs() {
   if [ -s "$STATE_DIR/installed-packages" ]; then
     p="$(tr '\n' ' ' < "$STATE_DIR/installed-packages")"
     # shellcheck disable=SC2086
-    DEBIAN_FRONTEND=noninteractive apt-get $APT_OPTS remove -y -qq $p > /dev/null && { rm -f "$STATE_DIR/installed-packages"; changed "packages removed (install had added them): $p"; } \
+    apt_get remove -y -qq $p > /dev/null && { rm -f "$STATE_DIR/installed-packages"; changed "packages removed (install had added them): $p"; } \
       || warn "could not remove $p (apt-get remove): remove them by hand"
   fi
   if [ -s "$STATE_DIR/masked-units" ]; then
