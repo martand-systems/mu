@@ -640,8 +640,13 @@ h_keys() {
     && sudo grep -qx "restrict $(PUB) avi-mac" /etc/mu/authorized_keys/mu
 }
 h_updates() {   # what unattended-upgrades itself says it would take, on the runner (a dry run)
-  local o; o="$(sudo unattended-upgrade --dry-run --debug 2>&1 | grep -m 1 -i 'allowed origins are' || true)"
-  M="${o:-unattended-upgrade printed no 'Allowed origins' line}"
+  local o="" all="" i
+  for i in $(seq 1 20); do   # apt-daily, which install enabled, may hold the apt lock: then it stops before that line
+    all="$(sudo unattended-upgrade --dry-run --debug 2>&1 || true)"
+    o="$(printf '%s\n' "$all" | grep -m 1 -i 'allowed origins are' || true)"
+    [ -n "$o" ] && break; sleep 15
+  done
+  M="${o:-unattended-upgrade printed no 'Allowed origins' line: $(printf '%s' "$all" | tail -n 3 | tr '\n' ' ')}"
   [ -n "$o" ] && ! printf '%s' "$o" | grep -Eq -- '-updates|-backports|-proposed' && printf '%s' "$o" | grep -q -- '-security'
 }
 host_rows() {
