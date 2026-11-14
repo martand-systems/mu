@@ -38,7 +38,11 @@ func writeErr(w http.ResponseWriter, err error) {
 	if e.Status == 429 {
 		w.Header().Set("Retry-After", "60")
 	}
-	writeJSON(w, e.Status, map[string]any{"ok": false, "error": e.Code, "message": msg})
+	body := map[string]any{"ok": false, "error": e.Code, "message": msg}
+	for k, v := range e.Extra {
+		body[k] = v
+	}
+	writeJSON(w, e.Status, body)
 }
 
 func ok(fields map[string]any) map[string]any {

@@ -58,12 +58,13 @@ type apiError struct {
 	Status int
 	Code   string
 	Msg    string
+	Extra  map[string]any // more members of the answer (the offer, for a claimer refused as invite-used)
 }
 
 func (e *apiError) Error() string { return e.Code + ": " + e.Msg }
 
 func errf(status int, code, format string, a ...any) *apiError {
-	return &apiError{status, code, fmt.Sprintf(format, a...)}
+	return &apiError{Status: status, Code: code, Msg: fmt.Sprintf(format, a...)}
 }
 
 var errNoChange = errors.New("no change")

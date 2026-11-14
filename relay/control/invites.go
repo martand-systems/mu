@@ -401,7 +401,10 @@ func (r *Relay) claim(id string, q claimReq, from string) (*Invite, bool, error)
 			t.log(id, "second claim refused, invite contested", from, "")
 			return nil
 		})
-		return nil, false, errf(409, "invite-used", "this invite was already claimed by another machine")
+		// It proved the code, so it may see the offer: it needs the offer's digest for its contest (§12.1).
+		e := errf(409, "invite-used", "this invite was already claimed by another machine")
+		e.Extra = map[string]any{"offer": r.offerFor(r.st.Invites[id]), "offer_mac": inv.OfferMAC}
+		return nil, false, e
 	}
 	return nil, false, terminalErr(inv)
 }

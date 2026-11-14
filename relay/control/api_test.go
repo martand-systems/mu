@@ -274,6 +274,12 @@ func TestSessionContinuityAndContested(t *testing.T) {
 	if r.Status != 409 || errCode(r) != "invite-used" {
 		t.Fatalf("second claimer: %s", r.Raw)
 	}
+	if o, _ := r.Body["offer"].(map[string]any); o["inviter_key"] != testKey || r.Body["offer_mac"] != mac("offer 7K3M") {
+		t.Fatalf("the refused claimer needs the offer for its contest: %s", r.Raw)
+	}
+	if r := e.do("POST", "/mu/v1/invites/7K3M/claim", "", map[string]any{"claim": newCode("7K3M", 8).claim, "session": thief.session}); strings.Contains(r.Raw, "offer") {
+		t.Fatalf("a wrong code got the offer: %s", r.Raw)
+	}
 	v := e.do("GET", "/mu/v1/invites/7K3M", admin(), nil)
 	if inviteField(v, "contested") != true {
 		t.Fatalf("not contested: %s", v.Raw)
