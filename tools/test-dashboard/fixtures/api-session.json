@@ -1,0 +1,19 @@
+{
+ "api": 1,
+ "dev": true,
+ "host": "fixture-mac",
+ "list_limit": 100,
+ "log_keep_bytes": 2097152,
+ "now": 1794650002.0,
+ "ok": true,
+ "poll_ms": {
+  "job": 2000,
+  "log": 1000,
+  "overview": 2000
+ },
+ "scenario": "busy",
+ "stale_after_s": 15.0,
+ "started": 1794650000.0,
+ "version": "v2026.11.9",
+ "visible_after_s": 10.0
+}

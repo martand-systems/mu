@@ -1,0 +1,100 @@
+{
+ "api": 1,
+ "jobs": [],
+ "mac": {
+  "battery": {
+   "on_battery": false,
+   "percent": 100.0
+  },
+  "cores": {
+   "eff": 4,
+   "logical": 8,
+   "perf": 4,
+   "physical": 8
+  },
+  "cpu_pct": 38.7,
+  "host": "fixture-mac",
+  "load": [
+   2.1,
+   1.9,
+   1.7
+  ],
+  "mem": {
+   "available": 8005542654,
+   "pressure": "ok",
+   "total": 17179869184,
+   "used": 9174326530
+  },
+  "mu_version": "v2026.11.9",
+  "name": "This Mac",
+  "per_core": [
+   24.0,
+   41.4,
+   46.2,
+   24.7,
+   28.9,
+   50.4,
+   48.6,
+   44.2
+  ],
+  "sampler": "fake",
+  "series": {
+   "cpu_pct": [
+    [
+     1794650002.0,
+     38.7
+    ]
+   ],
+   "mem_used": [
+    [
+     1794650002.0,
+     9174326530
+    ]
+   ]
+  },
+  "stale": false,
+  "t": 1794650002.0
+ },
+ "more": {
+  "office-pc": false
+ },
+ "nodes": [
+  {
+   "attention": [],
+   "error": {
+    "auto_retry": false,
+    "error": "host-key",
+    "exit": 5,
+    "message": "office-pc's host key differs from the key pinned at pairing. Never retried; nothing was sent [host-key]",
+    "next": "tell the user. If the node was reinstalled on purpose, compare the key the PC shows and pair again: mu compute invite office-pc --replace",
+    "retry_at": null,
+    "verb": "hello"
+   },
+   "features": [],
+   "hello": null,
+   "jobs_listed": 0,
+   "link": "relay",
+   "list_stale": true,
+   "list_t": null,
+   "more": false,
+   "name": "office-pc",
+   "offline_since": 1794650000.0,
+   "old_node": false,
+   "old_node_text": null,
+   "reconnecting": false,
+   "series": {
+    "cpu_pct": []
+   },
+   "state": "refused",
+   "stats": null
+  }
+ ],
+ "now": 1794650002.0,
+ "ok": true,
+ "summary": {
+  "nodes": 1,
+  "online": 0,
+  "queued": 0,
+  "running": 0
+ }
+}

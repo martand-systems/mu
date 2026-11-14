@@ -430,7 +430,7 @@ class MacSampler:
             stale, t = False, now
         s = s or {}
         return {"name": "This Mac", "host": socket.gethostname().split(".")[0][:64],
-                "sampler": "psutil" if self.ps else "stdlib", "t": t, "stale": stale,
+                "sampler": "psutil" if self.ps else "stdlib", "t": rnd(t, 3), "stale": stale,
                 "cpu_pct": s.get("cpu_pct"), "per_core": s.get("per_core", []), "load": s.get("load"),
                 "cores": dict(self.cores),
                 "mem": dict(s.get("mem") or {"total": None, "available": None, "used": None, "pressure": None}),
@@ -1760,8 +1760,9 @@ def api_fixtures():
     try:
         app, sc = make("busy")
         node = app.workers["office-pc"]
-        run = sorted(j for j, s in node.jobs.items() if s.get("state") == "running")[0]
-        fin = sorted(j for j, s in node.jobs.items() if s.get("state") == "oom")[0]
+        run = max((j for j, s in node.jobs.items() if s.get("state") == "running"),
+                  key=lambda j: node.jobs[j].get("started_at") or "")
+        fin = sorted(j for j, s in node.jobs.items() if s.get("state") == "failed")[0]
         session = app.api_session()
         session["host"] = "fixture-mac"
         out = {"api-session.json": wrap(session), "api-overview.json": wrap(app.api_overview()),

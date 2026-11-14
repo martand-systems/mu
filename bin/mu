@@ -2,8 +2,9 @@
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
 # Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
-# The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node) always run on the default toolchain.
-MU_DISPATCHER_REV=10   # bump on every change (installers only replace an older dispatcher)
+# The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node) and the dashboard always run on the
+# default toolchain.
+MU_DISPATCHER_REV=11   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -400,6 +401,7 @@ ${B}Compute jobs${N} (always the default version; every command takes --json and
   mu log JOB [-f] [--tail N] [--offset B]   the job's output
   mu fetch JOB [--into DIR] [--max-size 50M]   the declared outputs + runs/JOB.json
   mu cancel JOB            stop a queued or running job          mu node ...   the node's own side (enable, selftest)
+  mu dashboard [open|on|off]   a local page of jobs, nodes and this Mac's load (read-only; mu dashboard --help)
   Exit codes: 0 ok, 2 usage, 3 version, 4 unreachable, 5 refused, 6 node cannot, 7 job failed, 8 integrity,
   9 no such, 10 still running
 
@@ -1185,7 +1187,7 @@ case "$cmd" in
   remove|uninstall|rm)    cmd_remove "$@" ;;
   gc)                     cmd_gc "$@" ;;
   autoupdate|auto-update) cmd_autoupdate "$@" ;;
-  compute|submit|status|log|fetch|cancel|relay|node) infra "$cmd" "$@" ;;
+  compute|submit|status|log|fetch|cancel|relay|node|dashboard) infra "$cmd" "$@" ;;
   --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
   *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
 esac
