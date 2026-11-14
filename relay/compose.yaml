@@ -1,10 +1,16 @@
-# μ relay, Stage A (docs/PLAN.md §7): chisel behind the server's Dokploy-managed Traefik.
+# μ relay, Stage A (docs/PLAN.md §7): chisel behind the server's Dokploy-managed Traefik, and the pairing service
+# mu-relayd behind chisel (docs/design/pairing.md), on when RELAY_ADMIN_TOKEN is set.
 #
 # Deployed by Dokploy as a Compose service from this folder (steps in README.md). Dokploy adds the routing labels
 # and the dokploy-network attachment from its Domains screen (host relay.martand.systems, container port 8080,
-# HTTPS), so this file has no routers, no published ports and no volumes. Its labels define one Traefik
-# middleware, which the Domains entry names. The two secrets come from Dokploy's Environment tab, which Dokploy
-# writes to relay/.env for the ${...} below; they are never in git.
+# HTTPS), so this file has no routers and no published ports: /mu/v1/ reaches mu-relayd through chisel's --backend,
+# on the same route. Its labels define one Traefik middleware, which the Domains entry names. The secrets come from
+# Dokploy's Environment tab, which Dokploy writes to relay/.env for the ${...} below; they are never in git.
+#
+# One named volume holds the pairing state (dynamic clients, invites). Docker names it <appName>_relay-state and
+# Dokploy keeps it across deploys; only "delete volumes", a deploy with fresh volumes, Isolated Deployment or
+# Randomize Compose would lose it (README.md §6). It is declared here, not as a Dokploy Mount (a Mount would move the
+# build context to the repository's root).
 #
 # tools/s4 runs this file unchanged behind a Traefik configured the way Dokploy configures it (CI: s4-relay).
 services:
@@ -17,6 +23,10 @@ services:
       RELAY_KEY: "${RELAY_KEY:?set RELAY_KEY in the Environment tab, see relay/README.md}"
       RELAY_CLIENTS: "${RELAY_CLIENTS:?set RELAY_CLIENTS in the Environment tab, see relay/README.md}"
       RELAY_KEEPALIVE: "${RELAY_KEEPALIVE:-25s}"
+      # Optional. Set: the pairing service runs (docs/design/pairing.md). Unset: chisel alone, exactly as before.
+      RELAY_ADMIN_TOKEN: "${RELAY_ADMIN_TOKEN:-}"
+      # Optional. Names that may never connect, whatever the volume holds (the kill switch, README.md §6).
+      RELAY_REVOKED: "${RELAY_REVOKED:-}"
     expose:
       - "8080"            # internal only; Traefik reaches it on dokploy-network
     labels:
@@ -33,6 +43,9 @@ services:
     tmpfs:
       # the generated chisel auth file; memory only, gone with the container
       - /run/relay:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=65532,gid=65532
+    volumes:
+      # the pairing state (docs/design/pairing.md §6.6); the only writable path besides the tmpfs
+      - relay-state:/var/lib/mu-relay
     cap_drop:
       - ALL
     security_opt:
@@ -58,3 +71,5 @@ services:
       options:
         max-size: "5m"
         max-file: "3"
+volumes:
+  relay-state: {}

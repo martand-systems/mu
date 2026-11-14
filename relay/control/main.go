@@ -116,7 +116,7 @@ func main() {
 	}
 	os.Clearenv()
 
-	sup := &Supervisor{Path: chiselPath, MinInterval: 10 * time.Second, StopWait: 3 * time.Second, Logf: logf,
+	sup := &Supervisor{Path: chiselPath, MinInterval: 10 * time.Second, StopWait: 3 * time.Second, Delay: time.Second, Logf: logf,
 		Args: []string{"server", "--host", "0.0.0.0", "--port", chiselPort, "--reverse",
 			"--authfile", filepath.Join(runDir, "users.json"), "--keepalive", keepalive,
 			"--backend", "http://" + listen},

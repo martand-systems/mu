@@ -17,13 +17,14 @@ type Supervisor struct {
 	Env         []string
 	MinInterval time.Duration // at most one restart per this long (10 s)
 	StopWait    time.Duration // SIGTERM, then SIGKILL after this long (3 s)
+	Delay       time.Duration // an eviction waits at least this long (1 s), so that its request is answered first
 	Logf        func(format string, a ...any)
 	OnExit      func(err error) // chisel exited without being asked to
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
 	done      chan struct{}
-	lastStart time.Time
+	lastStart time.Time // of the last restart
 	timer     *time.Timer
 	pending   []string
 	stopping  bool
@@ -45,7 +46,7 @@ func (s *Supervisor) startLocked() error {
 		return err
 	}
 	done := make(chan struct{})
-	s.cmd, s.done, s.lastStart = cmd, done, time.Now()
+	s.cmd, s.done = cmd, done
 	go func() {
 		err := cmd.Wait()
 		close(done)
@@ -81,8 +82,8 @@ func (s *Supervisor) Restarts() int {
 	return s.restarts
 }
 
-// Evict restarts chisel now, or as soon as MinInterval has passed since the last start; requests in between are
-// batched into that one restart. It returns when the restart happened or was scheduled.
+// Evict restarts chisel after Delay, or once MinInterval has passed since the last restart; requests in between are
+// batched into that one restart. It returns at once.
 func (s *Supervisor) Evict(reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,10 +94,11 @@ func (s *Supervisor) Evict(reason string) {
 	if s.timer != nil {
 		return // already scheduled
 	}
+	// Never at once: the request that caused the eviction came in through chisel (--backend) and its answer has to
+	// go out through it first.
 	wait := time.Until(s.lastStart.Add(s.MinInterval))
-	if wait <= 0 {
-		s.restartLocked()
-		return
+	if wait < s.Delay {
+		wait = s.Delay
 	}
 	s.timer = time.AfterFunc(wait, func() {
 		s.mu.Lock()
@@ -122,6 +124,7 @@ func (s *Supervisor) restartLocked() {
 		return
 	}
 	s.restarts++
+	s.lastStart = time.Now() // the first eviction after the start is immediate; later ones at most every MinInterval
 	s.Logf("chisel restarted (%s)", joinReasons(reasons))
 }
 

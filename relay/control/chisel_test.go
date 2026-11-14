@@ -16,7 +16,7 @@ func fakeChisel(t *testing.T, exitAtOnce bool) (*Supervisor, string, *atomic.Int
 		env = append(env, "MU_FAKE_CHISEL_EXIT=1")
 	}
 	exits := &atomic.Int32{}
-	s := &Supervisor{Path: os.Args[0], Args: []string{"-test.run=^$"}, Env: env, MinInterval: 400 * time.Millisecond,
+	s := &Supervisor{Path: os.Args[0], Args: []string{"-test.run=^$"}, Env: env, MinInterval: 400 * time.Millisecond, Delay: 50 * time.Millisecond,
 		StopWait: 2 * time.Second, Logf: t.Logf, OnExit: func(error) { exits.Add(1) }}
 	return s, pids, exits
 }
@@ -46,8 +46,7 @@ func TestEvictionRestartsChiselOnceAndBatches(t *testing.T) {
 	if !waitFor(3*time.Second, func() bool { return countPids(pids) == 1 }) {
 		t.Fatal("chisel did not start")
 	}
-	time.Sleep(450 * time.Millisecond) // past MinInterval since the start
-	s.Evict("a removed")
+	s.Evict("a removed") // the first one after Delay
 	if !waitFor(3*time.Second, func() bool { return countPids(pids) == 2 }) {
 		t.Fatalf("no restart after an eviction: %d starts", countPids(pids))
 	}
