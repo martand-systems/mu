@@ -16,11 +16,24 @@ checked against `node.sha256`) into `$MU_CACHE/dev/`, scrubs the environment and
     tools/dashboard-npm run test          # Vitest
     tools/dashboard-npm run lint          # ESLint, HTML sinks banned
     tools/dashboard-npm browsers          # Playwright's Chromium and WebKit
-    tools/dashboard-npm e2e               # starts `mu dashboard serve --dev` outside the sandbox, then Playwright
+    tools/dashboard-npm e2e               # starts the e2e launcher outside the sandbox, then Playwright inside it
 
 Development: in one terminal `mu dashboard serve --dev --scenario busy` (or `python3 -I -S src/mu/cli.py dashboard
 serve --dev`), in another `tools/dashboard-npm run dev`: Vite on `127.0.0.1:5173` proxies `/api` to the dev server with
 its token (read from `$MU_HOME/run/dev/`). Scenarios: `python3 -I -S src/mu/dashfake.py scenarios`.
+
+## Tests
+
+- `test/` (Vitest): decoders on the golden fixtures (D38), gaps (D37), polling while "offline" (D41), token contrast
+  (D43), the log buffer's caps, components.
+- `e2e/` (Playwright, Chromium and WebKit): `dtests.spec.ts` (D04-D07, D14-D16, D18, D26, D29, D39, D42, D46, D47),
+  `smoke.spec.ts`, and `screens.spec.ts` (every screen and state in light and dark, into `test-results/screens/`, the
+  owner's review copy). Each test asks `tools/test-dashboard/e2e-launcher.py` (run outside the sandbox) for a fresh
+  `mu dashboard serve --dev` with the scenario it needs, so a scenario's timeline starts with the test.
+- Must-fail runs: `tools/test-dashboard/e2e-faults.sh` runs each page test again with its fault and requires it to
+  fail; `FRONT=1` does the Vitest ones (CI). A page fault is a build-time constant (`MU_DASH_FAULT=name` with
+  `MU_DASH_OUT=dir` for a throw-away build; `vite.config.ts` `FAULTS`): false in every real build, so its code is
+  removed by the minifier and never reaches `share/dashboard/`.
 
 ## Changing a dependency
 

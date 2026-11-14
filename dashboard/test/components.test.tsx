@@ -113,8 +113,10 @@ describe("machine cards", () => {
     noteServerNow(o.now);
     wrap(<MacCard mac={o.mac} />);
     const card = screen.getByTestId("card-mac");
-    expect(card.querySelector('[data-fig="mac-avail"]')!.textContent).toBe(`${(o.mac.mem.available! / 1e9).toFixed(1)} GB`);
-    expect(card.querySelector('[data-fig="mac-mem"]')!.textContent).toContain(`${(o.mac.mem.used! / 1e9).toFixed(1)} /`);
+    // the truth is the raw answer, not the decoded one
+    const raw = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "tools", "test-dashboard", "fixtures", "api-overview.json"), "utf8")) as { mac: { mem: { used: number; available: number } } };
+    expect(card.querySelector('[data-fig="mac-avail"]')!.textContent).toBe(`${(raw.mac.mem.available / 1e9).toFixed(1)} GB`);
+    expect(card.querySelector('[data-fig="mac-mem"]')!.textContent).toContain(`${(raw.mac.mem.used / 1e9).toFixed(1)} /`);
   });
   it("refused: the CLI's words, 'never retried', a retry button", () => {
     const o = fx("api-overview-refused.json");

@@ -418,9 +418,16 @@ test("D46 failure states: server down is not 'node offline'; the error page hold
 });
 
 // ------------------------------------------------------------------------------------------------ D47
-test("D47 copy works in Safari's engine: the exact command reaches the clipboard, or is selected with a word", async ({ page, serve, browserName, context }) => {
+test("D47 copy works in Safari's engine: the exact command reaches the clipboard, or is selected with a word", async ({ page, serve, browserName }) => {
   test.skip(browserName !== "webkit", "WebKit only");
-  void context;
+  // Safari refuses the clipboard outside a user gesture; Playwright's WebKit build does not enforce that rule, so the
+  // test puts it back: writeText is refused once the click's transient activation has lapsed.
+  await page.addInitScript(() => {
+    const c = navigator.clipboard;
+    const orig = c.writeText.bind(c);
+    const ua = (navigator as unknown as { userActivation?: { isActive: boolean } }).userActivation;
+    c.writeText = (t: string) => (ua && !ua.isActive ? Promise.reject(new DOMException("not in a gesture", "NotAllowedError")) : orig(t));
+  });
   const d = await serve("busy");
   await openDash(page, d);
   const id = await page.locator('tr[data-state="running"]').first().getAttribute("data-job");
@@ -429,22 +436,24 @@ test("D47 copy works in Safari's engine: the exact command reaches the clipboard
   await expect(btn).toBeVisible({ timeout: 15000 });
   const cmd = (await btn.getAttribute("aria-label"))!.replace(/^Copy: /, "");
   await btn.click();
-  await expect(btn).toHaveAttribute("data-copy-result", /copied|select/, { timeout: 4000 });
-  const res = await btn.getAttribute("data-copy-result");
-  if (res === "copied") {
-    // read it back: paste into a field (the clipboard as the user would use it)
-    await page.evaluate(() => {
-      const ta = document.createElement("textarea");
-      ta.id = "paste-probe";
-      document.body.appendChild(ta);
-      ta.focus();
-    });
-    await page.keyboard.press("Meta+V");
-    const pasted = await page.locator("#paste-probe").inputValue();
-    test.info().annotations.push({ type: "clipboard", description: `copied; pasted back: ${JSON.stringify(pasted)}` });
-    expect(pasted).toBe(cmd);
-  } else {
-    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(cmd);
-    await expect(btn).toContainText("selected: press ⌘C");
-  }
+  await expect(btn).toHaveAttribute("data-copy-result", "copied", { timeout: 4000 });
+  // read it back: paste into a field, as the user would
+  await page.evaluate(() => {
+    const ta = document.createElement("textarea");
+    ta.id = "paste-probe";
+    ta.setAttribute("aria-label", "paste probe");
+    document.body.appendChild(ta);
+    ta.focus();
+  });
+  await page.keyboard.press("Meta+V");
+  await expect(page.locator("#paste-probe")).toHaveValue(cmd);
+  // a refused clipboard: the command is selected for ⌘C and the button says so
+  await page.evaluate(() => {
+    navigator.clipboard.writeText = () => Promise.reject(new DOMException("refused", "NotAllowedError"));
+  });
+  const fetchBtn = page.getByRole("button", { name: /^Copy: mu fetch/ });
+  const fetchCmd = (await fetchBtn.getAttribute("aria-label"))!.replace(/^Copy: /, "");
+  await fetchBtn.click();
+  await expect(fetchBtn).toContainText("selected: press ⌘C");
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(fetchCmd);
 });

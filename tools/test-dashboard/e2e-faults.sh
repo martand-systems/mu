@@ -45,7 +45,7 @@ must_fail() {
     server) sf="$f" ;;
     env) env="$f" ;;
   esac
-  out="$(e2e "$static" "$sf" "$env" --project="$proj" -g "^$id " --reporter=line --output "$WORK/results-$f" 2>&1)"; rc=$?
+  out="$(e2e "$static" "$sf" "$env" --project="$proj" -g "$id " --reporter=line --output "$WORK/results-$f" 2>&1)"; rc=$?
   if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qE "[0-9]+\) \[$proj\] .*› $id " && ! printf '%s\n' "$out" | grep -q "launcher"; then
     ok "must-fail: $id ($proj) fails with the $kind fault $f"
   else
@@ -53,10 +53,12 @@ must_fail() {
   fi
 }
 
+nocolor() { sed $'s/\x1b\\[[0-9;]*m//g'; }
+
 vitest_must_fail() {   # vitest_must_fail FAULT FILE [ENV=VALUE]: the Vitest file must fail with the fault
   local f="$1" file="$2" out rc
   case "$f$file" in *"$FILTER"*) ;; *) return 0 ;; esac
-  out="$(cd "$DASH" && env ${3:+"$3"} MU_DASH_FAULT="$f" npx --no-install vitest run "$file" 2>&1)"; rc=$?
+  out="$(cd "$DASH" && env ${3:+"$3"} NO_COLOR=1 FORCE_COLOR=0 MU_DASH_FAULT="$f" npx --no-install vitest run "$file" 2>&1 | nocolor)"; rc=$?
   if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qE "Tests +[0-9]+ failed"; then ok "must-fail: $file fails with the fault $f"
   else bad "must-fail: $file with the fault $f: nothing failed (exit $rc)" "$out"; fi
 }
@@ -73,7 +75,7 @@ if [ "${FRONT:-0}" = 1 ]; then
   # D38: the server's rename-field fault, through fixtures the faulty server emits
   fx="$WORK/fixtures-rename-field"; mkdir -p "$fx"
   if MU_JOBS_FAULT=rename-field python3 -I -S "$REPO/src/mu/dashfake.py" fixtures "$fx" > /dev/null 2>&1; then
-    out="$(cd "$DASH" && MU_DASH_FIXTURES="$fx" npx --no-install vitest run test/decode.test.ts 2>&1)"
+    out="$(cd "$DASH" && NO_COLOR=1 FORCE_COLOR=0 MU_DASH_FIXTURES="$fx" npx --no-install vitest run test/decode.test.ts 2>&1 | nocolor)"
     if printf '%s\n' "$out" | grep -qE "Tests +[0-9]+ failed"; then ok "must-fail: test/decode.test.ts fails on the fixtures of a server with rename-field (D38)"
     else bad "must-fail: test/decode.test.ts with rename-field fixtures: nothing failed" "$out"; fi
   else bad "must-fail D38: the faulty server's fixtures could not be written"; fi
