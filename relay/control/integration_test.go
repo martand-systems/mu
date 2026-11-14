@@ -200,6 +200,13 @@ func TestIntegrationWithChisel(t *testing.T) {
 	if !until(8*time.Second, func() bool { return lab.count("client: Disconnected") >= 1 }) {
 		t.Fatalf("I6 the removed client's session was not cut:\n%s\n%s", lab.text(), relayd.text())
 	}
+	// the client sees the cut while the old chisel drains, before the new one listens: a single try in that gap is
+	// refused by the network, not by the auth file (CI run 43571059503), so wait for the restart to finish first
+	if !until(15*time.Second, func() bool {
+		return strings.Contains(relayd.text(), "chisel restarted") && httpGet(base+"/health") == "OK\n"
+	}) {
+		t.Fatalf("I6 chisel did not come back after the eviction:\n%s", relayd.text())
+	}
 	again := client("lab-pc:"+pwLab, "R:127.0.0.1:7932:"+hostport(svc2.URL), "--max-retry-count", "0")
 	if !until(5*time.Second, func() bool { return strings.Contains(strings.ToLower(again.text()), "authentication failed") }) || connected(again) {
 		t.Fatalf("I6 the removed client connected again:\n%s", again.text())
