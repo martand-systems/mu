@@ -1,9 +1,10 @@
 # μ roadmap: what is built next, in what order, and why
 
 - **Written:** 2026-11-14, after the first remote job ran on the office PC (release v2026.11.8).
-- **Owner's order:** finish the pairing fixes → build the **dashboard** → then the **shell experience**.
-- **The plans themselves** are [docs/design/dashboard.md](design/dashboard.md) and
-  [docs/design/shell-ux.md](design/shell-ux.md). Each was researched by several agents, reviewed by an independent
+- **Owner's order:** finish the pairing fixes → **concurrent jobs** on the node → build the **dashboard** → then the
+  **shell experience**.
+- **The plans themselves** are [docs/design/scheduler.md](design/scheduler.md),
+  [docs/design/dashboard.md](design/dashboard.md) and [docs/design/shell-ux.md](design/shell-ux.md). Each was researched by several agents, reviewed by an independent
   reviewer, and revised. This file fixes their order, records the owner's decisions, and lists what must be true
   before each step starts. It is meant to stay valid however much else changes before the work begins: where a
   design document and this file disagree about **order or decisions**, this file wins; about **mechanism**, the
@@ -20,6 +21,7 @@
 | Relay | Deployed on the Dokploy server with the pairing service on |
 | JATAYU | A Claude Code agent is moving its heavy computation to the office PC and logging timings for a Mac/PC comparison (`perf/` in the JATAYU repo) |
 | Known problem | The node's auto-update reports `last_result: failed` (seen through `mu compute status office-pc --json`); cause being diagnosed with a job on the node. **This blocks everything below**: new node code reaches the PC only through a release and its auto-update |
+| One job at a time | The node runs jobs one by one, first in first out, each sized to the whole node by default: a 1-second diagnostic waits behind a long JATAYU sweep (seen 2026-11-14: 1 running, 3 queued). Step 2.5 |
 | Not yet done on the PC | The restart tests (shutdown hook stopped, then on) and a real Windows Update restart. Next office visit; no rush |
 
 ## 1. The order
@@ -50,12 +52,34 @@ from the Mac. Done when both machines run v2026.11.9 **by auto-update**, not by 
   next daily check. No PC visit, unless the cause is on the Windows side.
 - Add the cause and the fix to the S3 record and to `docs/install/windows-compute-node.md` §11.
 
+### Step 2.5. Concurrent jobs (docs/design/scheduler.md)
+
+Several jobs at once on the node, admitted by the cores and memory each asks for; `--quick` jobs start at once; the job
+at the head of the queue is never delayed by later ones. Built into μ's own runner (build-or-adopt: scheduler.md §2).
+Starts after step 1 is merged (it also edits `node.py`, `jobs.py`, `CLAUDE-toolchain.md`) and step 2 is done (the
+release must reach the PC by auto-update). Before the dashboard, which reuses its `usage` and sampler.
+
+| Sub-step | Design § | Effort | Needs the PC? |
+|---|---|---|---|
+| 2.5.0 Probe: the queued job `sched-probe` (cpuset, Open MPI's CPU set, `memory.peak`, P/E visibility) and a second one (system memory footprint, `CPUQuota` in a user unit, an express thread beside a 20-thread job); results recorded in §12 before the build | §12 | ½ day | Through jobs only, no visit |
+| 2.5.1 Part A: admission by cores and memory, head reservation, express lane (`--quick`, `CPUQuota=100%`), CPU affinity and thread variables from the grant, `too-big`, `usage` and the 5 s sampler, `mu status` says why a job waits, the `next` size suggestion from the last run | §3.1–§3.4, §4–§8 | 5–6 days with its tests | One release, delivered by auto-update |
+| 2.5.2 Part B: time-based backfill on the monotonic clock, `starts_by`, the `--time` hint. Same release as 2.5.1, or a second one if days must be cut | §3.3, §3.5 | 2–3 days with its tests | One release, delivered by auto-update |
+| 2.5.3 Checks on the PC after the release: concurrency, isolation, `oom` of one job only, backfill, Open MPI, memory at push time, the scaling series np 1…20 | §14 | ½ day | Through jobs only, no visit |
+| Later: R-sched-1 (cpuset and io delegation for hard CPU placement) | §5.4 | ½ day | **Yes**, one distro restart while no job runs; with step 4.2 or a visit, only if 2.5.0 shows cpuset available |
+
+Before the release the owner answers scheduler.md §17 Q1 (cores kept for people at the PC; default all 20) and Q2
+(unflagged jobs get about 20 GB instead of about 21 GB; default yes). Acceptance: the tests of §13 (unit tests, the
+randomised simulation of `plan()`, rows Q01–Q21 with the per-pass invariant check), each with its fault shown to fail;
+**done when** a `--quick` job on the office PC finishes within seconds while a JATAYU job runs, and two flagged jobs
+run side by side on disjoint CPUs (§14). What it does not change: a job submitted without flags still takes the whole
+node for up to 12 h; the gain comes from Claude passing `--cores`, `--mem`, `--time` (scheduler.md §8).
+
 ### Step 3. Dashboard (docs/design/dashboard.md)
 
 | Sub-step | Design § | Effort | Needs the PC? |
 |---|---|---|---|
 | 3.0 Gate and probe: auto-update proven (step 2); one probe job on the PC (cgroup files on the WSL kernel, what survives an `oom`, the CPU cost of one verb call); the LaunchAgent can read the Keychain on the Mac | §7.0 | ½–1 day | Through jobs only, no visit |
-| 3.1 Phase 1: one page — jobs by node with state, live cores and memory per job against its limit, the whole run's chart, both machines' load with the age of each figure; `mu dashboard on/off/open`; μ starts recording CPU time and peak memory per job (`usage` in `result.json` and `runs/<id>.json`) | §7.1 | 6–9 days | One release, delivered by auto-update |
+| 3.1 Phase 1: one page — jobs by node with state, live cores and memory per job against its limit, the whole run's chart, both machines' load with the age of each figure; `mu dashboard on/off/open`; μ starts recording CPU time and peak memory per job (`usage` in `result.json` and `runs/<id>.json`; **built in step 2.5**, reused here) | §7.1 | 6–9 days | One release, delivered by auto-update |
 | 3.2 Phase 2: history (SQLite on the Mac), Nodes and This-Mac pages, the **Mac vs node comparison** on the benchmark suite | §7.2 | 4–6 days | No |
 | 3.3 Phase 2b: recording of local `mu run` work, opt-in, so project jobs can be compared too | §7.3 | 3–4 days | No |
 | 3.4 Phase 3: solver progress (OpenFOAM residuals, CalculiX increments, Gmsh stages) and job-done notifications | §7.4 | 3–5 days | No |
@@ -93,7 +117,8 @@ decision overrides any of these; record it here with its date.
 
 | Topic | Decision | Why |
 |---|---|---|
-| Order | Pairing fixes → dashboard → shell experience | Owner |
+| Order | Pairing fixes → concurrent jobs → dashboard → shell experience | Owner |
+| Concurrent jobs | Several jobs at once on the node, scheduled by the cores and memory each needs; small jobs start at once, big ones protected from starving; built into μ's own runner after a build-or-adopt check; built after the pairing fixes, before the dashboard (step 2.5) | Owner |
 | New machines | None expected soon (no second PC, Mac or engineer) | Owner. Shell phase 3 is deferred; nothing is built for a fresh machine before one is coming |
 | Who types remote jobs | Almost always Claude Code | Owner. Commands are designed for Claude first (`--json`, `next`, `steps`); `mu run --job NAME` and `[jobs.*]` in `mu.toml` stay deferred |
 | The office PC | **Not to be disturbed.** People in the office use it. No OS change, no Windows reinstall, no uninstall/reinstall of the host side for testing. Changes to it must be additive, reversible, delivered by auto-update where possible, and checked with `status` | Owner. A second Windows PC may be budgeted later for destructive tests |
