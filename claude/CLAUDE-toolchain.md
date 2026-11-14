@@ -96,6 +96,17 @@ computer. `mu compute list` shows what is paired (no network); `mu compute statu
   keep this laptop busy or awake for long. If the user did not ask for remote runs, ask before the first one.
 - No node paired, or `mu compute status` not exit 0: run locally or tell the user. Do not loop on retries.
 
+**Pairing a node** (docs/design/pairing.md; the owner walks to the PC, so it never fits one call):
+- `mu compute invite office-pc --no-wait --json`: the code goes to a dialog on the Mac's screen (`"code": null` in
+  the JSON; never ask the user to paste it to you). Show the user the two `pc_commands` lines; they type them in
+  Terminal (Admin) at the PC and then the code.
+- Then repeat `mu compute invite --wait <id> --json --timeout 540` while it exits 10 (`still-waiting`). Exit 0 with
+  `"state": "finished"` is paired; 4 paired but not answering yet (`mu compute status`); 5 refused (report `error`,
+  never retry the same code); 9 expired (a new invite).
+- `mu relay login` takes the admin token and must be typed by the owner in Terminal, never through you. Without it
+  invite exits 2 `not-logged-in`: tell the user the `next` line.
+- `mu compute remove NODE` also deletes the node's relay client (`--keep-relay-client` to keep it): ask first.
+
 **What runs on the node**
 - A snapshot of the project's working tree: HEAD + uncommitted changes + untracked files that are not gitignored.
   Your index, branch and files are untouched. Gitignored files, submodule contents and git-lfs contents do NOT

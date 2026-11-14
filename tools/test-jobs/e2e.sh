@@ -1,8 +1,8 @@
 #!/bin/bash
 # The job layer end to end on a GitHub ubuntu-24.04 runner (docs/design/job-layer.md §16, "node level"): real
 # systemd and cgroup v2, a user mu with linger and a user manager, mu-sshd with the real gate on 127.0.0.1:2222, the
-# S4 replica of the relay behind Traefik (tools/s4/run.sh relay), and the workstation as another user (ws) going
-# THROUGH the relay. Every row of §16 that can be real here is run, then run again with its fault put in, and must
+# S4 replica of the relay behind Traefik in pairing mode (tools/s4/run.sh relay), and the workstation as another user
+# (ws) going THROUGH the relay. The node is paired by one code (docs/design/pairing.md §13.4: S3, then the Q rows). Every row of §16 that can be real here is run, then run again with its fault put in, and must
 # then fail. CI only (it creates users and services): .github/workflows/job-layer.yml.
 #
 #   tools/test-jobs/e2e.sh probe        the probe of what §18 only read (the first CI job)
@@ -30,13 +30,13 @@ run_row() {   # run_row ID WHAT FUNCTION
   printf '\n-- %s %s\n' "$1" "$2"
   M=""; if "$3"; then row PASS "$1" "$2" "$M"; else row FAIL "$1" "$2" "$M"; fi
 }
-must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row has to fail
+must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row has to fail (ON and OFF: shell words)
   want "$1" || return 0
   printf '\n-- %s with fault %s\n' "$1" "$2"
-  "$3"; M=""
+  eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
   else row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M"; fi
-  "$4"
+  eval "$4"
 }
 jget() { python3 -c 'import json,sys
 t=sys.stdin.read().strip().splitlines()
@@ -103,25 +103,27 @@ setup() {
   echo "$sha  $gz" | sha256sum -c - || { row FAIL S0 "chisel from toolchain/apps.toml" "SHA-256 differs"; return 1; }
   gunzip -c "$gz" > "$WORK/chisel"; chmod 755 "$WORK/chisel"
   row PASS S0 "chisel client from the apps.toml pin, SHA-256 checked" "$("$WORK/chisel" --version)"
-  TRAEFIK_VERSION="${TRAEFIK_VERSION:-3.7.16}" "$ROOT/tools/s4/run.sh" relay > "$WORK/logs/relay-up.log" 2>&1 \
+  S4_PAIRING_E2E=1 TRAEFIK_VERSION="${TRAEFIK_VERSION:-3.7.16}" "$ROOT/tools/s4/run.sh" relay > "$WORK/logs/relay-up.log" 2>&1 \
     || { tail -30 "$WORK/logs/relay-up.log"; row FAIL S1 "relay replica" "did not start"; return 1; }
-  row PASS S1 "relay and Traefik replica (tools/s4/run.sh relay)" "$(tail -1 "$WORK/logs/relay-up.log")"
-  sudo CI=true "$ROOT/tools/test-jobs/node-setup.sh" "$ROOT" "$WORK/chisel" "$S4W/certs/ca.crt" "$S4W/env/compute.env" "$WORK/out/host" \
+  row PASS S1 "relay and Traefik replica in pairing mode, no static compute client (tools/s4/run.sh relay, S4_PAIRING_E2E=1)" "$(tail -1 "$WORK/logs/relay-up.log")"
+  sudo CI=true "$ROOT/tools/test-jobs/node-setup.sh" "$ROOT" "$WORK/chisel" "$S4W/certs/ca.crt" - "$WORK/out/host" \
     > "$WORK/logs/node-setup.log" 2>&1 || { tail -60 "$WORK/logs/node-setup.log"; row FAIL S2 "node set-up" "failed"; return 1; }
   sudo chown -R "$(id -u)" "$WORK/out/host"
   MU_UID="$(id -u mu)"   # the user exists only now
-  row PASS S2 "node set-up by the host script: mu-wsl2-distro.sh install --no-wsl, tunnel credential on stdin, install twice more" \
+  row PASS S2 "node set-up by the host script: mu-wsl2-distro.sh install --no-wsl, no relay credential, install twice more" \
     "changes per run: $(for n in 1 2 3; do sed -n 's/^changed=//p' "$WORK/out/host/install-$n.result"; done | tr '\n' ' ')(run 3 must be 0); uid of mu $MU_UID"
-  local fp pw out hk
-  fp="$(sed -n 's/^RELAY_FINGERPRINT=//p' "$S4W/env/workstation.env")"; pw="$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/workstation.env")"
-  hk="$(sudo mu-wsl2-distro host-key --json)"; echo "$hk" > "$WORK/out/host-key.json"
-  out="$(printf '%s\n' "$pw" | sudo -u ws -H "$WSH/bin/mu" compute add office-pc --host-key "$(printf '%s' "$hk" | jget public_key)" \
-    --relay https://relay.martand.systems --relay-fingerprint "$fp" --relay-user avi-mac --relay-port 7001 --relay-password-stdin --json 2>&1)"
-  echo "$out" > "$WORK/out/compute-add.json"
-  [ "$(printf '%s' "$out" | jget ok)" = true ] || { row FAIL S3 "mu compute add" "$out"; return 1; }
-  authorize
-  row PASS S3 "mu compute add with mu-wsl2-distro host-key's key, then mu-wsl2-distro authorize" "$(printf '%s' "$out" | jget key_fingerprint)"
   newproj "$WCWD" v2026.11.6
+  admin_header
+  # the pairing replaces the manual steps (compute add, tunnel credential, authorize): docs/design/pairing.md §13.4
+  local out
+  out="$("$ROOT/relay/gen-credentials.sh" --env "$S4W/cred/main.env" login-bundle avi-mac 2>/dev/null | ws relay login --stdin --json 2>&1)"
+  echo "$out" > "$WORK/out/relay-login.json"
+  [ "$(printf '%s' "$out" | jget ok)" = true ] || { row FAIL S3 "mu relay login --stdin (the replica's login-bundle)" "$out"; return 1; }
+  scan_start
+  if ! pair_office; then scan_stop; row FAIL S3 "pairing by one code" "$PAIR_M"; return 1; fi
+  scan_stop
+  pinned_json
+  row PASS S3 "pairing by one code: relay login, invite --no-wait (ws), mu-wsl2-distro pair run with the code on stdin (root), invite --wait (ws)" "$PAIR_M"
   if ! wait_up 60; then
     { sudo ls -la "$WSH/compute/office-pc"; sudo cat /etc/mu/authorized_keys/mu; wssh -vv mu-office-pc hello protocol=1 < /dev/null; } \
       > "$WORK/logs/s4-debug.log" 2>&1; tail -40 "$WORK/logs/s4-debug.log"
@@ -129,6 +131,77 @@ setup() {
   fi
   row PASS S4 "first hello through the relay" "$(ws compute status office-pc --json | jget rtt_s) s"
 }
+
+# ================================================================================================== pairing helpers
+RURL=https://relay.martand.systems
+CODES=""   # every code of this run (single use, worthless once used): searched for in argv scans and logs
+admin_header() {   # the replica's admin token as a curl header file (curl -H @file: never an argument)
+  ( umask 077; printf 'Authorization: Bearer %s\n' "$(sed -n 's/^RELAY_ADMIN_TOKEN=//p' "$S4W/env/admin.env")" > "$WORK/admin.hdr" )
+}
+adm() {   # adm METHOD PATH: the relay's admin API, JSON on stdout
+  curl -sS -m 40 --cacert "$S4W/certs/ca.crt" -X "$1" -H @"$WORK/admin.hdr" "$RURL$2"
+}
+rfault() {   # rfault NAMES: the relay's faults (mu-relayd -tags faults, from-file), switched while it runs
+  docker exec "$(relay_ctr)" sh -c 'printf "%s\n" "$1" > /var/lib/mu-relay/test-fault' sh "${*:-}" ; sleep 1.5
+}
+noderun() {   # noderun ACTION [ARGS]: mu-wsl2-distro pair ACTION as root, the code on stdin; $PF the node's MU_PAIR_FAULT
+  sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@"
+}
+PF=""; PCW=""
+invite_new() {   # invite_new NODE [OPTS]: sets INV (the id) and CODE; the invite's JSON is kept without the code
+  local j
+  j="$(ws compute invite "$@" --no-wait --json --show-code stdout 2> "$WORK/logs/invite-$1.err")"
+  INV="$(printf '%s' "$j" | jget invite)"; CODE="$(printf '%s' "$j" | jget code)"; CODES="$CODES $CODE"
+  printf '%s' "$j" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); d.pop("code", None); print(json.dumps(d))' > "$WORK/out/invite-$1-$INV.json"
+  [ -n "$INV" ] && [ -n "$CODE" ]
+}
+mac_wait() { ws compute invite --wait "$1" --json --timeout "${2:-300}" 2> "$WORK/logs/mac-wait-$1.err"; }
+# pair_office [OPTS]: the whole pairing of office-pc (OPTS: --replace). The PC's run starts first; the Mac waits along
+# (or, with MAC_LATER=1, only after the PC has finished). PAIR_M: what both said. 0 when both said paired
+MAC_LATER=0
+pair_office() {
+  local pcrc mrc mac pc pid
+  invite_new office-pc "$@" || { PAIR_M="invite: $(cat "$WORK/logs/invite-office-pc.err" | tail -3)"; return 1; }
+  ( printf '%s\n' "$CODE" | noderun run --json > "$WORK/out/pc-$INV.json" 2> "$WORK/logs/pc-$INV.log"; echo $? > "$WORK/out/pc-$INV.rc" ) &
+  pid=$!
+  if [ "$MAC_LATER" = 1 ]; then wait "$pid"; fi
+  mac="$(mac_wait "$INV")"; mrc=$?; echo "$mac" > "$WORK/out/mac-$INV.json"
+  wait "$pid" 2> /dev/null; pcrc="$(cat "$WORK/out/pc-$INV.rc")"; pc="$(tail -n 1 "$WORK/out/pc-$INV.json")"
+  PAIR_M="invite $INV; Mac: exit $mrc $(printf '%s' "$mac" | jget state)$(printf '%s' "$mac" | jget error) host key $(printf '%s' "$mac" | jget host_key_fingerprint); PC: exit $pcrc, confirmed $(printf '%s' "$pc" | jget confirmed)$(printf '%s' "$pc" | jget error); PC said: $(grep -E 'paired|confirm|accepted' "$WORK/logs/pc-$INV.log" | tail -2 | tr '\n' ' ')"
+  [ "$mrc" = 0 ] && [ "$pcrc" = 0 ]
+}
+pinned_json() {   # what h_keys compares: this computer's key and the host key it pinned
+  local d="$WSH/compute/office-pc"
+  sudo python3 -c 'import base64,hashlib,json,sys
+pub=open(sys.argv[1]).read().split()
+fp=lambda b64: "SHA256:" + base64.b64encode(hashlib.sha256(base64.b64decode(b64)).digest()).decode().rstrip("=")
+kh=open(sys.argv[2]).read().split()
+print(json.dumps({"ok": True, "key_fingerprint": fp(pub[1]), "host_key_fingerprint": fp(kh[2])}))' "$d/id_ed25519.pub" "$d/known_hosts" > "$WORK/out/compute-add.json"
+}
+scan_start() {   # every process's argument list, sampled every 0.2 s until scan_stop (root reads them all)
+  touch "$WORK/scan.on"
+  sudo sh -c 'while [ -e "$1" ]; do for f in /proc/[0-9]*/cmdline; do tr "\0" " " < "$f" 2>/dev/null; echo; done; sleep 0.2; done | sort -u >> "$2"' sh "$WORK/scan.on" "$WORK/scan.txt" &
+  SCANPID=$!
+}
+scan_stop() { rm -f "$WORK/scan.on"; wait "$SCANPID" 2> /dev/null; sudo chown "$(id -u)" "$WORK/scan.txt" 2> /dev/null; }
+snap_node() {   # the node's pairing state before a row that may change it (root copies, kept out of the artifact)
+  sudo cp -p /etc/mu/tunnel.env "$WORK/snap.env"; sudo cp -p /etc/mu/authorized_keys/mu "$WORK/snap.keys"
+}
+node_unchanged() { sudo cmp -s /etc/mu/tunnel.env "$WORK/snap.env" && sudo cmp -s /etc/mu/authorized_keys/mu "$WORK/snap.keys"; }
+restore_node() {   # put the snapshot back: the credential (through tunnel credential), the keys, no half-done pairing
+  sudo mu-wsl2-distro pair abort --json > /dev/null 2>&1 || true
+  sudo cp -p "$WORK/snap.keys" /etc/mu/authorized_keys/mu
+  sudo sh -c 'mu-wsl2-distro tunnel credential --wait 30 < "$1"' sh "$WORK/snap.env" > /dev/null 2>&1 || true
+  local n; for n in $(ws compute list --json 2>/dev/null | python3 -c 'import json,sys; print(" ".join(x["node"] for x in json.load(sys.stdin)["nodes"] if x["node"] != "office-pc"))' 2>/dev/null); do
+    ws compute remove "$n" --json > /dev/null 2>&1 || true
+  done
+  for n in $(adm GET /mu/v1/clients | python3 -c 'import json,sys; print(" ".join(c["name"] for c in json.load(sys.stdin)["clients"] if c["role"] == "compute" and c["name"] != "office-pc"))' 2>/dev/null); do
+    adm DELETE "/mu/v1/clients/$n" > /dev/null
+  done
+  close_master; wait_up 90 > /dev/null
+}
+inv_field() { adm GET "/mu/v1/invites/$1" | jget "invite.$2"; }
+
 PUB() { sudo cat "$WSH/compute/office-pc/id_ed25519.pub" | cut -d' ' -f1,2; }
 authorize() { sudo mu-wsl2-distro authorize avi-mac "$(sudo cat "$WSH/compute/office-pc/id_ed25519.pub")" > /dev/null; }   # the host script's own command
 revoke() { sudo mu-wsl2-distro revoke avi-mac > /dev/null; }
@@ -729,6 +802,7 @@ host_faults() {
 # last: uninstall, then install again. The node's host key must survive, so the workstation's pin still holds
 h_uninstall() {
   local fp0 fp1 left="" kept="" f u
+  sudo cp -p /etc/mu/tunnel.env "$WORK/paired.env"   # the credential the pairing wrote, for H7 (the manual path)
   fp0="$(sudo ssh-keygen -lf /etc/mu/ssh_host_ed25519_key.pub | awk '{ print $2 }')"
   sudo mu-wsl2-distro uninstall > "$WORK/out/host/uninstall.log" 2>&1 || { M="uninstall failed: $(tail -n 5 "$WORK/out/host/uninstall.log" | tr '\n' ' ')"; return 1; }
   for f in /etc/systemd/system/mu-sshd.service /etc/systemd/system/mu-tunnel.service /etc/mu/sshd_config /etc/mu/tunnel.env \
@@ -750,7 +824,8 @@ h_reinstall() {
   local c rc=0
   sudo mu-wsl2-distro install --no-wsl > "$WORK/out/host/reinstall-1.log" 2>&1 || rc=$?
   [ "$rc" = 0 ] || { M="install after uninstall: exit $rc"; return 1; }
-  sudo mu-wsl2-distro tunnel credential --wait 60 < "$S4W/env/compute.env" > "$WORK/out/host/reinstall-credential.log" 2>&1 || { M="tunnel credential: $(tail -n 2 "$WORK/out/host/reinstall-credential.log" | tr '\n' ' ')"; return 1; }
+  # the manual fallback (first-job-checklist.md, appendix): the credential on stdin (the one the pairing made), authorize
+  sudo sh -c 'mu-wsl2-distro tunnel credential --wait 60 < "$1"' sh "$WORK/paired.env" > "$WORK/out/host/reinstall-credential.log" 2>&1 || { M="tunnel credential: $(tail -n 2 "$WORK/out/host/reinstall-credential.log" | tr '\n' ' ')"; return 1; }
   authorize
   close_master
   if ! wait_up 90; then M="the workstation (its pin unchanged since S3) does not reach the reinstalled node: $(ws compute status office-pc --json 2>&1 | tail -n 1)"; return 1; fi
@@ -764,9 +839,152 @@ host_cycle() {
   run_row H7 "install again, credential, authorize: the workstation's old pin still holds; then install changes nothing" h_reinstall
 }
 
+# ================================================================================================== pairing (Q rows)
+# docs/design/pairing.md §13.4. The node is the one paired in S3; a row that pairs it again (or, with its fault, would)
+# puts it back afterwards (snap_node / restore_node). Faults: the node's MU_PAIR_FAULT ($PF), the Mac's ($WSF, pair.py
+# reads MU_PAIR_FAULT: set through WSPF), the relay's (rfault: mu-relayd built with -tags faults, from-file).
+WSPF=""
+wsp() { sudo -u ws -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_PAIR_FAULT="$WSPF" sh -c 'cd "$0" && exec "$@"' "$WCWD" "$WSH/bin/mu" "$@"; }
+q_paired() {
+  local c k st a
+  c="$(adm GET /mu/v1/clients/office-pc)"; k="$(sudo mu-wsl2-distro keys --json)"; st="$(hstatus)"; a="$(ws compute status office-pc --json)"
+  M="relay client office-pc: $(printf '%s' "$c" | jget client.source) $(printf '%s' "$c" | jget client.via), ports $(printf '%s' "$c" | jget client.ports); node keys: $(printf '%s' "$k" | python3 -c 'import json,sys; print(" ".join(x["name"] for x in json.load(sys.stdin)["keys"]))'); ready $(printf '%s' "$st" | jget ready); hello ok $(printf '%s' "$a" | jget ok); owners $(sudo cat /etc/mu/owners 2>/dev/null)"
+  [ "$(printf '%s' "$c" | jget client.source)" = dynamic ] && case "$(printf '%s' "$c" | jget client.via)" in "invite "*) true ;; *) false ;; esac \
+    && [ "$(printf '%s' "$st" | jget ready)" = true ] && [ "$(printf '%s' "$a" | jget ok)" = true ] \
+    && [ "$(sudo mu-wsl2-distro keys --json | python3 -c 'import json,sys; print(" ".join(x["name"] + " " + x["fingerprint"] for x in json.load(sys.stdin)["keys"]))')" = "avi-mac $(jget key_fingerprint < "$WORK/out/compute-add.json")" ] \
+    && [ "$(sudo cat /etc/mu/owners 2>/dev/null)" = avi-mac ]
+}
+q_typo() {
+  local t out rc
+  invite_new q2-pc || { M="invite failed"; return 1; }
+  t="$(printf '%s' "$CODE" | python3 -c 'import sys; c=sys.stdin.read().strip(); i=6; print(c[:i] + ("X" if c[i] != "X" else "Y") + c[i+1:])')"
+  out="$(printf '%s\n' "$t" | noderun claim --json 2>/dev/null)"; rc=$?
+  M="exit $rc $(printf '%s' "$out" | jget error); the relay: state $(inv_field "$INV" state), wrong claims $(inv_field "$INV" wrong_claims)"
+  ws compute invite --cancel "$INV" --json > /dev/null 2>&1
+  [ "$rc" = 2 ] && [ "$(printf '%s' "$out" | jget error)" = code-typo ] && [ "$(inv_field "$INV" wrong_claims)" = 0 ]
+}
+q_wrong() {
+  local w out rc
+  invite_new q3-pc || { M="invite failed"; return 1; }
+  w="$(printf '%s' "$CODE" | python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import pair
+i, s = pair.parse_code(sys.stdin.read()); print(pair.format_code(i, ("1" if s[0] != "1" else "2") + s[1:]))' "$ROOT/src")"
+  snap_node
+  out="$(printf '%s\n' "$w" | noderun claim --json 2>/dev/null)"; rc=$?
+  M="exit $rc $(printf '%s' "$out" | jget error); the relay: state $(inv_field "$INV" state), wrong claims $(inv_field "$INV" wrong_claims); node unchanged: $(node_unchanged && echo yes || echo no)"
+  sudo mu-wsl2-distro pair abort --json > /dev/null 2>&1; ws compute invite --cancel "$INV" --json > /dev/null 2>&1
+  [ "$rc" = 5 ] && [ "$(printf '%s' "$out" | jget error)" = wrong-code ] && [ "$(inv_field "$INV" wrong_claims)" = 1 ] && node_unchanged
+}
+q_expired() {
+  local out rc mac mrc
+  invite_new q4-pc --ttl 1m || { M="invite failed"; return 1; }
+  snap_node; sleep 65
+  out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
+  mac="$(mac_wait "$INV" 10)"; mrc=$?
+  M="the PC: exit $rc $(printf '%s' "$out" | jget error); the Mac: exit $mrc $(printf '%s' "$mac" | jget error); node unchanged: $(node_unchanged && echo yes || echo no)"
+  [ "$rc" = 9 ] && [ "$(printf '%s' "$out" | jget error)" = invite-expired ] && [ "$mrc" = 9 ] && node_unchanged
+}
+# q_tampered WHAT: the relay changes the offer (WHAT: its fault); the PC must refuse, set nothing up, abort the invite
+q_tampered() {
+  local out rc
+  invite_new "q-$1" || { M="invite failed"; return 1; }
+  snap_node; rfault "$1"
+  out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
+  rfault
+  M="relay fault $1: the PC exit $rc $(printf '%s' "$out" | jget error); node unchanged: $(node_unchanged && echo yes || echo no); invite $(inv_field "$INV" state), relay client q-$1: $(adm GET "/mu/v1/clients/q-$1" | jget error)"
+  [ "$rc" = 5 ] && [ "$(printf '%s' "$out" | jget error)" = pair-integrity ] && node_unchanged && [ "$(inv_field "$INV" state)" = aborted ] \
+    && [ "$(adm GET "/mu/v1/clients/q-$1" | jget error)" = no-such-client ]
+}
+q_offer_key() { q_tampered tamper-offer; }
+q_offer_fp() { q_tampered tamper-offer-fp; }
+q_offer_url() { q_tampered tamper-offer-url; }
+q_answer_key() {
+  local out mac mrc pcrc pid
+  invite_new q9-pc || { M="invite failed"; return 1; }
+  snap_node; rfault tamper-answer
+  ( printf '%s\n' "$CODE" | PCW=40 noderun run --json > "$WORK/out/pc-$INV.json" 2> "$WORK/logs/pc-$INV.log"; echo $? > "$WORK/out/pc-$INV.rc" ) &
+  pid=$!
+  mac="$(sudo -u ws -H env MU_PAIR_FAULT="$WSPF" MU_PAIR_HELLO_S=20 sh -c 'cd "$0" && exec "$@"' "$WCWD" "$WSH/bin/mu" compute invite --wait "$INV" --json --timeout 120 2>/dev/null)"; mrc=$?
+  rfault; wait "$pid"; pcrc="$(cat "$WORK/out/pc-$INV.rc")"
+  M="relay fault tamper-answer: the Mac exit $mrc $(printf '%s' "$mac" | jget error); its folder q9-pc: $(sudo test -d "$WSH/compute/q9-pc" && echo present || echo none); relay client: $(adm GET /mu/v1/clients/q9-pc | jget error); the PC exit $pcrc $(tail -n 1 "$WORK/out/pc-$INV.json" | jget error); node as before: $(node_unchanged && echo yes || echo no)"
+  [ "$mrc" = 5 ] && [ "$(printf '%s' "$mac" | jget error)" = pair-integrity ] && ! sudo test -d "$WSH/compute/q9-pc" \
+    && [ "$(adm GET /mu/v1/clients/q9-pc | jget error)" = no-such-client ] && [ "$pcrc" = 5 ] && node_unchanged
+}
+q_reused() {
+  local first out rc
+  first="${CODES# }"; first="${first%% *}"   # S3's code: this PC finished that invite
+  out="$(printf '%s\n' "$first" | noderun run --json 2>/dev/null)"; rc=$?
+  close_master
+  M="the S3 code again at the paired PC: exit $rc $(printf '%s' "$out" | jget error); relay client office-pc: $(adm GET /mu/v1/clients/office-pc | jget client.source); hello: $(ws compute status office-pc --json 2>/dev/null | jget ok)"
+  [ "$rc" = 5 ] && [ "$(printf '%s' "$out" | jget error)" = already-paired ] && [ "$(adm GET /mu/v1/clients/office-pc | jget client.source)" = dynamic ] \
+    && wait_up 30
+}
+q_noconfirm() {
+  local pcj
+  MAC_LATER=1 PCW=15 pair_office --replace; local r=$?
+  pcj="$(tail -n 1 "$WORK/out/pc-$INV.json")"
+  M="$PAIR_M"
+  [ "$r" = 0 ] && [ "$(printf '%s' "$pcj" | jget confirmed)" = false ] && grep -q 'not yet confirmed' "$WORK/logs/pc-$INV.log" && wait_up 60 && pinned_json
+}
+qf_rollback_on() { snap_node; PF=rollback-on-no-confirm; }
+qf_rollback_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
+q_secrets() {
+  local pw wpw tok hits="" s logs
+  pw="$(sudo sed -n 's/^AUTH=[^:]*://p' /etc/mu/tunnel.env)"; wpw="$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/workstation.env")"
+  tok="$(sed -n 's/^RELAY_ADMIN_TOKEN=//p' "$S4W/env/admin.env")"
+  docker logs "$(relay_ctr)" > "$WORK/relay-now.log" 2>&1; sudo journalctl --no-pager > "$WORK/journal-now.log" 2>&1; sudo chown "$(id -u)" "$WORK/journal-now.log"
+  logs="$(find "$WORK/logs" "$WORK/out" -type f) $WORK/relay-now.log $WORK/journal-now.log"
+  for s in $CODES "$pw" "$wpw" "$tok"; do
+    [ -n "$s" ] || continue
+    grep -qF -- "$s" "$WORK/scan.txt" && hits="$hits argv:${s:0:4}…"
+    grep -qF -- "$s" $logs 2>/dev/null && hits="$hits log:${s:0:4}… ($(grep -lF -- "$s" $logs 2>/dev/null | head -2 | xargs -n1 basename | tr '\n' ' '))"
+    s2="$(printf '%s' "$s" | tr -d '-')"; [ "$s2" = "$s" ] || { grep -qF -- "$s2" "$WORK/scan.txt" $logs 2>/dev/null && hits="$hits raw:${s:0:4}…"; }
+  done
+  rm -f "$WORK/relay-now.log" "$WORK/journal-now.log"
+  M="$(printf '%s' "$CODES" | wc -w | tr -d ' ') codes, the node's and the workstation's relay passwords, the admin token; $(wc -l < "$WORK/scan.txt" | tr -d ' ') distinct argument lists sampled during the pairings; found:${hits:- nothing}"
+  [ -z "$hits" ]
+}
+qf_argv_on() { PF=code-in-argv; scan_start; pair_office --replace > /dev/null; scan_stop; PF=""; }
+qf_argv_off() { :; }
+q_remove() {   # last: the Mac forgets the node and deletes its relay client (admin token held); the node's tunnel is refused
+  local out rc t
+  out="$(ws compute remove office-pc --json 2>&1)"; rc=$?
+  for t in $(seq 1 30); do [ "$(sudo mu-wsl2-distro tunnel status --json | jget reason)" = relay-credential ] && break; sleep 1; done
+  M="exit $rc, relay client: $(printf '%s' "$out" | jget relay_client) ($(printf '%s' "$out" | jget relay_detail)); the relay now: $(adm GET /mu/v1/clients/office-pc | jget error); the node's tunnel: $(sudo mu-wsl2-distro tunnel status --json | jget reason) after ${t} s"
+  [ "$rc" = 0 ] && [ "$(printf '%s' "$out" | jget relay_client)" = removed ] && [ "$(adm GET /mu/v1/clients/office-pc | jget error)" = no-such-client ] \
+    && [ "$(sudo mu-wsl2-distro tunnel status --json | jget reason)" = relay-credential ]
+}
+pair_rows() {
+  run_row Q1 "paired by one code: a dynamic relay client made by the invite, the Mac's key the only one on the node, /etc/mu/owners, ready for jobs" q_paired
+  run_row Q2 "a typo in the code: exit 2 code-typo at the node, the relay saw no claim" q_typo
+  run_row Q3 "a valid-looking code with a wrong secret: exit 5 wrong-code, counted once by the relay, nothing set up" q_wrong
+  run_row Q4 "an expired code (TTL 1 min): exit 9 at the node and at the Mac, nothing set up" q_expired
+  run_row Q5 "the relay substitutes the workstation key in the offer: the node refuses (exit 5), sets nothing up, aborts" q_offer_key
+  run_row Q6 "the relay serves another relay fingerprint in the offer: the node refuses, sets nothing up" q_offer_fp
+  run_row Q7 "the relay serves another relay URL in the offer: the node refuses, sets nothing up" q_offer_url
+  run_row Q9 "the relay substitutes the node's host key in the answer: the Mac refuses (exit 5), pins nothing, the client is removed; the node undoes its side" q_answer_key
+  run_row Q10 "the used code again at the paired node: exit 5 already-paired, no contest, the pairing stands" q_reused
+  run_row Q11 "--replace, the Mac's confirm missing: the node exits 0 'not yet confirmed' and undoes nothing; the Mac completes later with --wait" q_noconfirm
+  run_row Q12 "no code, relay password or admin token in any sampled argument list, log, journal or the relay's log" q_secrets
+}
+pair_faults() {
+  must_fail Q2 "no-check (the node)" 'eval PF=no-check' 'eval PF=""' q_typo
+  must_fail Q3 "any-claim (the relay)" 'rfault any-claim' qf_restore q_wrong
+  must_fail Q4 "no-expiry (the relay)" 'rfault no-expiry' qf_restore q_expired
+  must_fail Q5 "skip-offer-mac (the node)" 'eval PF=skip-offer-mac' qf_restore q_offer_key
+  must_fail Q6 "skip-offer-mac (the node)" 'eval PF=skip-offer-mac' qf_restore q_offer_fp
+  must_fail Q7 "skip-offer-mac,trust-relay-fields (the node)" 'eval PF=skip-offer-mac,trust-relay-fields' qf_restore q_offer_url
+  must_fail Q9 "skip-answer-mac (the Mac)" 'eval WSPF=skip-answer-mac' qf_restore_ws q_answer_key
+  must_fail Q10 "forget-done (the node)" 'eval PF=forget-done' qf_reused_off q_reused
+  must_fail Q11 "rollback-on-no-confirm (the node)" qf_rollback_on qf_rollback_off q_noconfirm
+  must_fail Q12 "code-in-argv (the node)" qf_argv_on qf_argv_off q_secrets
+}
+qf_restore() { PF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
+qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
+qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
+
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12"
 check_ran() {
   local want got
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"
@@ -805,7 +1023,8 @@ summary() {
 
 case "$MODE" in
   probe) setup && probe ;;
-  all) if setup; then probe; host_rows; rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; }; host_cycle
+  all) if setup; then probe; host_rows; rows; pair_rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; pair_faults; }; host_cycle
+         run_row Q13 "mu compute remove: the Mac forgets the node and deletes its relay client; the node's tunnel is refused" q_remove
          [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran; fi ;;
   *) echo "usage: e2e.sh probe|all" >&2; exit 2 ;;
 esac

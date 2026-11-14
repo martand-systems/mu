@@ -1,5 +1,8 @@
 # Dokploy writes the service's environment (the relay key and the client passwords) to relay/.env, inside this
-# build context. Keep it, and everything the image does not need, out of the context.
+# build context. Keep it, and everything the image does not need, out of the context. The Go tests are in the
+# context but not in the binary (go build skips _test.go); CI runs them.
 *
 !Dockerfile
 !entrypoint.sh
+!control/go.mod
+!control/*.go

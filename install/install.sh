@@ -33,7 +33,7 @@ set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
 FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
                               # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
-DISPATCHER_REV=8              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=9              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in

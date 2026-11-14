@@ -12,6 +12,13 @@
                -RemoveDistro is given and confirmed.
     test-stop  stop WSL the way the shutdown hook does (as SYSTEM), start the distro again through the startup task
                and show its status: the clean-stop test without restarting Windows. Stops every running WSL distro.
+    pair       pair this node with a Mac by one code (docs/design/pairing.md 9.2): install -NoRestart, ask for the
+               code (not echoed, never an argument), the clean restart when the settings need it, then the node's
+               side of the pairing (the relay credential, the Mac's key, the host key sent back), the status, and
+               one line: "paired with <Mac> | ready for jobs: yes". Run it from Terminal (Admin):
+                 powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
+               Started from the release folder (a \\wsl.localhost path) it first copies itself to <MuRoot>\stage\<version>
+               (administrators and SYSTEM only) and runs that copy. -Relay URL names another relay.
 
   Run it from PowerShell. It asks for administrator rights when an action needs them (status does not):
     powershell -NoProfile -ExecutionPolicy Bypass -File .\mu-wsl2-host.ps1 install
@@ -42,9 +49,9 @@
 #>
 [CmdletBinding()]
 param(
-  # install | status | uninstall | test-stop
+  # install | status | uninstall | test-stop | pair
   [Parameter(Position = 0)]
-  [ValidateSet('install', 'status', 'uninstall', 'test-stop')]
+  [ValidateSet('install', 'status', 'uninstall', 'test-stop', 'pair')]
   [string]$Action = 'install',
   # the WSL distro's name
   [string]$Distro = 'mu-compute',
@@ -87,8 +94,12 @@ param(
   [switch]$Offline,
   # mu's folder on Windows (default <system drive>\Mu)
   [string]$MuRoot = '',
+  # pair: the relay (its pairing service)
+  [string]$Relay = 'https://relay.martand.systems',
   # internal: set when the script restarted itself elevated
-  [switch]$Elevated
+  [switch]$Elevated,
+  # internal: pair runs from its staged copy
+  [switch]$Staged
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,6 +115,12 @@ $script:DistroScriptName = 'mu-wsl2-distro.sh'
 $script:DistroScriptTarget = '/usr/local/sbin/mu-wsl2-distro'
 $script:GateName = 'mu-node-gate'
 $script:GateTarget = '/usr/local/lib/mu/mu-node-gate.in'
+$script:PairPyName = 'mu-pair.py'
+$script:PairPyTarget = '/usr/local/lib/mu/mu-pair.py'
+$script:PairPyPath = ''
+$script:PairPyText = $null
+$script:PairRestartVm = $false
+$script:PairRestartDistro = $false
 $script:Changes = New-Object System.Collections.ArrayList
 $script:Checks = New-Object System.Collections.ArrayList
 $script:State = $null
@@ -1011,8 +1028,11 @@ function Get-DiskAclProblem([string]$Path, [string]$UserSid) {
 # a copy of both scripts in <MuRoot>\host, to run status and uninstall from later
 function Copy-HostScripts {
   $dst = Join-Path $MuRoot 'host'
-  foreach ($f in @($script:SelfPath, $script:DistroScriptPath, $script:GatePath)) {
+  $files = @($script:SelfPath, $script:DistroScriptPath, $script:GatePath)
+  if ($script:PairPyPath) { $files += $script:PairPyPath }
+  foreach ($f in $files) {
     $target = Join-Path $dst (Split-Path $f -Leaf)
+    if ($f -eq $script:PairPyPath) { $target = Join-Path $dst $script:PairPyName }
     if ((Test-Path $target) -and ((Get-FileHash $target).Hash -eq (Get-FileHash $f).Hash)) { continue }
     Copy-Item -Force -Path $f -Destination $target
     Write-Changed "$target (a copy for status and uninstall)"
@@ -1113,6 +1133,7 @@ function Invoke-DistroSetup {
   $t = $script:DistroScriptTarget
   Copy-IntoDistro $script:DistroScriptText $t '755'
   Copy-IntoDistro $script:GateText $script:GateTarget '644'
+  if ($null -ne $script:PairPyText) { Copy-IntoDistro $script:PairPyText $script:PairPyTarget '644' }
   $a = @('-d', $Distro, '-u', 'root', '--exec', $t, 'install', '--user', $User, '--repo', $Repo, '--from-host')
   # the drive that holds the distro's disk: the distro records it for mu's disk check, which cannot ask Windows once
   # interop is off (docs/design/job-layer.md 13.4)
@@ -1256,6 +1277,8 @@ function Invoke-Install {
   $script:GatePath = Join-Path $PSScriptRoot $script:GateName
   if (-not (Test-Path $script:GatePath)) { throw "$($script:GateName) is missing next to this script ($PSScriptRoot): copy the whole install\hosts\wsl2 folder" }
   $script:GateText = [IO.File]::ReadAllText($script:GatePath) -replace "`r`n", "`n"
+  $script:PairPyPath = Find-PairPy
+  if ($script:PairPyPath) { $script:PairPyText = [IO.File]::ReadAllText($script:PairPyPath) -replace "`r`n", "`n" }
   Write-Host "mu WSL2 host: install on $env:COMPUTERNAME for $($script:Me.Name)"
   Write-Host "  distro $Distro ($Location), user $User; WSL VM: $($script:Mem) GB of $($script:TotalGB) GB, $($script:Cpus) processors, $($script:Swap) GB swap"
   $console = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -1301,6 +1324,7 @@ function Invoke-Install {
   Write-Step 'Start'
   $restartVm = $wslconfigChanged
   $restartDistro = ($res.restart -eq '1') -or $newDistro
+  $script:PairRestartVm = [bool]$restartVm; $script:PairRestartDistro = [bool]$restartDistro
   if ($NoRestart -and ($restartVm -or $restartDistro)) {
     Write-Note "not restarting (-NoRestart): apply the changes with a clean stop and start: $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') test-stop"
   } elseif ($restartVm) {
@@ -1578,7 +1602,7 @@ function Invoke-Uninstall {
       Write-Changed "$Distro deleted"
     } else { Write-Host '  not deleted' }
   } else {
-    $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', "if [ -x $($script:DistroScriptTarget) ]; then $($script:DistroScriptTarget) uninstall --user $User && rm -f $($script:DistroScriptTarget) $($script:GateTarget) && { rmdir /usr/local/lib/mu 2>/dev/null || true; }; fi")
+    $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', "if [ -x $($script:DistroScriptTarget) ]; then $($script:DistroScriptTarget) uninstall --user $User && rm -f $($script:DistroScriptTarget) $($script:GateTarget) $($script:PairPyTarget) && { rmdir /usr/local/lib/mu 2>/dev/null || true; }; fi")
     if ($r.ExitCode -ne 0) { Write-Note "the Linux side did not uninstall cleanly (exit $($r.ExitCode))" }
     Write-Host "  kept: the distro $Distro and its user $User, with their files (uninstall -RemoveDistro deletes it)"
   }
@@ -1595,12 +1619,12 @@ function Invoke-Uninstall {
   return 0
 }
 
-function Invoke-TestStop {
+# Stop-WslAsSystem: stops WSL the way the shutdown hook does (mu-wsl-shutdown.exe --stop-wsl as SYSTEM, through a
+# one-off scheduled task). Returns the task's result (0: stopped cleanly)
+function Stop-WslAsSystem {
   $exe = Join-Path (Join-Path $MuRoot 'bin') 'mu-wsl-shutdown.exe'
   if (-not (Test-Path $exe)) { throw "the shutdown hook is not installed ($exe): run install first" }
   $name = 'mu-wsl-stop-test'
-  Write-Host 'mu WSL2 host: test-stop. This stops WSL as SYSTEM, the way the shutdown hook does at a restart.'
-  Write-Note 'every running WSL distro of every user stops now'
   $action = New-ScheduledTaskAction -Execute $exe -Argument '--stop-wsl'
   $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -1620,13 +1644,160 @@ function Invoke-TestStop {
   }
   $log = Join-Path (Join-Path $MuRoot 'logs') 'mu-wsl-shutdown.log'
   if (Test-Path $log) { Get-Content -Path $log -Tail 4 | ForEach-Object { Write-Host "    $_" } }
+  return [int]$info.LastTaskResult
+}
+
+function Invoke-TestStop {
+  Write-Host 'mu WSL2 host: test-stop. This stops WSL as SYSTEM, the way the shutdown hook does at a restart.'
+  Write-Note 'every running WSL distro of every user stops now'
+  $result = Stop-WslAsSystem
   Write-Host "  starting $Distro again through the startup task"
   if (-not (Start-DistroViaTask)) { throw "$Distro was not started again through the startup task (see the note above)" }
   Write-Host ''
   Write-Host "Inside $Distro (expect last-stop: a clean stop, and no NUL bytes in the heartbeat log):"
   $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $script:DistroScriptTarget, 'status', '--offline', '--user', $User)
-  if ([int]$info.LastTaskResult -ne 0) { return 1 }
+  if ($result -ne 0) { return 1 }
   return $r.ExitCode
+}
+
+# ============================================================================ pair (docs/design/pairing.md 9.1, 9.2)
+# Find-PairPy: the pairing client next to this script (a staged or C:\Mu\host copy), or src\mu\pair.py of the release
+function Find-PairPy {
+  $a = Join-Path $PSScriptRoot $script:PairPyName
+  if (Test-Path -LiteralPath $a) { return $a }
+  $b = Join-Path (Join-Path (Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent) 'src') 'mu') 'pair.py'
+  if (Test-Path -LiteralPath $b) { return $b }
+  return ''
+}
+
+# Get-StageVersion PATH: the release in a ...\toolchains\<version>\recipe\... path, else 'local'
+function Get-StageVersion([string]$Path) {
+  if ($Path -match '\\toolchains\\(v[0-9]+\.[0-9]+\.[0-9]+)\\') { return $Matches[1] }
+  return 'local'
+}
+
+# Test-RelayUrl URL: https://HOST[:PORT], nothing else
+function Test-RelayUrl([string]$Url) { return ($Url -match '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$') }
+
+# ConvertTo-CodeBytes SECURESTRING: the code as UTF-8 bytes with one LF (the BSTR is zeroed after)
+function ConvertTo-CodeBytes([System.Security.SecureString]$Secure) {
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+  try { $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+  finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+  $bytes = $script:Utf8.GetBytes($plain + "`n")
+  $plain = $null
+  return ,$bytes
+}
+
+# Invoke-PairStage: started from the release folder (\\wsl.localhost\...): copy this script, the distro script, the gate
+# and the pairing client to <MuRoot>\stage\<version> (Administrators and SYSTEM only: not %TEMP%, which a process of
+# this user could rewrite between the copy and the run) and run that copy here, in this window
+function Invoke-PairStage {
+  $src = $script:SelfPath
+  $dir = Split-Path $src -Parent
+  $jobs = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', 'ls -A /srv/mu/jobs 2>/dev/null | head -n 1') -Capture
+  if ($jobs.Output.Trim()) {
+    throw "jobs have run on this node, so its release folder is not trusted for an administrator: run $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') pair"
+  }
+  $stage = Join-Path (Join-Path $MuRoot 'stage') (Get-StageVersion $src)
+  foreach ($d in @($MuRoot, (Join-Path $MuRoot 'stage'), $stage)) {
+    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
+  }
+  $acl = New-Object System.Security.AccessControl.DirectorySecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @($script:SidSystem, $script:SidAdmins)) {
+    $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+  }
+  Set-Acl -LiteralPath $stage -AclObject $acl
+  Copy-Item -Force -LiteralPath $src -Destination $stage
+  foreach ($n in @($script:DistroScriptName, $script:GateName)) {
+    $sib = Join-Path $dir $n
+    if (-not (Test-Path -LiteralPath $sib)) { throw "$n is missing next to $src" }
+    Copy-Item -Force -LiteralPath $sib -Destination $stage
+  }
+  $py = Find-PairPy
+  if (-not $py) { throw "the pairing client (src\mu\pair.py) is missing from this release: run mu update (the first line)" }
+  Copy-Item -Force -LiteralPath $py -Destination (Join-Path $stage $script:PairPyName)
+  $copy = Join-Path $stage (Split-Path $src -Leaf)
+  $ps = (Get-Process -Id $PID).Path
+  $argv = Get-RelaunchArguments $copy
+  $argv += '-Staged'
+  Write-Host "mu WSL2 host: pair (the scripts copied to $stage)"
+  $p = Start-Process -FilePath $ps -ArgumentList (@($argv | ForEach-Object { ConvertTo-WinArgument $_ }) -join ' ') -NoNewWindow -Wait -PassThru
+  return $p.ExitCode
+}
+
+function Invoke-Pair {
+  if (-not (Test-RelayUrl $Relay)) { throw "-Relay must be https://HOST[:PORT] (it is '$Relay')" }
+  if ($script:SelfPath.StartsWith('\\', [StringComparison]::Ordinal) -and -not $Staged) { return (Invoke-PairStage) }
+  $t = $script:DistroScriptTarget
+  # 1. what a process of the distro can reach of Windows before the change, the first time only (checklist 2.4)
+  $before = Join-Path (Join-Path $MuRoot 'logs') 'windows-reach-before.txt'
+  if (-not (Test-Path -LiteralPath $before) -and (Get-WslDistro $Distro)) {
+    Write-Step "What a process of the distro can reach of Windows now (before the change; saved in $before)"
+    $dtext = [IO.File]::ReadAllText((Join-Path $PSScriptRoot $script:DistroScriptName)) -replace "`r`n", "`n"
+    Copy-IntoDistro $dtext $t '755'
+    $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'windows-reach') -Capture
+    [IO.File]::WriteAllText($before, $r.Output, $script:Utf8)
+    foreach ($l in ($r.Output -split "`n")) { if ($l -match 'FAIL|windows-reach:') { Write-Host "  $l" } }
+  }
+  # 2. the node's setup, without its restart (that comes after the code, below)
+  Write-Step 'Setting up the node (install -NoRestart)'
+  $script:NoRestartSaved = $NoRestart
+  Set-Variable -Name NoRestart -Scope Script -Value ([switch]$true)
+  $rc = [int](@(Invoke-Install))[-1]
+  if ($rc -ne 0) { return $rc }
+  # 3. the code: hidden, never an argument, never in a pipeline; into the distro on the standard input of wsl.exe. It
+  # stays in this process's memory until the finish below (the distro may restart in between), then it is cleared
+  $claim = $null; $code = $null
+  for ($try = 1; $try -le 3; $try++) {
+    Write-Host ''
+    $secure = Read-Host -AsSecureString 'Pairing code (from the Mac)'
+    $bytes = ConvertTo-CodeBytes $secure
+    $claim = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'pair', 'claim', '--json', '--relay', $Relay) -InputBytes $bytes -Capture
+    $j = $null
+    foreach ($l in ($claim.Output -split "`n")) { if ($l.StartsWith('{')) { try { $j = $l | ConvertFrom-Json } catch { } } }
+    if ($claim.ExitCode -eq 0 -and $null -ne $j) {
+      $code = $bytes
+      if ($j.resumed -and -not $j.port) { Write-Host "  resuming invite $($j.invite)" }
+      else { Write-Host "  code accepted: this PC becomes compute node $($j.node) on relay port $($j.port) for $($j.inviter) (key $($j.inviter_key_fingerprint))" }
+      break
+    }
+    [Array]::Clear($bytes, 0, $bytes.Length)
+    if ($null -eq $j) { throw "the node's pairing client gave no answer (exit $($claim.ExitCode)): $($claim.Error)" }
+    Write-Host "  $($j.message)" -ForegroundColor Red
+    if ($j.next) { Write-Host "  next: $($j.next)" }
+    if (-not (($claim.ExitCode -eq 2 -and $j.error -eq 'code-typo') -or ($claim.ExitCode -eq 5 -and $j.error -eq 'wrong-code')) -or $try -eq 3) {
+      return $claim.ExitCode
+    }
+  }
+  try {
+    # 4. the clean restart, when install changed what only a restart applies (interop off, the automount options)
+    if ($script:PairRestartVm -or $script:PairRestartDistro) {
+      Write-Step 'Restarting the distro cleanly to apply the settings (about a minute)'
+      if (Test-Path (Join-Path (Join-Path $MuRoot 'bin') 'mu-wsl-shutdown.exe')) { [void](Stop-WslAsSystem) }
+      else { [void](Invoke-Wsl -Arguments @('--terminate', $Distro)) }
+      Write-Host "  starting $Distro again through the startup task"
+      if (-not (Start-DistroViaTask)) { throw "$Distro was not started again through the startup task: run this line again" }
+    }
+    # 5. the pairing itself: the credential, the key, the answer, the Mac's confirm (its lines, as they happen)
+    Write-Step 'Pairing'
+    $fin = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'pair', 'finish', '--relay', $Relay) -InputBytes $code
+  } finally {
+    [Array]::Clear($code, 0, $code.Length)
+  }
+  # 6. the status, and one line
+  Write-Step 'Status'
+  $st = [int](@(Invoke-Status))[-1]
+  $sj = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'status', '--offline', '--json') -Capture
+  $ready = 'no'
+  try { $o = ($sj.Output.Trim() -split "`n")[-1] | ConvertFrom-Json; if ($o.ready) { $ready = 'yes' } else { $ready = "no ($($o.not_ready))" } } catch { }
+  $who = $j.inviter
+  if ($fin.ExitCode -eq 0) { Write-Host ''; Write-Host "paired with $who | ready for jobs: $ready" -ForegroundColor Green }
+  else { Write-Host ''; Write-Host "not paired (exit $($fin.ExitCode)) | ready for jobs: $ready" -ForegroundColor Red }
+  if ($fin.ExitCode -ne 0) { return $fin.ExitCode }
+  return $st
 }
 
 # ============================================================================ main
@@ -1701,7 +1872,9 @@ try {
   [Environment]::CurrentDirectory = $env:SystemRoot
   try { $prevEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = $script:Utf8 } catch { }   # Linux output is UTF-8
   $script:Me = [Security.Principal.WindowsIdentity]::GetCurrent()
-  if ($Action -ne 'status' -and -not (Test-Admin)) {
+  if ($Action -eq 'pair' -and -not (Test-Admin)) {
+    throw 'pair needs an administrator: open Terminal (Admin) and run the same line there'
+  } elseif ($Action -ne 'status' -and -not (Test-Admin)) {
     $out = @(Invoke-Elevated); $rc = [int]$out[$out.Count - 1]
   } else {
     $script:State = Read-State
@@ -1716,6 +1889,7 @@ try {
       'status' { $out = @(Invoke-Status) }
       'uninstall' { $out = @(Invoke-Uninstall) }
       'test-stop' { $out = @(Invoke-TestStop) }
+      'pair' { $out = @(Invoke-Pair) }
     }
     $rc = 1
     if ($out.Count -gt 0) { $rc = [int]$out[$out.Count - 1] }

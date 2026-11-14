@@ -962,18 +962,52 @@ def cmd_compute_status(a):
     return worst
 
 
+def secret_shared(conf):
+    """Is this node's relay password (one Keychain item per relay host and user) also used by another paired node, or
+    by `mu relay login` (relay/relay.conf)? Then removing the node must not delete it."""
+    acct = relay_account(conf)
+    for n in paired_nodes():
+        if n != conf["name"]:
+            other = read_conf(os.path.join(node_dir(n), "node.conf")) or {}
+            if other.get("secret_store") == "keychain" and other.get("relay_url") and other.get("relay_user") \
+                    and relay_account(other) == acct:
+                return True
+    rc = read_conf(os.path.join(mu_home(), "relay", "relay.conf")) or {}
+    return rc.get("secret_store", "keychain") == "keychain" and bool(rc.get("url")) and \
+        "%s/%s" % (re.sub(r"^[a-z]+://", "", rc["url"]).split("/")[0], rc.get("workstation")) == acct
+
+
 def cmd_compute_remove(a):
     conf = load_node(a.node)
     Conn(conf).close_master()
-    delete_secret(conf)
+    if not secret_shared(conf):
+        delete_secret(conf)
     shutil.rmtree(conf["_dir"])
     ws = conf.get("workstation") or conf.get("relay_user")
     cmd = "wsl -d mu-compute -u root -- mu-wsl2-distro revoke %s" % ws
+    # the node's relay client too, when this computer holds the admin token (docs/design/pairing.md §3.7, Q7)
+    relay, detail = "kept", "--keep-relay-client"
+    if not a.keep_relay_client:
+        from mu import invite
+        relay, detail = invite.remove_relay_client(a.node, conf)
+    out = {"ok": relay != "failed", "node": a.node, "revoke_command": cmd, "relay_client": relay,
+           "relay_detail": proto.clean_text(str(detail), 300)}
+    if relay == "failed":
+        out.update(exit=proto.EXIT_UNREACHABLE, error="relay-client-not-removed", message="removed %s from this "
+                   "computer, but its relay client could not be deleted: %s" % (a.node, out["relay_detail"]),
+                   next="mu relay remove %s" % a.node)
     if a.json:
-        proto.emit_json({"ok": True, "node": a.node, "revoke_command": cmd})
+        proto.emit_json(out)
     else:
         print("removed %s from this computer. To revoke this computer's key on the node, on the PC:\n  %s" % (a.node, cmd))
-    return 0
+        if relay == "removed":
+            print("its relay client %s was deleted (%s): the node can no longer reach the relay" % (a.node, detail))
+        elif relay == "failed":
+            sys.stderr.write("mu: its relay client could not be deleted: %s\n    next: mu relay remove %s\n" % (
+                out["relay_detail"], a.node))
+        else:
+            print("its relay client was left as it is (%s)" % detail)
+    return 0 if relay != "failed" else proto.EXIT_UNREACHABLE
 
 
 # ------------------------------------------------------------------------------------------------ the project, git
@@ -1864,9 +1898,14 @@ COMPUTE_HELP = """mu compute: the compute nodes paired with this computer (docs/
   mu compute add NODE --host-key KEY --relay URL --relay-fingerprint FP --relay-user NAME [--relay-port 7001]
                  --relay-password-stdin [--secret-store keychain|file] [--name WORKSTATION]
                          pair a node: makes this computer's key, pins the node's host key; sends nothing
+  mu compute invite NODE [--port N] [--replace] [--new-key] [--ttl 30m] [--no-wait] [--show-code auto|stdout|dialog]
+                         pair a node by one code typed at the PC (docs/design/pairing.md); waits for the PC
+  mu compute invite --wait ID [--timeout S]   continue an invite (exit 10 while it still waits)
+  mu compute invite --cancel ID               cancel it
   mu compute list        the paired nodes and their last answer (no network)
   mu compute status [NODE]   ask the node(s): hello through the relay (exit 0 = up)
-  mu compute remove NODE     forget a node here (prints the command that revokes this computer's key there)
+  mu compute remove NODE [--keep-relay-client]   forget a node here (prints the command that revokes this computer's
+                             key there); deletes its relay client when this computer holds the admin token
   mu compute proxy NODE      ssh's ProxyCommand (not for people)
 
 Every subcommand takes --json. """ + proto.EXIT_CODES_LINE + "."
@@ -1905,8 +1944,13 @@ def main(cmd, args):
             return cmd_compute_status(p.parse_args(rest))
         if sub in ("remove", "rm"):
             p.add_argument("node")
+            p.add_argument("--keep-relay-client", action="store_true", help="leave the node's relay client on the relay")
             return cmd_compute_remove(p.parse_args(rest))
-        raise MuError(2, "usage", "unknown: mu compute %s" % sub, "mu compute add|list|status|remove (mu compute --help)")
+        if sub == "invite":
+            from mu import invite
+            return invite.cmd_invite(invite.invite_parser().parse_args(rest))
+        raise MuError(2, "usage", "unknown: mu compute %s" % sub, "mu compute invite|add|list|status|remove (mu compute "
+                      "--help)")
     if cmd == "submit":
         opts, command = parse_command(args)
         p = parser("mu submit", "run a command on a paired compute node, from a snapshot of this project (HEAD + "
@@ -1962,4 +2006,7 @@ def main(cmd, args):
         p.add_argument("--local", action="store_true", help="forget a job this clone never got accepted (state "
                        "sending), without asking the node")
         return cmd_cancel(p.parse_args(args))
+    if cmd == "relay":
+        from mu import invite
+        return invite.relay_main(args)
     raise MuError(2, "usage", "unknown command: %s" % cmd, "mu help")

@@ -68,6 +68,35 @@ is "env prints exactly the two variables" "$(G env | cut -d= -f1 | tr '\n' ' ')"
 G rotate-key >/dev/null 2>&1
 if [ "$(G fingerprint)" != "$fp" ]; then ok "rotate-key changes the fingerprint"; else bad "rotate-key changes the fingerprint"; fi
 
+echo "-- gen-credentials.sh: the pairing service's admin token and RELAY_REVOKED"
+refused_g "login-bundle before there is an admin token" login-bundle avi-mac
+G admin-token >/dev/null 2>"$T/admin.err"
+tok="$(sed -n 's/^RELAY_ADMIN_TOKEN=//p' "$T/relay.env")"
+is "admin-token writes mra_ and 43 characters of base64url" "$(printf '%s' "$tok" | sed -n 's/^mra_[A-Za-z0-9_-]\{43\}$/shape-ok/p')" "shape-ok"
+is "admin-token prints nothing secret" "$(grep -c -F -e "${tok:-none}" "$T/admin.err")" "0"
+refused_g "a second admin-token" admin-token
+G admin-token --rotate >/dev/null 2>&1
+tok2="$(sed -n 's/^RELAY_ADMIN_TOKEN=//p' "$T/relay.env")"
+if [ -n "$tok2" ] && [ "$tok2" != "$tok" ]; then ok "admin-token --rotate changes it"; else bad "admin-token --rotate changes it"; fi
+is "env prints the token's line too" "$(G env | cut -d= -f1 | tr '\n' ' ')" "RELAY_KEY RELAY_CLIENTS RELAY_ADMIN_TOKEN "
+G revoke old-laptop >/dev/null 2>&1; G revoke office-pc >/dev/null 2>&1
+is "revoke adds RELAY_REVOKED" "$(G env | sed -n 's/^RELAY_REVOKED=//p')" "old-laptop,office-pc"
+refused_g "revoking a name twice" revoke office-pc
+refused_g "revoking an upper-case name" revoke Mac
+G unrevoke old-laptop >/dev/null 2>&1
+is "unrevoke removes it" "$(G env | sed -n 's/^RELAY_REVOKED=//p')" "office-pc"
+G unrevoke office-pc >/dev/null 2>&1
+is "and the line goes with the last name" "$(G env | grep -c '^RELAY_REVOKED')" "0"
+G login-bundle avi-mac > "$T/bundle" 2>/dev/null
+is "login-bundle to a pipe: the client's lines and the token" "$(cut -d= -f1 "$T/bundle" | tr '\n' ' ')" "RELAY_URL RELAY_FINGERPRINT RELAY_ROLE RELAY_USER RELAY_PASSWORD RELAY_PORTS RELAY_ADMIN_TOKEN "
+refused_g "login-bundle of a compute client" login-bundle office-pc
+if python3 -c 'import os,pty,sys; st=pty.spawn(sys.argv[1:]); sys.exit(1 if os.waitstatus_to_exitcode(st)==0 else 0)' \
+     "$ROOT/relay/gen-credentials.sh" --env "$T/relay.env" login-bundle avi-mac > "$T/tty.out" 2>&1 && ! grep -q -F -e "$tok2" "$T/tty.out"; then
+  ok "login-bundle refuses a terminal"
+else
+  bad "login-bundle refuses a terminal"
+fi
+
 echo "-- entrypoint.sh with what gen-credentials.sh wrote"
 set -a; . "$T/relay.env"; set +a
 rc="$(E RELAY_KEY="$RELAY_KEY" RELAY_CLIENTS="$RELAY_CLIENTS")"
@@ -96,6 +125,39 @@ for u, a in no: assert not allowed(u, a), (u, a)
 PY
 rc="$(E RELAY_KEY="$RELAY_KEY" RELAY_CLIENTS="$RELAY_CLIENTS" RELAY_KEEPALIVE=0s)"
 is "RELAY_KEEPALIVE reaches chisel" "$rc $(sed -n 's/.*--keepalive //p' "$T/args")" "0 0s"
+rc="$(E RELAY_KEY="$RELAY_KEY" RELAY_CLIENTS="$RELAY_CLIENTS" RELAY_ADMIN_TOKEN="")"
+is "an empty RELAY_ADMIN_TOKEN is the legacy path, unchanged" "$rc $(cat "$T/args")" "0 server --host 0.0.0.0 --port 8080 --reverse --authfile $T/run/users.json --keepalive 25s"
+rc="$(E RELAY_KEY="$RELAY_KEY" RELAY_CLIENTS="$RELAY_CLIENTS" RELAY_REVOKED=avi-mac)"
+is "RELAY_REVOKED takes the client out of the legacy auth file" "$rc $(grep -c 'avi-mac' "$T/run/users.json") $(grep -c 'office-pc' "$T/run/users.json")" "0 0 1"
+
+echo "-- entrypoint.sh in pairing mode (RELAY_ADMIN_TOKEN set)"
+K="ck-abc"; P="0123456789abcdef01234567"
+A() {  # A VAR=VALUE...   the entrypoint in pairing mode, mu-relayd replaced by a stand-in that records its arguments
+  rm -f "$T/run/static.tsv" "$T/run/relayd.conf" "$T/run/users.json" "$T/args" "$T/env"
+  env -i PATH="$PATH" RELAY_RUN_DIR="$T/run" RELAY_CHISEL="$T/chisel" RELAY_RELAYD="$T/chisel" "$@" sh "$ROOT/relay/entrypoint.sh" > "$T/entry.log" 2>&1
+  echo $?
+}
+rc="$(A RELAY_KEY="$RELAY_KEY" RELAY_CLIENTS="$RELAY_CLIENTS" RELAY_ADMIN_TOKEN="$tok2" RELAY_REVOKED=office-pc)"
+is "accepted, and mu-relayd started with its settings file" "$rc $(cat "$T/args")" "0 --config $T/run/relayd.conf"
+is "mu-relayd's environment holds no secret and no RELAY_ variable" "$(grep -c -e '^RELAY_' -e 'ck-' -e 'mra_' "$T/env")" "0"
+is "static.tsv: the clients not revoked, mode 600" "$(cut -f1,2 "$T/run/static.tsv" | tr '\t\n' ': ') $(ls -l "$T/run/static.tsv" | cut -c1-10)" "workstation:avi-mac  -rw-------"
+is "relayd.conf holds the key and the token, mode 600" "$(grep -c -e "^key=$RELAY_KEY\$" -e "^admin_token=$tok2\$" "$T/run/relayd.conf") $(ls -l "$T/run/relayd.conf" | cut -c1-10)" "2 -rw-------"
+is "the entrypoint does not write users.json itself" "$([ -e "$T/run/users.json" ] && echo yes || echo no)" "no"
+is "nothing secret on the entrypoint's output" "$(grep -c -F -e "$tok2" -e "$RELAY_KEY" "$T/entry.log")" "0"
+refused_a() {  # refused_a WHAT VAR=VALUE...   exit 64, mu-relayd not started, nothing written, the token not printed
+  local what="$1" rc; shift; rc="$(A "$@")"
+  if [ "$rc" = 64 ] && [ ! -e "$T/args" ] && [ ! -e "$T/run/relayd.conf" ] && ! grep -q -F -e '0123456789012345' -e "$tok2" "$T/entry.log"; then ok "entrypoint refuses: $what"
+  else bad "entrypoint refuses: $what (exit $rc, started: $([ -e "$T/args" ] && echo yes || echo no))"; fi
+}
+refused_a "a token without mra_" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="0123456789012345678901234567890123456789012345"
+refused_a "a token that is too short" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="mra_0123456789"
+refused_a "a token with a quote" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="mra_0123456789012345678901234567890123456789012\"x"
+refused_a "a token with a newline" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="mra_0123456789012345678901234567890123456789012
+key=ck-evil"
+refused_a "RELAY_REVOKED with a space" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="$tok2" RELAY_REVOKED="a, b"
+refused_a "a malformed client, as without pairing" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:07001" RELAY_ADMIN_TOKEN="$tok2"
+rc="$(A RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_ADMIN_TOKEN="$tok2" RELAY_REVOKED=a)"
+is "pairing mode with every static client revoked starts (mu-relayd keeps the sentinel)" "$rc $(wc -c < "$T/run/static.tsv" | tr -d ' ')" "0 0"
 
 echo "-- entrypoint.sh refuses"
 K="ck-abc"; P="0123456789abcdef01234567"
@@ -128,6 +190,27 @@ refused_e "a space in the list" RELAY_KEY="$K" RELAY_CLIENTS="workstation:a:$P:7
 refused_e "only commas" RELAY_KEY="$K" RELAY_CLIENTS=",,"
 refused_e "a keepalive that is not a duration" RELAY_KEY="$K" RELAY_CLIENTS="workstation:a:$P:7001" RELAY_KEEPALIVE="abc"
 refused_e "one bad client among good ones" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,workstation:b:$P:7001,workstation:c:$P:99999"
+refused_e "every client revoked (chisel with no users lets anyone in)" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,workstation:b:$P:7001" RELAY_REVOKED="a,b"
+refused_e "RELAY_REVOKED with a character outside the names" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_REVOKED='a;b'
+
+echo "-- the reference pairing client (tools/s4/client/pair_ref.py)"
+# A retry after a 502 (chisel restarting for an eviction) sends the same request body again, not the 502's empty
+# answer (S4 run 43571059503, P7: a retried contest arrived without its claim token and was refused as a wrong code).
+retry_bodies="$(python3 -I - "$ROOT/tools/s4/client/pair_ref.py" <<'PY' 2>&1
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pair_ref", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.time.sleep = lambda s: None
+r, sent = m.Relay("https://relay.invalid", None), []
+def fake(method, path, body=None, auth=None, timeout=35):
+    sent.append(body)
+    return (502, {}) if len(sent) < 3 else (200, {"ok": True})
+r._call = fake
+print(r.call("POST", "/mu/v1/invites/AAAA/contest", {"claim": "c"})[0], sent)
+PY
+)"
+is "a retry after a 502 sends the same request body" "$retry_bodies" "200 [{'claim': 'c'}, {'claim': 'c'}, {'claim': 'c'}]"
 
 echo
 if [ "$N_FAIL" -eq 0 ]; then echo "all ok"; else echo "$N_FAIL failed"; exit 1; fi
