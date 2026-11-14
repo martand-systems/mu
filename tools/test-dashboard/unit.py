@@ -427,7 +427,10 @@ def t_lifecycle():
             q.terminate()
             q.communicate()
             check("D27: a second `serve` exits 0 while one serves", False, "the second server is serving too")
-        info2 = json.load(open(os.path.join(rd, "dashboard.json")))
+        try:
+            info2 = json.load(open(os.path.join(rd, "dashboard.json")))
+        except (OSError, ValueError):
+            info2 = {}
         check("D27: ... and the first one keeps serving", info2.get("pid") == p.pid and
               req(port, "/api/session", headers={"X-Mu-Token": tok})[0] == 200)
         # idle: no tab, nothing unfinished -> the server's CPU time barely grows (D23, shortened to 20 s)
