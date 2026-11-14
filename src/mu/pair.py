@@ -915,7 +915,8 @@ def main(argv=None):
                             "it with the Mac's screen and type it again", "type the code again")
         iid, sec = parsed
         if fault("code-in-argv"):   # the fault: the code in a process's argument list for 5 s
-            subprocess.Popen(["sh", "-c", "sleep 5", "mu-pair", format_code(iid, sec)])
+            subprocess.Popen(["sh", "-c", "sleep 5", "mu-pair", format_code(iid, sec)], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         if a.action == "claim":
             emit(c.claim(iid, sec))
             return 0
