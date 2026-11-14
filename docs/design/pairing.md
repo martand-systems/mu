@@ -588,3 +588,328 @@ The container log gets chisel's lines (unchanged) and R's events, one line each,
 `… finished`, `client office-pc created (overrides static)`, `chisel restarted (evict: office-pc replaced)`.
 Never a password, the admin token, a claim token, a session token or a MAC. A unit test greps every log line of a full
 run for each of them.
+
+## 7. Container, compose, Dokploy
+
+### 7.1 Image (`relay/Dockerfile`)
+
+```dockerfile
+ARG ALPINE=alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+# Go 1.27 (chisel 1.12.0's own release toolchain); the patch release and its digest are pinned when this is built
+ARG GOLANG=golang:1.27.<patch>-alpine3.24@sha256:<digest>
+
+FROM ${GOLANG} AS build
+WORKDIR /src
+COPY control/ ./
+ENV CGO_ENABLED=0 GOFLAGS=-mod=readonly GOPROXY=off GOTOOLCHAIN=local GOWORK=off
+RUN go vet ./... && go build -trimpath -ldflags='-s -w -buildid=' -o /mu-relayd .
+
+FROM ${ALPINE} AS fetch
+# … unchanged: chisel 1.12.0, SHA-256 pinned …
+
+FROM ${ALPINE}
+COPY --from=fetch /chisel /usr/local/bin/chisel
+COPY --from=build /mu-relayd /usr/local/bin/mu-relayd
+COPY entrypoint.sh /usr/local/bin/relay-entrypoint
+# the state volume's mount point: Docker copies owner and mode into a new, empty named volume at its first mount
+RUN install -d -o 65532 -g 65532 -m 0700 /var/lib/mu-relay
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/bin/sh", "/usr/local/bin/relay-entrypoint"]
+```
+
+`relay/.dockerignore` adds `!control/go.mod` and `!control/*.go` (tests included: they are not compiled into the binary).
+`GOPROXY=off` with a `go.mod` that has no `require` proves at every build that nothing is downloaded. The tests are not a
+build stage: Dokploy's `docker compose up --build` would run them on the server (§13.1 runs them in CI).
+
+### 7.2 `relay/compose.yaml`
+
+```yaml
+services:
+  mu-relay:
+    # … unchanged: build, restart, expose 8080, labels (mu-relay-inflight), user, read_only, tmpfs /run/relay,
+    #   cap_drop, security_opt, limits, healthcheck, logging …
+    environment:
+      RELAY_KEY: "${RELAY_KEY:?…}"
+      RELAY_CLIENTS: "${RELAY_CLIENTS:?…}"
+      RELAY_KEEPALIVE: "${RELAY_KEEPALIVE:-25s}"
+      # optional: set, the pairing service runs (docs/design/pairing.md); unset, chisel alone, as before
+      RELAY_ADMIN_TOKEN: "${RELAY_ADMIN_TOKEN:-}"
+    volumes:
+      # dynamic clients and invites (docs/design/pairing.md §6.6). The only state the relay keeps; a named volume,
+      # kept by Dokploy across deploys. Not a Dokploy "Mount" (Advanced tab), which would move the build context
+      - relay-state:/var/lib/mu-relay
+volumes:
+  relay-state: {}
+```
+
+- The volume is project-scoped: Docker names it `<appName>_relay-state`. No `name:` key, so the two relays of the S4
+  replica (and a second Dokploy service, should one ever exist) cannot share one store.
+- `read_only: true` stays: the volume is the one writable path besides the tmpfs. The tmpfs `/run/relay` keeps the auth
+  file and `static.tsv`; both are rebuilt at every start.
+- No Traefik label, router, port or network changes. Dokploy's Domains entry (Path `/`, port 8080, middleware
+  `mu-relay-inflight@docker`) stays as it is. The routing by path happens inside the container: chisel takes a request
+  with `Upgrade: websocket` and `Sec-WebSocket-Protocol: chisel-v3`; every other request goes to `mu-relayd`, which
+  answers `/health` and `/mu/v1/…` and 404 for everything else (as chisel did; `/version` is now 404, nothing uses it).
+- The header comment of `compose.yaml` and the README lose "no volumes".
+
+### 7.3 Dokploy and the volume (read in Dokploy's source, §15)
+
+| Dokploy action | What happens to `relay-state` |
+|---|---|
+| Push to `main` touching `relay/**`, or Deploy | `docker compose -p <appName> … up -d --build --remove-orphans`: the volume is kept and mounted into the new container |
+| Deploy with Dokploy's fresh-volumes option | `down --volumes` first: **the volume is deleted** (§6.6 "if the volume is lost") |
+| Delete the service with "delete volumes" ticked | deleted; unticked: kept, and reused by a service with the same appName |
+| Isolated Deployment with isolated volumes, or Randomize Compose | the volume gets a suffix: a new empty one. Both stay off (README §2 step 6 already says so; it now says why twice) |
+| Advanced → Mounts | not used. Only Dokploy Mounts switch the command to `--project-directory <repo root>` (the build-context problem); a volume in `compose.yaml` does not |
+
+Optional, not needed: Dokploy's volume backups. The Mac's backup (§8.4) is the recovery path.
+
+### 7.4 Hardening
+
+The same as the chisel container today: uid 65532, read-only root, all capabilities dropped, `no-new-privileges`, 0.5
+CPU, 256 MiB, 256 pids. `mu-relayd` adds about 10 MiB. It runs no shell and executes nothing but chisel at a fixed path.
+
+## 8. The workstation side
+
+### 8.1 Files and secrets
+
+```
+$MU_HOME/relay/                    0700
+  relay.conf                       url, fingerprint, workstation (this computer's relay user), secret_store, store_id,
+                                   logged_in   (key=value, as node.conf)
+  admin.token                      only with secret_store=file, 0600
+  backup.json                      only with secret_store=file, 0600: clients (with passwords) and tombstones, store_id
+  invites/<id>/                    0700, while an invite lives: id_ed25519(.pub) (this computer's new key for the node),
+                                   invite.json (kind, node, port, replace, created, expires, the offer's fields,
+                                   offer_mac, last state), code (only with secret_store=file, 0600)
+```
+
+| Secret | macOS (default) | Linux, or `--secret-store file` |
+|---|---|---|
+| this computer's relay password | Keychain `systems.martand.mu.relay`, account `<relay host>/<relay user>` (the job layer's item, unchanged) | `relay.auth` in each node folder, as today |
+| the admin token | Keychain `systems.martand.mu.relay-admin`, account `<relay host>` | `$MU_HOME/relay/admin.token` |
+| the backup | Keychain `systems.martand.mu.relay-backup`, account `<relay host>` (one JSON value) | `$MU_HOME/relay/backup.json` |
+| an invite's code | Keychain `systems.martand.mu.invite`, account `<relay host>/<id>`; deleted when the invite ends | `invites/<id>/code` |
+
+Written and read exactly as job-layer §5.3 (`security -i` with one line on stdin; reads with a 10 s limit; a locked
+keychain is exit 1 with that hint). Nothing secret is ever an argument, in a log or in a run record.
+
+### 8.2 Commands
+
+| Command | What it does |
+|---|---|
+| `mu relay login --stdin` | Reads the lines of `relay/gen-credentials.sh login-bundle <workstation>` (`RELAY_URL`, `RELAY_FINGERPRINT`, `RELAY_ROLE=workstation`, `RELAY_USER`, `RELAY_PASSWORD`, `RELAY_PORTS`, `RELAY_ADMIN_TOKEN`) from stdin, checks `GET /mu/v1/` and `GET /mu/v1/clients` with the token, then stores the token, the relay password and `relay.conf`, and makes the first backup. Refuses a terminal on stdin (the lines must come through a pipe) |
+| `mu relay status` | `GET /mu/v1/` and the clients; says if `store_id` changed since the last backup (§6.6) |
+| `mu relay clients` | §3.7 |
+| `mu relay remove NAME` | `DELETE /mu/v1/clients/NAME`; updates the backup |
+| `mu relay backup` | fetches every dynamic client with its password and every tombstone into the backup |
+| `mu relay restore [--dry-run]` | puts back, with `PUT`/`DELETE`, every client and tombstone of the backup that the relay lacks or has differently; prints each |
+| `mu compute invite NODE [--port N] [--replace] [--new-key] [--ttl MIN] [--no-wait] [--show-code dialog] [--json]` | §8.3 |
+| `mu compute invite --wait ID [--timeout S] [--json]` | continues an invite made with `--no-wait`, or after Ctrl-C |
+| `mu compute invite --cancel ID` | `abort`; removes the staging folder and the code |
+| `mu compute remove NODE [--relay]` | §3.7 |
+
+New in `relay/gen-credentials.sh` (bash 3.2, `LC_ALL=C`, as the rest of it): `admin-token` (adds
+`RELAY_ADMIN_TOKEN=mra_<43 chars of base64url from openssl rand 32>` to the state file if it has none; `admin-token
+--rotate` replaces it), `login-bundle NAME` (the client's lines plus the token, to stdout; refuses when stdout is a
+terminal), and `env` printing the token's line when there is one. The state file stays the single record of what is in
+Dokploy's environment.
+
+### 8.3 `mu compute invite`, step by step
+
+1. Read `relay.conf` and the admin token. None: exit 2 `not-logged-in`, next: the `login-bundle | mu relay login`
+   line (§3.1), to be typed by the owner.
+2. `NODE` must match the node-name rule. A folder `compute/NODE` exists and no `--replace`: exit 2 `exists`.
+3. `GET /mu/v1/clients`: the port is `--port`, else the existing client's, else the lowest compute port 7001–7999 that no
+   compute client has. `--port` taken by another compute client: exit 2 `port-taken`.
+4. Make `invites/<id>/` with a new ed25519 key (`ssh-keygen -t ed25519 -N '' -C <workstation>`), or with `--replace`
+   and no `--new-key` a copy of the node's present key. Draw id, S, check (§4.1). Store the code (§8.1).
+5. Build the offer (§5.2: `relay_url`, `relay_fingerprint` from `relay.conf`, `inviter_name` = this computer's relay
+   user, `inviter_key`, `created`, `expires` = now + TTL, `mu_version` = `MU_INFRA_VERSION`) and its MAC; `POST
+   /mu/v1/invites`. 409 `id-taken`: a new id (3 tries). 404 or 503 `not-configured`: exit 5 `pairing-unsupported`.
+6. Print the PC lines and the code (or with `--no-wait --json` the object of §3.3, and exit 0). The second PC line is
+   the `C:\Mu\host` form when `node.conf` of a node of that name records `host_script=installed` (a pairing by invite
+   finished on it before), else the `mu node host-script` form.
+7. Wait: `GET /mu/v1/invites/{id}?wait=25&since=<state>` in a loop; print each event once with its time. A network
+   error: `relay unreachable, trying again` and back off 5, 10, 20, 30 s. Until the invite's deadline, or `--timeout`
+   (exit 10 `still-waiting`). Ctrl-C: `stopped waiting; the invite stays valid until 14:52: mu compute invite --wait
+   7K3M` (exit 130).
+8. `answered`: verify (§5.3). Failure: `abort` with reason `integrity`, remove `invites/<id>/`, exit 5.
+9. Install the node: write `known_hosts`, `ssh_config`, `node.conf` (`relay_user` = this computer's relay user,
+   `relay_port`, `relay_url`, `relay_fingerprint`, `secret_store`, `host_key_fingerprint`, `workstation`, `added`,
+   `paired_via=invite <id>`, `host_script=installed`) into the staging folder, then (with `--replace`) rename the old
+   folder to `compute/.replaced-NODE`, rename the staging folder to `compute/NODE`. The relay password is the existing
+   Keychain item; no copy is made. This is `mu compute add`'s code, split so both use it.
+10. `hello` through the relay (`mu compute status NODE`'s code), a fresh connection each time, every 5 s for up to
+    180 s (the PC's tunnel connects after its answer; chisel reloads within a second).
+11. `POST finish` with the confirm (outcome `ok` or `unreachable:<reason>`). Remove `compute/.replaced-NODE`, the
+    staging folder and the code. Update the backup (§8.4).
+12. Print `paired NODE` (exit 0), or `paired NODE, but it does not answer through the relay yet: <reason>` (exit 4).
+
+Any failure after step 9 and before step 11 puts the old folder back (with `--replace`) or removes the new one, and
+aborts the invite. Every step's error carries `invite` and the `--wait` command in `next`, so a caller can resume.
+
+### 8.4 The backup, and restoring it
+
+The relay is the only holder of the node's relay password (the PC chose it and gave it to the relay only). So that a
+lost volume does not mean a trip to the PC, the Mac keeps a copy: after every `finish`, `remove` or `PUT` it fetches
+the changed client with `?secret=1` and every tombstone into the backup (§8.1), with the relay's `store_id` and the time.
+`mu relay restore` is then Mac-only (§6.6). The backup holds relay passwords and nothing else; the Mac already holds the
+static ones in `relay.env`.
+
+## 9. The PC side
+
+### 9.1 Finding the installed release's host script, as an administrator
+
+`mu node host-script` (new, in `src/mu/node.py`; as `mu`, no root, no network) prints one line:
+
+```
+\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\v2026.11.NN\recipe\install\hosts\wsl2\mu-wsl2-host.ps1
+```
+
+from `$MU_HOME/default`, `WSL_DISTRO_NAME` and the user's home, after checking the file exists. Exit 3 with `run: mu
+update` when the default version has no host script with a `pair` action; exit 2 outside WSL. Its stdout is that line
+only; messages go to stderr.
+
+In the elevated PowerShell, `powershell -NoProfile -ExecutionPolicy Bypass -File (wsl … mu node host-script) pair`:
+PowerShell evaluates the parentheses first (wsl.exe's output is ASCII, one line, the newline dropped), then starts
+Windows PowerShell 5.1 with the execution policy bypassed for that process only. Nothing is copied by hand.
+
+**Which copy is trusted.** The release folder belongs to `mu` and so, once jobs run, to any job. Running a script from
+it as an administrator is safe only before any job has run, which is the case at the first visit (the same rule as
+checklist 2.3). After that, the copies in `C:\Mu\host` are used (the elevated install writes them, and once §13.4 of
+the job layer applies, no Linux process reaches `C:`). Hence:
+
+- the Mac prints the `C:\Mu\host` line for any node it paired by invite before (§8.3 step 6);
+- `pair` started from a `\\wsl.localhost\…` path refuses when `/srv/mu/jobs` holds a job: `jobs have run on this node,
+  so its release folder is not trusted for an administrator: run C:\Mu\host\mu-wsl2-host.ps1 pair`. That stops a
+  mistake, not a job that rewrote the script (which would leave the check out), which is why the first rule exists;
+- later updates of the root-side scripts come through `C:\Mu\host\mu-wsl2-host.ps1 install` from a copy the
+  administrator trusts. How that copy is refreshed without the release folder is an open point of the job layer, not
+  new here (§14 Q6).
+
+**Staging.** Started from a `\\…` path, `pair` copies itself, `mu-wsl2-distro.sh`, `mu-node-gate` and
+`..\..\..\src\mu\pair.py` to `%TEMP%\mu-host-<version>` and runs that copy in the same window (`Start-Process
+-NoNewWindow -Wait`, as `Invoke-As64Bit` does): the restart in the middle of `pair` takes `\\wsl.localhost` away for a
+minute. Not elevated: the existing `Invoke-Elevated` (a new window; `Read-Host` works there).
+
+### 9.2 `mu-wsl2-host.ps1 pair` (Windows PowerShell 5.1, ASCII only)
+
+New action `pair`, new parameter `-Relay URL` (default `https://relay.martand.systems`). In order:
+
+1. Stage and elevate (§9.1). Refuse from `\\…` when jobs exist (§9.1).
+2. The first time on this PC (no `C:\Mu\logs\windows-reach-before.txt`): run `mu-wsl2-distro windows-reach` from the
+   staged script and save its output there (checklist 2.4's record, kept automatically).
+3. `install` with `-NoRestart` (exactly `Invoke-Install`; its output as today). Remember `restart` from
+   `/run/mu-wsl2/install-result`. A failed install stops here with its own message.
+4. The code: `Read-Host -AsSecureString 'Pairing code (from the Mac)'` (asterisks; not echoed, not in a transcript,
+   not in PSReadLine's history), converted through a BSTR that is zeroed after. Sent on stdin to
+   `wsl -d <distro> -u root --exec /usr/local/sbin/mu-wsl2-distro pair claim --json --relay <url>`. Exit 2
+   `code-typo` or 5 `wrong-code`: ask again (3 times in all). Other errors: their message and exit.
+5. If `restart` was 1: the clean restart (`Invoke-TestStop`'s stop and start, without its status print).
+6. `mu-wsl2-distro pair finish --json` with the code on stdin. It prints its lines (§9.3) as they happen.
+7. `Invoke-Status`, then one summary line: `paired with <inviter> · ready for jobs: yes` (or `no (<checks>)`).
+   Exit code: `finish`'s, else `status`'s.
+
+The code lives in PowerShell's memory and on stdin pipes only. Re-running `pair` asks for it again.
+
+### 9.3 `mu-wsl2-distro pair` (root, in the distro)
+
+`/usr/local/sbin/mu-wsl2-distro` gains `pair claim`, `pair finish`, `pair abort` and `pair run` (claim and finish in one,
+for a root shell or CI; asks for the code with echo off at a terminal). Each reads the code from stdin (never an
+argument), takes `--json` and `--relay URL`, and runs the protocol in `/usr/local/lib/mu/mu-pair.py`, a root-owned copy
+of `src/mu/pair.py` (stdlib only, Python 3.11+; run as `/usr/bin/python3 -I -S`). `install` puts it there (`ensure_self`
+copies it from beside the script, or from `../../../src/mu/pair.py` in a checkout; the ps1 copies it in with
+`Copy-IntoDistro`). Root never runs Python from the release folder.
+
+State between `claim` and `finish` (they are separate processes, and the distro restarts between them):
+`/var/lib/mu-wsl2/pair/current.json`, root 0600: id, relay URL, session token, phase, the password once chosen, and what
+was replaced (for rollback). Not the code. Removed when the invite ends.
+
+`claim`:
+
+1. Parse the code (§4.1): `code-typo` exit 2.
+2. `POST /invites/{id}/claim` with `K_claim` over HTTPS (Python's default context: the system's CA store, WebPKI host
+   name check). Errors: §3.4.
+3. Verify the offer (§5.3); on failure `POST abort {reason: "integrity"}`, exit 5.
+4. Write `current.json` (phase `claimed`) and print `code accepted: this PC becomes compute node NODE on relay port PORT
+   for INVITER (until HH:MM)`; with `--json` `{ok, invite, node, port, inviter, inviter_key_fingerprint, expires}`.
+
+`finish`:
+
+1. Read `current.json`; re-read the offer with the session (`GET /offer`) and verify it again (it did not come through
+   the restart in memory).
+2. The node's relay password: from `current.json` if this invite already has one (a resumed run), else
+   `secrets.token_urlsafe(32)` (43 characters of `A-Za-z0-9_-`), saved to `current.json` first.
+3. The relay credential: the existing `tunnel credential --wait 0`, fed `AUTH=<node>:<password>`, `RELAY_URL`,
+   `RELAY_FINGERPRINT` (the offer's) and `RELAY_PORT` on stdin. The tunnel starts and retries every few seconds until the
+   relay knows the client. A previous `/etc/mu/tunnel.env` is kept as `tunnel.env.before-pair` for rollback.
+4. Authorise the inviter: the existing `authorize <inviter> -` with the offer's key on stdin (the previous line of that
+   name, if any, kept in `current.json` for rollback). The runner's node name: `install --node-name` is not needed; the
+   credential's relay user is the node's name (job-layer §22.2 #8).
+5. `POST answer` with the answer, its MAC and the password. Phase `answered`.
+6. Wait for `mu-tunnel.service: connected` (up to 60 s; the same classification as `tunnel status`).
+7. `GET /result?wait=25` until `finished`, `aborted` or `expired` (at most 15 minutes), printing `waiting for INVITER to
+   confirm …`. Verify the confirm (§5.3).
+8. `finished` with outcome `ok`: print `paired with INVITER`, exit 0. Outcome `unreachable:…`: print it with `tunnel
+   status`, exit 4. Either way remove `current.json` and `tunnel.env.before-pair`.
+9. `aborted` or `expired` (or a verification failure before step 5): undo steps 3 and 4 (the old `tunnel.env` back, or
+   none and the tunnel stopped; the old key line back, or the new one revoked), print what was undone, exit 5 or 9.
+
+Every step is idempotent within an invite: a `finish` that stopped (window closed, PC restarted) is run again by the same
+`pair` line, whose `claim` sees `current.json` for the same id in phase `answered` and goes straight to step 6 (the relay
+refuses a new claim then, by design; the session in `current.json` is what resumes it).
+
+### 9.4 Does turning interop off affect the remaining steps?
+
+`install` writes `[interop] enabled=false` and the `[automount]` options; they take effect at the restart of step 5.
+Everything after it is driven from Windows (`wsl.exe -u root --exec …`), which interop does not govern (it governs Linux
+starting Windows programs). Root's Python reaches the relay over the network with the distro's resolver, not through
+interop, and the tunnel's egress filter applies to `mu-tunnel.service` only. `mu node host-script` runs before `install`
+(interop still on) and needs nothing from Windows anyway. What does change after the restart: commands as `mu` from
+PowerShell need `--cd ~` (all lines here have it), and μ's disk check reads the drive record instead of `reg.exe`
+(job-layer §13.4). Doing the restart **before** the Mac's key is authorised also means no workstation key ever works on
+the node while interop is on.
+
+### 9.5 Running `pair` again
+
+| Where it stopped | What the same line does |
+|---|---|
+| Before the code was accepted | everything again; install says `ok` for what it did |
+| After `claim`, before `answer` (e.g. during the restart) | install no-op; asks the code; the relay allows a new claim (≤ 3) with the same code; `finish` |
+| After `answer`, before the confirm | asks the code; `claim` finds `current.json` in phase `answered` for this id and resumes the wait |
+| After the confirm | a new invite is needed (the relay answers `invite-used`) |
+
+### 9.6 Signed key requests: the node's root half of stage P2, installed at the first visit
+
+So that a second workstation (§10) can be added without a visit, the first visit's `install` already installs the root
+side; nothing uses it until P2. A paired workstation sends a request signed with its own ssh key; root applies it only if
+the signature verifies against a key in `/etc/mu/authorized_keys/mu`.
+
+- **Gate verb `keyreq`** (as `mu`): reads at most 8 KiB `{"msg": "…", "sig": "…"}` from stdin and writes it to
+  `/srv/mu/keyreq/<nonce>.json`. **`keyreq-status <nonce>`** reads root's result file. Both are new verbs in the gate's
+  grammar and `node.py serve`.
+- **The request text** (`msg`), signed with `ssh-keygen -Y sign -n mu-keyreq@martand.systems -f <the workstation's key
+  for this node>`:
+  ```
+  mu-keyreq/1
+  node office-pc
+  signer avi-mac
+  action authorize | revoke
+  name bob-mbp
+  key ssh-ed25519 AAAA…          (authorize only)
+  nonce <32 hex>
+  not-after <unix seconds, at most 15 min ahead>
+  ```
+- **Root:** `mu-keyreq.path` (`PathExistsGlob=/srv/mu/keyreq/*.json`) starts `mu-keyreq.service` (root, oneshot,
+  `StartLimitBurst`), which runs `mu-wsl2-distro keyreq apply`: for at most 20 files, open with `O_NOFOLLOW`, require a
+  regular file owned by `mu` of at most 8 KiB, parse strictly (exact lines, the name and key rules of `authorize`),
+  check `node` (this node's name), `not-after`, the nonce against `/var/lib/mu-wsl2/keyreq-seen` (24 h), then `ssh-keygen
+  -Y verify -f <allowed_signers built from /etc/mu/authorized_keys/mu, namespace restricted> -I <signer> -n
+  mu-keyreq@martand.systems -s <sig>`. Rules: `authorize` only for a name not present (never replaces a key); `revoke`
+  any name, the signer's own included. Then the existing `authorize`/`revoke`; the result (`applied`, or the refusal) to
+  `/var/lib/mu-wsl2/keyreq/<nonce>.result` (root, 0644) and the request file removed.
+- **Why this is no new power:** a paired workstation key can already run anything as `mu`, and so could hand its own
+  access to anyone. A job cannot forge a request (it has no workstation's private key) and can only delete pending ones.
+  The new risk is root parsing input `mu` can write; it is kept to the strict parser above and `ssh-keygen`'s verify.
