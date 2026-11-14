@@ -5,9 +5,14 @@
 # client, a forward from another, a long idle period, and reconnects. Every result that matters has a negative
 # control in the same run: the same check is made once more with the thing it tests broken, and has to notice.
 #
-#   tools/s4/run.sh         build, test, print the table; exit 0 only if every row passes
+#   tools/s4/run.sh         build, test, print the table; exit 0 only if every row passes (S4_ONLY=pairing: only
+#                           the routing, tunnel, access and pairing groups)
 #   tools/s4/run.sh down    remove everything it made
 #   tools/s4/run.sh relay   only Traefik and the relay, left running (used by tools/test-jobs/e2e.sh)
+#
+# The main relay runs in pairing mode (RELAY_ADMIN_TOKEN set: mu-relayd in front of chisel's auth file, the API on
+# /mu/v1/ behind chisel's --backend, the state on a named volume); the second relay stays in the legacy mode (chisel
+# alone), so both paths are tested in every run. The P rows test the pairing service (docs/design/pairing.md §13.3).
 #
 # The replica (see the files next to this one):
 #   dokploy-traefik   started with Dokploy's own `docker run` line and Dokploy's static config, on a swarm overlay
@@ -30,6 +35,15 @@
 #   acl      the relay without its access rules (break-acl.yaml)      -> X6 X7 X8 X16 X17
 #   idle     the keepalive-off workstation goes through the hop that cuts idle connections   -> I2
 #   noretry  the workstation's chisel client does not reconnect       -> R1
+# The pairing breaks skip the connection-limit, idle and reconnect groups (S4_ONLY=pairing). The relay faults need
+# mu-relayd built with -tags faults (the build argument MU_RELAYD_TAGS, never set for a real deploy):
+#   adminprefix  mu-relayd compares only the admin token's first 8 characters (fault admin-prefix)   -> P2
+#   noreload     the auth file is not rewritten after a change (no-reload)        -> P4 P5 P8
+#   wideacl      a workstation's rule allows every port 7000-7999 (wide-ports)    -> X16 P5
+#   noevict      a removed client's sessions are not cut (no-evict)               -> P8
+#   allowempty   no sentinel, no check, the last client can go (allow-empty)      -> P11
+#   novolume     the state on a tmpfs instead of the named volume                 -> X14 P9
+#   skipmac      the reference pairing client skips its MAC checks (MU_PAIR_FAULT=skip-mac)   -> P7
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -39,7 +53,16 @@ TRAEFIK_VERSION="${TRAEFIK_VERSION:-3.6.25}"
 IDLE="${S4_IDLE:-240}"
 MB="${S4_BLOB_MB:-100}"
 BREAK="${S4_BREAK:-}"
-case "$BREAK" in ''|port|acl|idle|noretry) ;; *) echo "run.sh: S4_BREAK must be port, acl, idle or noretry" >&2; exit 2 ;; esac
+ONLY="${S4_ONLY:-}"
+case "$BREAK" in ''|port|acl|idle|noretry) ;;
+  adminprefix|noreload|wideacl|noevict|allowempty|novolume|skipmac) ONLY=pairing ;;
+  *) echo "run.sh: S4_BREAK must be port, acl, idle, noretry, adminprefix, noreload, wideacl, noevict, allowempty, novolume or skipmac" >&2; exit 2 ;; esac
+case "$ONLY" in ''|pairing) ;; *) echo "run.sh: S4_ONLY must be empty or pairing" >&2; exit 2 ;; esac
+case "$BREAK" in
+  adminprefix) RELAY_FAULT=admin-prefix ;; noreload) RELAY_FAULT=no-reload ;; wideacl) RELAY_FAULT=wide-ports ;;
+  noevict) RELAY_FAULT=no-evict ;; allowempty) RELAY_FAULT=allow-empty ;; *) RELAY_FAULT="" ;;
+esac
+PAIR_FAULT=""; [ "$BREAK" != skipmac ] || PAIR_FAULT=skip-mac
 case "$IDLE" in ''|*[!0-9]*) echo "run.sh: S4_IDLE must be a number of seconds" >&2; exit 2 ;; esac
 # Under 60 s the hop that cuts after 45 s idle has not cut yet, and its control (I3) would fail for no reason.
 [ "$IDLE" -ge 60 ] || { echo "run.sh: S4_IDLE must be at least 60" >&2; exit 2; }
@@ -54,6 +77,9 @@ export S4_WORK="$WORK" S4_BLOB_MB="$MB"
 [ "$BREAK" != noretry ] || export S4_WS_MAX_RETRY=0
 MAIN_FILES=(-f relay/compose.yaml -f "$WORK/inject-main.yaml")
 [ "$BREAK" != acl ] || MAIN_FILES+=(-f tools/s4/break-acl.yaml)
+[ -z "$RELAY_FAULT" ] || MAIN_FILES+=(-f "$WORK/break-fault.yaml")
+[ "$BREAK" != novolume ] || MAIN_FILES+=(-f tools/s4/break-novolume.yaml)
+VOLUME="${APP}_relay-state"      # what Docker calls compose.yaml's volume in Dokploy's project
 N_FAIL=0
 
 # ---------------------------------------------------------------------------------------------------- helpers
@@ -144,7 +170,7 @@ flood() {  # flood HOSTNAME COUNT HOLD_SECONDS   from the neighbour container, s
 collect() {
   mkdir -p "$WORK/logs"
   local c
-  for c in dokploy-traefik s4-compute s4-ws s4-compute-silent s4-ws-silent s4-killer s4-ws-silent-cut s4-ws-ka-cut s4-noise; do
+  for c in dokploy-traefik s4-compute s4-ws s4-compute-silent s4-ws-silent s4-killer s4-ws-silent-cut s4-ws-ka-cut s4-noise s4-lab; do
     docker logs "$c" > "$WORK/logs/$c.log" 2>&1 || true
   done
   for c in $(dc_main ps -aq 2>/dev/null); do docker logs "$c" > "$WORK/logs/relay.log" 2>&1 || true; done
@@ -187,6 +213,7 @@ guard() {
 down() {
   guard
   [ ! -d "$WORK" ] || { dc_clients down -v --remove-orphans; dc_main down -v --remove-orphans; dc_silent down -v --remove-orphans; } >/dev/null 2>&1
+  ! ours s4-lab || docker rm -f s4-lab >/dev/null 2>&1
   ! ours dokploy-traefik || docker rm -f dokploy-traefik >/dev/null 2>&1
   ! net_ours dokploy-network || docker network rm dokploy-network >/dev/null 2>&1
   [ ! -e "$WORK/swarm-by-s4" ] || docker swarm leave --force >/dev/null 2>&1
@@ -197,7 +224,7 @@ down() {
 dokploy_env() {  # dokploy_env APPNAME CREDENTIAL_FILE [KEY=VALUE...]   the env file as Dokploy writes it
   local app="$1" cred="$2" kv; shift 2
   printf 'APP_NAME="%s"\nCOMPOSE_PROJECT_NAME="%s"\n' "$app" "$app"
-  sed -n 's/^\(RELAY_[A-Z]*\)=\(.*\)$/\1="\2"/p' "$cred"
+  sed -n 's/^\(RELAY_[A-Z_]*\)=\(.*\)$/\1="\2"/p' "$cred"
   for kv in "$@"; do printf '%s="%s"\n' "${kv%%=*}" "${kv#*=}"; done
   # Dokploy appends DOCKER_CONFIG=/root/.docker (it deploys as root), and docker compose obeys it. The replica
   # is not root, so the line points at this user's Docker configuration instead.
@@ -226,6 +253,12 @@ setup() {
   "$g" --env "$WORK/cred/main.env" --url "https://$HOST" init >/dev/null 2>&1 || die "gen-credentials init"
   "$g" --env "$WORK/cred/main.env" --url "https://$HOST" add-client compute office-pc 7001 > "$WORK/env/compute.env" 2>/dev/null || die "add-client"
   "$g" --env "$WORK/cred/main.env" --url "https://$HOST" add-client workstation avi-mac 7001 > "$WORK/env/workstation.env" 2>/dev/null || die "add-client"
+  # the main relay in pairing mode: the token made the way the owner makes it; the silent one stays legacy
+  "$g" --env "$WORK/cred/main.env" admin-token >/dev/null 2>&1 || die "gen-credentials admin-token"
+  grep '^RELAY_ADMIN_TOKEN=' "$WORK/cred/main.env" > "$WORK/env/admin.env"
+  if [ -n "$RELAY_FAULT" ]; then
+    printf 'services:\n  mu-relay:\n    build:\n      args:\n        MU_RELAYD_TAGS: faults\n    environment:\n      MU_RELAY_FAULT: %s\n' "$RELAY_FAULT" > "$WORK/break-fault.yaml"
+  fi
   "$g" --env "$WORK/cred/silent.env" --url "https://$HOST_SILENT" init >/dev/null 2>&1 || die "gen-credentials init"
   "$g" --env "$WORK/cred/silent.env" --url "https://$HOST_SILENT" add-client compute office-pc 7001 > "$WORK/env/compute-silent.env" 2>/dev/null || die "add-client"
   "$g" --env "$WORK/cred/silent.env" --url "https://$HOST_SILENT" add-client workstation avi-mac 7001 > "$WORK/env/workstation-silent.env" 2>/dev/null || die "add-client"
@@ -427,16 +460,16 @@ test_access() {
     '[[ $rc == 7 && $out == "pong $NONCE" ]]'
 
   local leaks users environ
-  leaks="$(docker logs "$RELAY" 2>&1 | grep -c -F -e "${C_AUTH#*:}" -e "${W_AUTH#*:}" -e "$(val "$WORK/cred/main.env" RELAY_KEY)")"
+  leaks="$(docker logs "$RELAY" 2>&1 | grep -c -F -e "${C_AUTH#*:}" -e "${W_AUTH#*:}" -e "$(val "$WORK/cred/main.env" RELAY_KEY)" -e "$(val "$WORK/cred/main.env" RELAY_ADMIN_TOKEN)")"
   users="$(docker logs "$RELAY" 2>&1 | grep -c 'office-pc')"
   environ="$(docker exec "$RELAY" sh -c "tr '\\0' '\\n' < /proc/1/environ | grep -c '^RELAY_'")"
   check X12 "No password or key in the relay's log; no client password in chisel's environment (the key is there, by design)" "$leaks secret lines among $(docker logs "$RELAY" 2>&1 | wc -l | tr -d ' ') ($users name the client); $environ RELAY_ variables" \
     '[[ $leaks == 0 && $users -ge 1 && $environ == 0 ]]'
   out="$(docker logs "$RELAY" 2>&1 | sed -n 's/.*server: Fingerprint //p' | head -n 1)"
   check X13 "gen-credentials.sh computes the fingerprint chisel prints" "$( [ "$out" = "$FP" ] && echo equal || echo "chisel $out, script $FP" )" '[[ -n $FP && $out == "$FP" ]]'
-  out="$(docker inspect -f 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}} capdrop={{.HostConfig.CapDrop}} memory={{.HostConfig.Memory}} nanocpus={{.HostConfig.NanoCpus}} pids={{.HostConfig.PidsLimit}} published={{len .HostConfig.PortBindings}} mounts={{len .Mounts}}' "$RELAY")"
-  check X14 "compose.yaml's limits are applied by plain docker compose" "$out" \
-    '[[ $out == "readonly=true user=65532:65532 capdrop=[ALL] memory=268435456 nanocpus=500000000 pids=256 published=0 mounts=0" ]]'
+  out="$(docker inspect -f 'readonly={{.HostConfig.ReadonlyRootfs}} user={{.Config.User}} capdrop={{.HostConfig.CapDrop}} memory={{.HostConfig.Memory}} nanocpus={{.HostConfig.NanoCpus}} pids={{.HostConfig.PidsLimit}} published={{len .HostConfig.PortBindings}} mounts={{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}:rw={{.RW}} {{end}}' "$RELAY")"
+  check X14 "compose.yaml's limits are applied by plain docker compose; the one mount is the state volume" "$out" \
+    '[[ $out == "readonly=true user=65532:65532 capdrop=[ALL] memory=268435456 nanocpus=500000000 pids=256 published=0 mounts=volume:$VOLUME:/var/lib/mu-relay:rw=true " ]]'
 
   # chisel's own client never asks for a tunnel it did not declare, so X6-X8 show that the relay checks the
   # declaration. A client written to cheat declares what it may have and then asks for channels to other places.
@@ -575,6 +608,196 @@ test_reconnect() {
     '[[ $p == "pong $NONCE" ]] && lt "$t" 45'
 }
 
+# --------------------------------------------------------------------------------------------- pairing service
+# The admin's and the claimer's requests run in the probe container, an outside client like the Mac and the PC. The
+# admin token goes in through the environment (docker exec -e NAME, the value not on the command line) and the test
+# codes through stdin.
+api() {  # api METHOD PATH [JSON]   as the admin; prints "<status> <body>"
+  docker exec -e TOKEN -e M="$1" -e P="$2" -e D="${3:-}" s4-probe sh -c '
+    if [ -n "$D" ]; then set -- -H "Content-Type: application/json" --data-binary "$D"; else set --; fi
+    code=$(curl -s -m 40 -o /tmp/api.out -w "%{http_code}" -X "$M" -H "Authorization: Bearer $TOKEN" "$@" \
+      --cacert /certs/ca.crt "https://relay.martand.systems$P"); echo "$code $(cat /tmp/api.out)"'
+}
+anon() {  # anon METHOD PATH [JSON] [EXTRA-HEADER]   without auth; prints "<status> <body>"
+  docker exec -e M="$1" -e P="$2" -e D="${3:-}" -e H="${4:-X-S4: 1}" s4-probe sh -c '
+    if [ -n "$D" ]; then set -- -H "Content-Type: application/json" --data-binary "$D"; else set --; fi
+    code=$(curl -s -m 40 -o /tmp/anon.out -w "%{http_code}" -X "$M" -H "$H" "$@" --cacert /certs/ca.crt \
+      "https://relay.martand.systems$P"); echo "$code $(cat /tmp/anon.out)"'
+}
+jget() { python3 -c 'import json,sys
+d=json.loads(sys.stdin.read().split(" ",1)[1])
+for k in sys.argv[1].split("."):
+    d = d[int(k)] if isinstance(d, list) else d.get(k) if isinstance(d, dict) else None
+print(json.dumps(d) if isinstance(d, (dict, list, bool)) or d is None else d)' "$1" 2>/dev/null; }
+pref() {  # pref SUBCOMMAND ARGS...   the reference pairing client in the probe; stdin passed through
+  docker exec -i -e PAIR_ADMIN_TOKEN -e MU_PAIR_FAULT="$PAIR_FAULT" -e PAIR_REF_TAMPER="${TAMPER:-}" s4-probe \
+    python3 /s4/pair_ref.py "$@" --relay "https://$HOST" --ca /certs/ca.crt
+}
+pref_invite() {  # pref_invite NAME PORT STATE [TTL]   prints the code
+  pref invite --fingerprint "$FP" --name "$1" --port "$2" --state "$3" --ttl "${4:-1800}" 2> "$WORK/out/pref-invite-$1.err"
+}
+HK="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEj8m4yS4hostkeyOfTheTestNodeOnlyForS4xyzABCD"
+fwd_ping() {  # fwd_ping AUTH LOCAL REMOTE   a forward from the probe as AUTH, one GET /ping through it
+  docker exec -e AUTH="$1" -e L="$2" -e R="$3" -e FP="$FP" s4-probe sh -c '
+    chisel client --max-retry-count 0 --tls-ca /certs/ca.crt --fingerprint "$FP" https://relay.martand.systems \
+      "127.0.0.1:$L:127.0.0.1:$R" > "/tmp/fwd-$L.log" 2>&1 & pid=$!
+    out=""; for i in $(seq 1 40); do out=$(curl -s -m 2 "http://127.0.0.1:$L/ping") && [ -n "$out" ] && break; sleep 0.25; done
+    kill $pid 2>/dev/null; wait $pid 2>/dev/null; echo "$out"'
+}
+
+test_pairing() {
+  say "Pairing service: mu-relayd behind chisel's --backend, on the same route (docs/design/pairing.md)"
+  TOKEN="$(val "$WORK/cred/main.env" RELAY_ADMIN_TOKEN)"; PAIR_ADMIN_TOKEN="$TOKEN"; export TOKEN PAIR_ADMIN_TOKEN
+  local out a b c code t0 rc st before after started lab_nonce pw
+  out="$(anon GET /mu/v1/)"
+  a="$(probe curl -s -m 5 --cacert /certs/ca.crt "https://$HOST/health")"
+  b="$(probe curl -s -m 5 -o /dev/null -w '%{http_code}' --cacert /certs/ca.crt "https://$HOST_SILENT/mu/v1/")"
+  check P1 "https://$HOST/mu/v1/ answers through Traefik on the relay's one route; /health is still OK; the legacy relay has no /mu/v1/" \
+    "$(echo "$out" | cut -c1-90); /health $a; legacy relay $b" \
+    '[[ $out == "200 "*"\"pairing\":true"*"\"service\":\"mu-relay\""* && $a == OK && $b == 404 ]]'
+  # an invite that is left to expire (its ttl is the minimum, 60 s); checked in P6
+  local exp_code; exp_code="$(pref_invite exp-pc 7009 /tmp/inv-exp.json 60)"; local t_exp; t_exp="$(now)"
+
+  a="$(anon GET /mu/v1/clients | cut -d' ' -f1)"
+  b="$(TOKEN="${TOKEN:0:8}$(printf 'x%.0s' $(seq 1 $(( ${#TOKEN} - 8 ))))" api GET /mu/v1/clients | cut -d' ' -f1)"
+  c="$(api GET /mu/v1/clients | cut -d' ' -f1)"
+  check P2 "The admin API needs the token: none 401, a wrong one with the right first 8 characters 403, the right one 200" "$a $b $c" \
+    '[[ $a == 401 && $b == 403 && $c == 200 ]]'
+
+  before="$(conns s4-compute) $(conns s4-ws)"; started="$(started_at "$RELAY")"
+  code="$(pref_invite lab-pc 7002 /tmp/inv-lab.json)"
+  a="$(printf '%s\r\n' "$code" | pref claim --state /tmp/claim-lab.json --host-key "$HK" --password-file /tmp/lab.pw 2>&1)"
+  b="$(pref wait --state /tmp/inv-lab.json --timeout 30 2>&1)"
+  c="$(pref result --state /tmp/claim-lab.json --timeout 30 2>&1)"
+  check P3 "Invite end to end through Traefik (the reference client, code typed with CR LF): created, claimed, answered, verified, accepted, finished, confirmed" \
+    "claim: $(echo "$a" | cut -c1-60); inviter: $(echo "$b" | cut -c1-60); claimer: $(echo "$c" | cut -c1-60)" \
+    '[[ ${#code} == 29 && $a == *"\"ok\": true"* && $b == *"\"state\": \"finished\""* && $b == *"$HK"* && $c == *"\"confirmed\": true"* ]]'
+
+  pw="$(docker exec s4-probe cat /tmp/lab.pw 2>/dev/null)"
+  printf 'RELAY_URL=https://%s\nRELAY_FINGERPRINT=%s\nRELAY_ROLE=compute\nRELAY_USER=lab-pc\nRELAY_PASSWORD=%s\nRELAY_PORTS=7002\n' "$HOST" "$FP" "$pw" > "$WORK/env/lab.env"
+  docker rm -f s4-lab >/dev/null 2>&1
+  t0="$(now)"
+  docker run -d --name s4-lab --label mu.s4=1 --network "$OFFICE_NET" --add-host "$HOST:host-gateway" \
+    -v "$WORK/certs/ca.crt:/certs/ca.crt:ro" --env-file "$WORK/env/lab.env" -e S4_BLOB_MB=1 s4-client compute >/dev/null
+  wait_log s4-lab 'client: Connected' 20; t="$(since "$t0")"
+  lab_nonce="$(nonce s4-lab)"
+  a="$(fwd_ping "$W_AUTH" 7912 7002)"; b="$(ping_via s4-ws)"; after="$(conns s4-compute) $(conns s4-ws)"
+  check P4 "The node's new dynamic client is accepted by chisel after the auth-file rewrite, with no restart; avi-mac reaches it on the granted port; the other tunnels untouched" \
+    "lab-pc connected after $t s; avi-mac -> 7002: ${a:-nothing}; container restarted: $( [ "$(started_at "$RELAY")" = "$started" ] && echo no || echo yes ); chisel restarts: $(nlog "$RELAY" 'chisel restarted'); connects/disconnects $before -> $after" \
+    '[[ -n $lab_nonce && $a == "pong $lab_nonce" && $b == "pong $NONCE" && $(started_at "$RELAY") == "$started" && $(nlog "$RELAY" "chisel restarted") == 0 && $after == "$before" ]] && lt "$t" 15'
+
+  # The access rules of dynamic clients, with the client that is not chisel's (as X15-X17 for the static ones).
+  api PUT /mu/v1/clients/dyn-ws '{"role":"workstation","password":"dyn-ws-password-0123456789abcdef","ports":[7002]}' > "$WORK/out/put-dyn-ws.txt"
+  sleep 1
+  rawchan dynws "dyn-ws:dyn-ws-password-0123456789abcdef" 127.0.0.1:7002:127.0.0.1:7002 127.0.0.1:7002 127.0.0.1:7001 dokploy-traefik:8080 127.0.0.1:8080 127.0.0.1:8081
+  rawchan dynpc "lab-pc:$pw" - 127.0.0.1:7002 127.0.0.1:7001 dokploy-traefik:8080 127.0.0.1:8081
+  adhoc labrev 20 "lab-pc:$pw" "$FP" R:127.0.0.1:7001:127.0.0.1:9000
+  adhoc labany 20 "lab-pc:$pw" "$FP" R:0.0.0.0:7002:127.0.0.1:9000
+  check P5 "Dynamic clients get exactly the static rules: the workstation opens its port only; the compute node no channel and no other listener" \
+    "dyn-ws: $(rawchan_line dynws 127.0.0.1:7002 | cut -c1-30) / 7001 $(rawchan_line dynws 127.0.0.1:7001 | cut -c1-20) / traefik $(rawchan_line dynws dokploy-traefik:8080 | cut -c1-20); lab-pc: $(rawchan_opened dynpc) opened, R:7001 $(adhoc_last labrev | cut -c1-30)" \
+    '[[ $(rawchan_line dynws 127.0.0.1:7002) == "OPENED HTTP/1."*" 200 OK | pong $lab_nonce" ]] && rawchan_denied dynws 127.0.0.1:7001 && rawchan_denied dynws dokploy-traefik:8080 && rawchan_denied dynws 127.0.0.1:8080 && rawchan_denied dynws 127.0.0.1:8081 && [[ $(rawchan_opened dynws) == 1 ]] && rawchan_denied dynpc 127.0.0.1:7002 && rawchan_denied dynpc 127.0.0.1:7001 && rawchan_denied dynpc 127.0.0.1:8081 && [[ $(rawchan_opened dynpc) == 0 ]] && ! adhoc_connected labrev && adhoc_says labrev denied && ! adhoc_connected labany && adhoc_says labany denied'
+
+  # Codes: wrong and unknown look the same; used; expired; the per-address rate limit.
+  local s1 s2 cl unk wrong used expd lim
+  s1="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  cl="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  unk="$(anon POST /mu/v1/invites/ZZZZ/claim "{\"claim\":\"$cl\",\"session\":\"$s1\"}")"
+  wrong="$(anon POST "/mu/v1/invites/$(echo "$code" | cut -c1-4)/claim" "{\"claim\":\"$cl\",\"session\":\"$s1\"}")"
+  used="$(printf '%s\n' "$code" | pref claim --state /tmp/claim-again.json --host-key "$HK" 2>&1)"
+  while ! ge "$(since "$t_exp")" 62; do sleep 1; done
+  expd="$(printf '%s\n' "$exp_code" | pref claim --state /tmp/claim-exp.json --host-key "$HK" 2>&1)"
+  lim="$(docker exec s4-noise sh -c 'for i in $(seq 1 31); do curl -s -m 5 -o /dev/null -w "%{http_code} " --connect-to relay.martand.systems:443:dokploy-traefik:443 --cacert /certs/ca.crt https://relay.martand.systems/mu/v1/; done')"
+  check P6 "Codes: an unknown id and a wrong code get the same answer; a used code is refused; an expired one too; the 31st request in a minute from one address gets 429" \
+    "unknown: $(echo "$unk" | cut -c1-40); wrong: $( [ "$unk" = "$wrong" ] && echo same || echo "$(echo "$wrong" | cut -c1-40)" ); used: $(echo "$used" | cut -c1-50); expired: $(echo "$expd" | cut -c1-50); limit: $(echo "$lim" | tr ' ' '\n' | sort | uniq -c | tr -s ' \n' ' ')" \
+    '[[ $unk == "403 "*"wrong-code"* && $unk == "$wrong" && $used == *"invite-used"* && $expd == *"invite-expired"* && $lim == "$(printf "200 %.0s" $(seq 1 30))429 " ]]'
+
+  # Integrity: a key changed on the way is refused by the side that checks it; a second claimer is refused and contests.
+  local c1 c2 c3 r1 r2 r3 r4 clients
+  c1="$(pref_invite tamp-pc 7003 /tmp/inv-tamp.json)"
+  r1="$(printf '%s\r\n' "$c1" | TAMPER=offer pref claim --state /tmp/claim-tamp.json --host-key "$HK" 2>&1)"
+  c2="$(pref_invite tama-pc 7004 /tmp/inv-tama.json)"
+  printf '%s\r\n' "$c2" | pref claim --state /tmp/claim-tama.json --host-key "$HK" > /dev/null 2>&1
+  r2="$(TAMPER=answer pref wait --state /tmp/inv-tama.json --timeout 30 2>&1)"
+  c3="$(pref_invite con-pc 7005 /tmp/inv-con.json)"
+  printf '%s\r\n' "$c3" | pref claim --state /tmp/claim-con.json --host-key "$HK" > /dev/null 2>&1
+  r3="$(printf '%s\r\n' "$c3" | pref contest --state /tmp/contest.json 2>&1)"
+  r4="$(pref wait --state /tmp/inv-con.json --timeout 30 2>&1)"
+  clients="$(api GET /mu/v1/clients | jget clients | python3 -c 'import json,sys; print(" ".join(sorted(c["name"] for c in json.load(sys.stdin))))')"
+  check P7 "A changed offer is refused by the claimer, a changed answer by the inviter (both abort, no client stays); a second claimer is refused, contests, and the inviter refuses to finish" \
+    "offer: $(echo "$r1" | cut -c1-40); answer: $(echo "$r2" | cut -c1-40); contest: $(echo "$r3" | cut -c1-30); inviter: $(echo "$r4" | cut -c1-40); clients: $clients" \
+    '[[ $r1 == *"pair-integrity"* && $r2 == *"pair-integrity"* && $r3 == *"\"contested\": true"* && $r4 == *"contested"* && " $clients " != *" tamp-pc "* && " $clients " != *" tama-pc "* && " $clients " != *" con-pc "* && " $clients " == *" lab-pc "* ]]'
+
+  # Removing a client: its established session is cut (chisel restarted), it is refused afterwards, the others return.
+  # P7's removals restarted chisel; at most one restart per 10 s, so let that window pass first.
+  sleep 11; wait_ping s4-ws "pong $NONCE" 30
+  before="$(nlog s4-lab 'client: Disconnected')"
+  t0="$(now)"; out="$(api DELETE /mu/v1/clients/lab-pc)"
+  wait_log s4-lab 'client: Disconnected' 20; t="$(since "$t0")"
+  wait_log s4-lab 'uthentication failed' 20
+  a="$(fwd_ping "$W_AUTH" 7913 7002)"
+  wait_ping s4-ws "pong $NONCE" 30; b="$(ping_via s4-ws)"
+  c="$(api GET /mu/v1/clients/avi-mac | jget client.ports)"
+  check P8 "Removing the node's client cuts its tunnel at once and refuses it afterwards; avi-mac loses the port; the static tunnels come back" \
+    "$(echo "$out" | cut -c1-40); lab-pc disconnected after $t s ($(nlog s4-lab 'client: Disconnected') time(s)), then refused $(nlog s4-lab 'uthentication failed') time(s); avi-mac -> 7002: ${a:-nothing}; ports $c; static: ${b:-nothing}" \
+    '[[ $out == "200 "* && $(nlog s4-lab "client: Disconnected") -gt $before && $(nlog s4-lab "uthentication failed") -ge 1 && -z $a && $b == "pong $NONCE" && $c == "[7001]" ]] && lt "$t" 15'
+  docker logs s4-lab > "$WORK/logs/s4-lab.log" 2>&1; docker rm -f s4-lab >/dev/null 2>&1
+
+  say "Pairing state on the named volume"
+  local sid old half keep
+  api PUT /mu/v1/clients/keep-pc '{"role":"compute","password":"keep-pc-password-0123456789abcdef","ports":[7006]}' > /dev/null
+  half="$(pref_invite half-pc 7007 /tmp/inv-half.json)"
+  sid="$(api GET /mu/v1/clients | jget store_id)"
+  old="$RELAY"
+  dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
+  wait_code OK 60 probe curl -s -m 3 --cacert /certs/ca.crt "https://$HOST/health"
+  a="$(api GET /mu/v1/clients | jget store_id)"
+  b="$(api GET "/mu/v1/invites/$(echo "$half" | cut -c1-4)" | jget invite.state)"
+  adhoc keep 8 "keep-pc:keep-pc-password-0123456789abcdef" "$FP" R:127.0.0.1:7006:127.0.0.1:9000
+  check P9 "A redeploy (container recreated) keeps the store: the same store id, the dynamic client accepted, a half-done invite still open" \
+    "container $( [ "$RELAY" != "$old" ] && echo replaced || echo "not replaced" ); store $sid -> $a; invite: $b; keep-pc: $(adhoc_last keep)" \
+    '[[ -n $sid && $RELAY != "$old" && $a == "$sid" && $b == created ]] && adhoc_connected keep'
+
+  dc_main down >> "$WORK/logs/compose.log" 2>&1
+  docker volume rm "$VOLUME" >> "$WORK/logs/compose.log" 2>&1
+  dc_main up -d --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
+  wait_code OK 60 probe curl -s -m 3 --cacert /certs/ca.crt "https://$HOST/health"
+  a="$(api GET /mu/v1/clients | jget store_id)"
+  adhoc keep2 15 "keep-pc:keep-pc-password-0123456789abcdef" "$FP" R:127.0.0.1:7006:127.0.0.1:9000
+  adhoc static2 8 "$W_AUTH" "$FP" 127.0.0.1:7914:127.0.0.1:7001
+  check P10 "A lost volume: a new store, the dynamic client refused, the static clients unaffected" \
+    "store $sid -> $a; keep-pc: $(adhoc_last keep2); avi-mac: $(adhoc_last static2)" \
+    '[[ -n $a && $a != null && $a != "$sid" ]] && ! adhoc_connected keep2 && adhoc_says keep2 "authenticat" && adhoc_connected static2'
+
+  # The auth file never empties: chisel 1.12.0 lets anyone in when it has no users (server.go authUser).
+  a="$(api DELETE /mu/v1/clients/office-pc | cut -d' ' -f1)"
+  b="$(api DELETE /mu/v1/clients/avi-mac)"
+  sleep 1
+  adhoc nobody 15 "nobody:not-a-password-000000000000000000000" "$FP" 127.0.0.1:7915:127.0.0.1:8081
+  c="$(docker exec "$RELAY" sh -c 'grep -c "^  \"_mu-sentinel:" /run/relay/users.json')"
+  check P11 "Removing every client is refused at the last one; the auth file keeps its sentinel user; a client with no valid password is refused" \
+    "office-pc: $a; avi-mac: $(echo "$b" | cut -c1-50); sentinel lines $c; anyone: $(adhoc_last nobody)" \
+    '[[ $a == 200 && $b == "409 "*"last-client"* && $c == 1 ]] && ! adhoc_connected nobody && adhoc_says nobody "authenticat"'
+  api DELETE /mu/v1/tombstones/office-pc > /dev/null
+
+  # A volume the relay cannot write: the static clients keep working, pairing answers 503.
+  dc_main -f tools/s4/rootvolume.yaml up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
+  wait_code OK 60 probe curl -s -m 3 --cacert /certs/ca.crt "https://$HOST/health"
+  a="$(anon GET /mu/v1/)"; b="$(api GET /mu/v1/clients | cut -c1-40)"
+  adhoc static3 8 "$W_AUTH" "$FP" 127.0.0.1:7916:127.0.0.1:7001
+  check P12 "A state directory the relay cannot write: /mu/v1/ says so, the admin API answers 503, the static clients still connect" \
+    "$(echo "$a" | cut -c1-70); $b; avi-mac: $(adhoc_last static3)" \
+    '[[ $a == "200 "*"\"pairing\":false"*"\"store\":\"unwritable\""* && $b == "503 "*"store-unwritable"* ]] && adhoc_connected static3'
+  dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
+  wait_code OK 60 probe curl -s -m 3 --cacert /certs/ca.crt "https://$HOST/health"
+
+  a="$(docker exec "$RELAY_SILENT" sh -c 'tr "\0" " " < /proc/1/cmdline' 2>/dev/null)"
+  b="$(docker exec "$RELAY_SILENT" sh -c 'grep -c sentinel /run/relay/users.json; [ -e /run/relay/static.tsv ] && echo tsv || echo no-tsv' 2>/dev/null | tr '\n' ' ')"
+  c="$(docker exec "$RELAY" sh -c 'tr "\0" " " < /proc/1/cmdline' 2>/dev/null)"
+  check P13 "Legacy mode (no RELAY_ADMIN_TOKEN) is today's relay: chisel is the main process with no --backend, its auth file has no sentinel; pairing mode runs mu-relayd" \
+    "legacy: $(echo "$a" | cut -c1-90); $b; pairing: $(echo "$c" | cut -c1-50)" \
+    '[[ $a == "/usr/local/bin/chisel server --host 0.0.0.0 --port 8080 --reverse --authfile /run/relay/users.json --keepalive 0s "* && $a != *backend* && $b == "0 no-tsv " && $c == "/usr/local/bin/mu-relayd --config /run/relay/relayd.conf "* ]]'
+}
+
 # -------------------------------------------------------------------------------------------------------- main
 case "${1:-run}" in
   down) down; exit 0 ;;
@@ -590,11 +813,14 @@ test_routing
 test_tunnels
 test_access
 [ "$BREAK" != acl ] || finish
-test_limit
-test_idle
-[ "$BREAK" != idle ] || finish
-test_reconnect
-[ "$BREAK" != noretry ] || finish
+if [ "$ONLY" != pairing ]; then
+  test_limit
+  test_idle
+  [ "$BREAK" != idle ] || finish
+  test_reconnect
+  [ "$BREAK" != noretry ] || finish
+fi
+test_pairing
 # Traefik logs at ERROR, as Dokploy leaves it. A failed ACME order, or a router or middleware it cannot build, is
 # logged there. A 502 or 504 answered for the relay is not (Traefik logs those at DEBUG): R1b is where one shows.
 n="$(docker logs dokploy-traefik 2>&1 | grep -c .)"

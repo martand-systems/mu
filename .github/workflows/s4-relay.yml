@@ -41,6 +41,52 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: tools/s4/test-config.sh
 
+  # mu-relayd, the pairing service (docs/design/pairing.md §13.1): its unit tests under the race detector, the same
+  # with the real chisel 1.12.0 on loopback (reload, eviction, rules, an auth file that never opens chisel up), and
+  # relay/control/must-fail.sh: built with -tags faults, every protection switched off in turn must be noticed.
+  control:
+    name: mu-relayd unit tests and faults
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GO_VERSION: "1.26.4"
+      GO_SHA256: "1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f"
+      CHISEL_SHA256: "f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go and chisel, checked against pinned SHA-256 sums (the Go of relay/Dockerfile, the chisel of the relay)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$RUNNER_TEMP/go.tgz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+          echo "$GO_SHA256  $RUNNER_TEMP/go.tgz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/go.tgz"
+          curl -sSfL -o "$RUNNER_TEMP/chisel.gz" https://github.com/jpillora/chisel/releases/download/v1.12.0/chisel_1.12.0_linux_amd64.gz
+          echo "$CHISEL_SHA256  $RUNNER_TEMP/chisel.gz" | sha256sum -c -
+          gunzip -c "$RUNNER_TEMP/chisel.gz" > "$RUNNER_TEMP/bin/chisel"; chmod 0755 "$RUNNER_TEMP/bin/chisel"
+          echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+          echo "MU_RELAYD_CHISEL=$RUNNER_TEMP/bin/chisel" >> "$GITHUB_ENV"
+      - name: go vet, gofmt, and a build with nothing to download
+        working-directory: relay/control
+        env: {GOFLAGS: -mod=readonly, GOPROXY: "off", GOTOOLCHAIN: local}
+        run: |
+          go version
+          test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::gofmt"; exit 1; }
+          go vet ./... && go vet -tags faults ./...
+          CGO_ENABLED=0 go build -trimpath -o /dev/null .
+      - name: Unit and integration tests (race detector, the real chisel)
+        working-directory: relay/control
+        env: {GOFLAGS: -mod=readonly, GOPROXY: "off", GOTOOLCHAIN: local}
+        run: go test -race -count=1 -v ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt" | grep -E '^(=== RUN|--- |PASS|FAIL|ok)' ; test "${PIPESTATUS[0]}" = 0
+      - name: The production build has no fault code
+        working-directory: relay/control
+        env: {GOFLAGS: -mod=readonly, GOPROXY: "off", GOTOOLCHAIN: local, CGO_ENABLED: "0"}
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/prod" . && go build -tags faults -trimpath -o "$RUNNER_TEMP/faults" .
+          ! grep -q -a 'MU_RELAY_FAULT' "$RUNNER_TEMP/prod" || { echo "::error::the production binary contains fault code"; exit 1; }
+          grep -q -a 'MU_RELAY_FAULT' "$RUNNER_TEMP/faults" || { echo "::error::the check above proves nothing"; exit 1; }
+      - name: Every fault is noticed (relay/control/must-fail.sh)
+        run: relay/control/must-fail.sh
+
   # The owner makes the credentials on a Mac, with the bash 3.2 that macOS ships. Only there does bash match
   # upper-case letters against [a-z] in a UTF-8 locale, which is what the scripts' LC_ALL=C is for. In the long run
   # only: macOS minutes are billed tenfold.
@@ -121,6 +167,14 @@ jobs:
           - { break: acl,     what: "the relay has no access rules",      fail: "X6 X7 X8 X16 X17", pass: "X1 X5 X9 X15" }
           - { break: idle,    what: "an idle tunnel is cut",              fail: "I2",               pass: "I1 I3 I4" }
           - { break: noretry, what: "the workstation does not reconnect", fail: "R1",               pass: "I1 I5" }
+          # the pairing service (run.sh: S4_ONLY=pairing; the relay faults build mu-relayd with -tags faults)
+          - { break: adminprefix, what: "mu-relayd checks only the admin token's first 8 characters", fail: "P2",       pass: "P1 P3" }
+          - { break: noreload,    what: "the auth file is not rewritten after a change",              fail: "P4 P5 P8", pass: "P3 P7" }
+          - { break: wideacl,     what: "a workstation's rule allows every port",                     fail: "X16 P5",   pass: "X15 P4" }
+          - { break: noevict,     what: "a removed client keeps its tunnel",                          fail: "P8",       pass: "P4 P7" }
+          - { break: allowempty,  what: "the auth file may be empty (chisel then lets anyone in)",    fail: "P11",      pass: "P10 P12" }
+          - { break: novolume,    what: "the pairing state is not on the named volume",               fail: "X14 P9",   pass: "P3 P10" }
+          - { break: skipmac,     what: "a pairing client does not check the MACs",                   fail: "P7",       pass: "P3 P6" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Run with the fault

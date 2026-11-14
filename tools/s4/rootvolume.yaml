@@ -1,0 +1,9 @@
+# Row P12 (run.sh): the state directory is not writable by the relay's user (a volume created by root, or no volume
+# where the image's directory would be owned by root). mu-relayd must keep the static clients working and answer
+# 503 store-unwritable on the pairing endpoints. Never part of a deploy.
+services:
+  mu-relay:
+    volumes: !reset []
+    tmpfs: !override
+      - /run/relay:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=65532,gid=65532
+      - /var/lib/mu-relay:rw,noexec,nosuid,nodev,size=1m,mode=0755

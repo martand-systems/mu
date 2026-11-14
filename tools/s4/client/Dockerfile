@@ -17,6 +17,6 @@ FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0
 RUN apk add --no-cache curl python3
 COPY --from=relay /usr/local/bin/chisel /usr/local/bin/chisel
 COPY --from=rawchan /rawchan /usr/local/bin/rawchan
-COPY entry.sh service.py alpn_probe.py ws_probe.py ws_flood.py idle_killer.py wait_http.py /s4/
+COPY entry.sh service.py alpn_probe.py ws_probe.py ws_flood.py idle_killer.py wait_http.py pair_ref.py /s4/
 RUN mkdir -p /data /certs
 ENTRYPOINT ["/bin/sh", "/s4/entry.sh"]

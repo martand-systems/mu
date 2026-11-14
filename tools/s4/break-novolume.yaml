@@ -1,0 +1,8 @@
+# S4_BREAK=novolume only (run.sh): the relay's state on a tmpfs instead of compose.yaml's named volume, writable but
+# gone with the container. Row P9 (the state survives a redeploy) has to notice. Never part of a deploy.
+services:
+  mu-relay:
+    volumes: !reset []
+    tmpfs: !override
+      - /run/relay:rw,noexec,nosuid,nodev,size=64k,mode=0700,uid=65532,gid=65532
+      - /var/lib/mu-relay:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=65532,gid=65532
