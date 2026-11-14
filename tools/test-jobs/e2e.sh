@@ -37,7 +37,7 @@ must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row
   eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
   else case "$M" in   # a row that could not even start shows nothing about the fault
-    "invite failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
+    "invite failed"*|"drain failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
     *) row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M" ;; esac; fi
   eval "$4"
 }

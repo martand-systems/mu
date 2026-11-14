@@ -5,8 +5,9 @@
 # ws2. node.json sched {cores: NC, mem_bytes: 2 GiB, check: true}: C = NC (the runner's CPUs, at most 4: a private
 # repository's runner has 2), M = 2 GiB, and the runner checks the invariants after every pass (a violation goes to
 # /srv/mu/state/invariant-violation; every row fails on one). HC = NC / 2: "half the node".
-# Rows: Q01-Q14, Q18-Q20 (concurrency), Q22-Q28 (queue control), V1-V3 (a release installed and switched while jobs
-# run, gc only when idle, mu compute update). Not here (unit level only: tools/test-jobs/unit_sched.py): Q15-Q17, Q21.
+# Rows: Q01-Q14, Q18-Q20 (concurrency), Q22-Q28 (queue control), Q14B (the previous release's client against this
+# node), V1 and V3 (a release installed and switched while jobs run, gc only when idle, mu compute update; there is no
+# V2). Not here (unit level only: tools/test-jobs/unit_sched.py): Q15, Q16, Q17, Q21.
 
 QLOG=/home/mu/q.log
 SRC=/home/mu/.local/share/mu/toolchains/v2026.11.7/recipe/src
@@ -33,14 +34,20 @@ short() { local x; for x in "$@"; do printf '%s ' "${x: -6}"; done; }
 jq_() { python3 -c "$1" 2>/dev/null; }
 inv() { sudo cat /srv/mu/state/invariant-violation 2>/dev/null | tail -3 | tr '\n' ' '; }
 unfinished() { sudo sh -c 'for d in /srv/mu/jobs/*/; do [ -f "$d/result.json" ] || basename "$d"; done' 2>/dev/null; }
-drain() {   # every unfinished job cancelled, the node idle, the order file and the violation record gone
+drain() {   # every unfinished job cancelled, the node idle, the order file and the violation record gone; fails when a
+            # job is left (a row run on a node that is not idle would show nothing about its fault)
   local i n
   for i in $(unfinished); do ws cancel "$i" --on office-pc --json >/dev/null 2>&1 & done; wait
   for n in $(seq 1 90); do [ -z "$(unfinished)" ] && break; sleep 1; done
   sudo rm -f /srv/mu/state/invariant-violation /srv/mu/queue.json
   sudo -u mu sh -c ": > $QLOG"
+  [ -z "$(unfinished)" ]
 }
-qpre() { drain; }
+qpre() { drain || { M="drain failed: jobs left unfinished: $(unfinished | tr '\n' ' ')"; return 1; }; }
+poll() {   # poll SECONDS CMD...: run CMD every second until it succeeds (0) or SECONDS pass (1)
+  local end=$(( $(date +%s) + $1 )); shift
+  while [ "$(date +%s)" -le "$end" ]; do "$@" && return 0; sleep 1; done; return 1
+}
 qend() {   # qend RC: the row's result, failed by any invariant violation of the runner during it
   local rc="$1" v; v="$(inv)"
   [ -z "$v" ] || { M="$M · INVARIANT VIOLATED: $v"; rc=1; }
@@ -101,7 +108,7 @@ PYM
 
 # ---------------------------------------------------------------------------------------------- concurrency (§13)
 q01() {
-  qpre; local a b sa ea sb eb
+  qpre || return 1; local a b sa ea sb eb
   a="$(submit --cores "$HC" --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
   b="$(submit --cores "$HC" --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
   wait_state "$a" "succeeded failed" 90; wait_state "$b" "succeeded failed" 90
@@ -111,16 +118,17 @@ q01() {
   qend $?
 }
 q02() {
-  qpre; local a b w f
+  qpre || return 1; local a b w f i
   a="$(submit --cores 1 --mem 1536M --time 2m -- sleep 15)"; wait_state "$a" running 60
-  b="$(submit --cores 1 --mem 1536M --time 2m -- sleep 1)"; sleep 3
+  b="$(submit --cores 1 --mem 1536M --time 2m -- sleep 1)"
+  for i in $(seq 1 15); do [ -n "$(ws status "$b" --json | jget waiting_for.resources.mem_bytes)" ] && break; sleep 1; done
   w="$(ws status "$b" --json | jget waiting_for.resources.mem_bytes)"; f="$(ws status "$b" --json | jget waiting_for.resources.free_cores)"
   M="a 1.5 GB job runs; a second one with M = 2 GiB: $(jobstate "$b"), waiting_for.resources.mem_bytes $w with $f core(s) free"
   [ "$(jobstate "$a")" = running ] && [ "$(jobstate "$b")" = queued ] && [ "$w" = 1610612736 ] && [ "${f:-0}" -ge 1 ]
   qend $?
 }
 q03() {
-  qpre; local a b c w s
+  qpre || return 1; local a b c w s
   a="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 8)")"; b="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 8)")"
   c="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 1)")"
   wait_state "$a" running 60; wait_state "$b" running 60; sleep 2
@@ -131,20 +139,22 @@ q03() {
   qend $?
 }
 q04() {
-  qpre; local a h b c bc cr hs
+  qpre || return 1; local a h b c bc cr hs
   a="$(submit --cores "$HC" --mem 256M --time 3m -- sleep 60)"; wait_state "$a" running 60
   h="$(submit --cores "$NC" --mem 256M --time 2m -- sleep 1)"
   b="$(submit --cores "$HC" --mem 256M --time 10s -- sleep 2)"
   c="$(submit --cores "$HC" --mem 256M --time 1h -- sleep 2)"
-  sleep 5
+  wait_state "$b" "succeeded failed" 30   # B ends: its cores are free, and C (1 h) would fit them now
+  local i cs=queued; for i in 1 2 3 4 5 6; do cs="$(jobstate "$c")"; [ "$cs" = queued ] || break; sleep 1; done
   bc="$(jobstate "$b" grant.class)"; cr="$(ws status "$c" --json | jget waiting_for.reservation.head)"
   hs="$(jobstate "$h" starts_by)"
-  M="head $(jobstate "$h") starts_by $hs; B $(jobstate "$b") class $bc; C $(jobstate "$c") reservation for ${cr: -6}"
-  [ "$(jobstate "$h")" = queued ] && [ -n "$hs" ] && [ "$bc" = backfilled ] && [ "$(jobstate "$c")" = queued ] && [ "$cr" = "$h" ]
+  M="head $(jobstate "$h") starts_by $hs; B $(jobstate "$b") class $bc; C $cs for 6 s after B ended (cores free), reservation for ${cr: -6}"
+  [ "$(jobstate "$h")" = queued ] && [ -n "$hs" ] && [ "$bc" = backfilled ] && [ "$(jobstate "$b")" = succeeded ] && \
+    [ "$cs" = queued ] && [ "$cr" = "$h" ]
   qend $?
 }
 q05() {
-  qpre; local a h sb i n=0 hst
+  qpre || return 1; local a h sb i n=0 hst
   a="$(submit --cores "$HC" --mem 256M --time 40s -- sleep 25)"; wait_state "$a" running 60
   h="$(submit --cores "$NC" --mem 256M --time 1m -- sleep 1)"; sleep 2
   sb="$(jobstate "$h" starts_by)"
@@ -158,14 +168,15 @@ print(int(f(sys.argv[1]) <= f(sys.argv[2]) + 1))' "$hst" "$sb")" = 1 ]
   qend $?
 }
 q06() {
-  qpre; local w e q1 q2 q3 q1s ca es q3s
+  qpre || return 1; local w e q1 q2 q3 q1s ca es q3s
   w="$(submit -- sleep 120)"   # whole node; idle CPUs, so a quick job without its quota would take more than one
   wait_state "$w" running 60; sleep 2
   e="$(submit --cores 1 --mem 256M --time 1m -- true)"
   q1="$(submit --quick -- sh -c 'for i in 1 2 3 4; do timeout 20 sh -c "while :; do :; done" & done; wait; exit 0')"
   q2="$(submit --quick -- sleep 40)"
   q3="$(submit --quick -- true)"
-  sleep 4; q1s="$(jobstate "$q1")"; es="$(jobstate "$e")"; q3s="$(jobstate "$q3")"
+  wait_state "$q1" running 30; wait_state "$q2" running 30; sleep 1
+  q1s="$(jobstate "$q1")"; es="$(jobstate "$e")"; q3s="$(jobstate "$q3")"
   ws cancel "$w" --json >/dev/null   # an ordinary core frees while both lane slots are still taken
   wait_state "$q3" "succeeded failed" 60; wait_state "$e" "succeeded failed" 60; wait_state "$q1" "succeeded failed" 60
   ca="$(jobstate "$q1" usage.cores_avg)"
@@ -175,7 +186,7 @@ q06() {
   qend $?
 }
 q07() {
-  qpre; local a b ma mb ga gb wa wb
+  qpre || return 1; local a b ma mb ga gb wa wb
   a="$(submit --cores "$HC" --mem 256M --time 1m -- python3 mask.py)"
   b="$(submit --cores "$HC" --mem 256M --time 1m -- python3 mask.py widen)"
   wait_state "$a" "succeeded failed" 90; wait_state "$b" "succeeded failed" 90
@@ -188,17 +199,17 @@ q07() {
   qend $?
 }
 q08() {
-  qpre; local a e c
-  a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c 'env > env.txt')"; wait_state "$a" "succeeded failed" 60
+  qpre || return 1; local a e c
+  a="$(submit --cores "$HC" --mem 256M --time 1m -- sh -c 'env > env.txt')"; wait_state "$a" "succeeded failed" 60
   e="$(sudo cat "/srv/mu/jobs/$a/work/env.txt" 2>/dev/null)"; c="$(jobstate "$a" grant.cpus)"
   g() { printf '%s\n' "$e" | sed -n "s/^$1=//p"; }
   M="OMP $(g OMP_NUM_THREADS) OPENBLAS $(g OPENBLAS_NUM_THREADS) PYTHON_CPU_COUNT $(g PYTHON_CPU_COUNT) CCX $(g CCX_NPROC_EQUATION_SOLVER) MU_JOB_CPUS $(g MU_JOB_CPUS) (grant $c) TMPDIR $(g TMPDIR)"
-  [ "$(g OMP_NUM_THREADS)" = "$NC" ] && [ "$(g OPENBLAS_NUM_THREADS)" = "$NC" ] && [ "$(g PYTHON_CPU_COUNT)" = "$NC" ] && \
-    [ "$(g CCX_NPROC_EQUATION_SOLVER)" = "$NC" ] && [ "$(g MU_JOB_CPUS)" = "$c" ] && [ "$(g TMPDIR)" = "/srv/mu/jobs/$a/tmp" ]
+  [ "$(g OMP_NUM_THREADS)" = "$HC" ] && [ "$(g OPENBLAS_NUM_THREADS)" = "$HC" ] && [ "$(g PYTHON_CPU_COUNT)" = "$HC" ] && \
+    [ "$(g CCX_NPROC_EQUATION_SOLVER)" = "$HC" ] && [ "$(g MU_JOB_CPUS)" = "$c" ] && [ "$(g TMPDIR)" = "/srv/mu/jobs/$a/tmp" ]
   qend $?
 }
 q09() {
-  qpre; local a b
+  qpre || return 1; local a b
   a="$(submit --cores 1 --mem 512M --time 2m -- python3 -c "import time; b = b'x' * (1536 << 20); time.sleep(2)")"
   b="$(submit --cores 1 --mem 1G --time 2m -- python3 -c "import time; b = b'x' * (900 << 20); time.sleep(12)")"
   wait_state "$a" "succeeded failed oom" 90; wait_state "$b" "succeeded failed oom" 90
@@ -207,7 +218,7 @@ q09() {
   qend $?
 }
 q10() {
-  qpre; local x d n ok=1 first i ids=""
+  qpre || return 1; local x d n ok=1 first i ids=""
   for i in $(seq 1 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 20)")"; done
   for x in $ids; do wait_state "$x" running 60; done; sleep 2
   d="$(submit --cores 1 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 2
@@ -222,7 +233,7 @@ q10() {
   qend $?
 }
 q11() {
-  qpre; local a b d gp alive i ids=""
+  qpre || return 1; local a b d gp alive i ids=""
   b="$(submit --cores 1 --mem 256M --time 2m -- sh -c 'trap "" TERM; sleep 600 & echo $! > gc.pid; while :; do sleep 1; done')"
   for i in $(seq 2 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sleep 25)"; done
   for x in $b $ids; do wait_state "$x" running 60; done
@@ -237,7 +248,7 @@ q11() {
   qend $?
 }
 q12() {
-  qpre; local s0 s1 o1 o2 o3 r1 r2 r3 h hs
+  qpre || return 1; local s0 s1 o1 o2 o3 r1 r2 r3 h hs
   s0="$(sudo grep -cE 'verb=submit|receive-pack' /srv/mu/audit.log)"
   o1="$(ws submit --json --cores 64 -- true 2>&1)"; r1=$?
   o2="$(ws submit --json --mem 1T -- true 2>&1)"; r2=$?
@@ -253,7 +264,7 @@ q12() {
   qend $?
 }
 q13() {
-  qpre; local z x ok=1 zs i ids=""
+  qpre || return 1; local z x ok=1 zs i ids=""
   local cmd='[ ! -e "$TMPDIR/marker" ] || exit 3; touch "$TMPDIR/marker"; '"$(qcmd 15)"
   for i in $(seq 1 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sh -c "$cmd")"; done
   for x in $ids; do wait_state "$x" running 60; done; sleep 2
@@ -269,7 +280,7 @@ q13() {
   qend $?
 }
 q14() {
-  qpre; local a n
+  qpre || return 1; local a n
   a="$(WSF=old-workstation submit --cores 1 --mem 256M --time 1m -- sh -c 'echo $MU_JOB_CORES > n.txt')"
   wait_state "$a" "succeeded failed" 60; n="$(sudo cat "/srv/mu/jobs/$a/work/n.txt" 2>/dev/null)"
   M="a spec without sched, --cores 1: granted $(jobstate "$a" grant.cores) cores ($(jobstate "$a" grant.cpus)), MU_JOB_CORES $n"
@@ -277,13 +288,13 @@ q14() {
   qend $?
 }
 q18() {
-  qpre; local x y q why
+  qpre || return 1; local x y q why
   x="$(submit --cores 1 --mem 256M --time 2m -- sleep 40)"; wait_state "$x" running 60
   asmu systemctl --user stop mu-node.service
   node_py 'p = "/srv/mu/jobs/'"$x"'/state.json"; st = durable.read_record(p); st.pop("grant", None); durable.write_record(p, st)'
   asmu systemctl --user start mu-node.service; sleep 2
   y="$(submit --cores 1 --mem 256M --time 1m -- true)"
-  q="$(submit --quick -- true)"; sleep 4
+  q="$(submit --quick -- true)"; wait_state "$q" "succeeded failed" 30; sleep 1
   why="$(jobstate "$y" starts_by_why)"
   M="a running job without a grant: a 1-core job $(jobstate "$y") (starts_by '$(jobstate "$y" starts_by)': $why); a --quick job $(jobstate "$q")"
   [ "$(jobstate "$y")" = queued ] && [ -z "$(jobstate "$y" starts_by)" ] && printf '%s' "$why" | grep -q "previous release" && \
@@ -294,7 +305,7 @@ q18() {
   qend $?
 }
 q19() {
-  qpre; local a h t j sb sb2 t2
+  qpre || return 1; local a h t j sb sb2 t2
   a="$(submit --cores "$NC" --mem 256M --time 1m -- sleep 25)"; wait_state "$a" running 60
   h="$(submit --cores "$HC" --mem 1G --time 1m -- true)"; sleep 2
   t="$(ws status "$h" 2>&1)"; sb="$(jobstate "$h" starts_by)"
@@ -306,7 +317,7 @@ q19() {
   qend $?
 }
 q20() {
-  qpre; local s o t f
+  qpre || return 1; local s o t f
   s="$(submit --cores 1 --mem 512M --time 1m -- python3 -c 'import time
 b = b"x" * (200 << 20); t = time.time()
 while time.time() - t < 8: pass')"
@@ -324,7 +335,7 @@ while time.time() - t < 8: pass')"
 
 # ---------------------------------------------------------------------------------------------- queue control (§20)
 q22() {
-  qpre; local r a b c d e o1 o2 o3 qo seq es ec
+  qpre || return 1; local r a b c d e o1 o2 o3 qo seq es ec
   r="$(blocker 35)"; wait_state "$r" running 60
   a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
@@ -343,7 +354,7 @@ q22() {
   qend $?
 }
 q23() {
-  qpre; local r a b c d m1 m2 rn qo seq
+  qpre || return 1; local r a b c d m1 m2 rn qo seq
   r="$(blocker 30)"; wait_state "$r" running 60
   a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
@@ -357,7 +368,7 @@ q23() {
   qend $?
 }
 q24() {
-  qpre; local r n1 n2 h mv seq
+  qpre || return 1; local r n1 n2 h mv seq
   r="$(blocker 25)"; wait_state "$r" running 60
   n1="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; n2="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   h="$(submit --cores "$NC" --mem 256M --time 1m --priority high --others -- sh -c "$(qcmd 1)")"
@@ -368,7 +379,7 @@ q24() {
   qend $?
 }
 q25() {
-  qpre; local r a b c n0 n1 bs seq
+  qpre || return 1; local r a b c n0 n1 bs seq
   r="$(blocker 30)"; wait_state "$r" running 60
   a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
@@ -376,14 +387,14 @@ q25() {
   n0="$(sudo grep -c 'order file unreadable' /srv/mu/audit.log)"
   sudo sh -c 'sz=$(stat -c %s /srv/mu/queue.json); head -c "$sz" /dev/zero > /srv/mu/queue.json'
   sudo rm -f "/srv/mu/jobs/$b/state.json"
-  wait_state "$a" "succeeded failed" 120; sleep 3
+  wait_state "$a" "succeeded failed" 120; wait_state "$c" "succeeded failed" 30
   n1="$(sudo grep -c 'order file unreadable' /srv/mu/audit.log)"; bs="$(jobstate "$b")"; seq="$(qorder)"
   M="queue.json zeroed, B's state.json removed: B $bs; start order $(short $seq) (FIFO within the band: $(short $a $c)); journal lines $n0 -> $n1"
   [ "$bs" = held ] && [ "$seq" = "$a $c " ] && [ "$((n1 - n0))" = 1 ]
   qend $?
 }
 q26() {
-  qpre; local r o x h1 h2 mv n0 n1 hp oh rl ur w1 w2 ho
+  qpre || return 1; local r o x h1 h2 mv n0 n1 hp oh rl ur w1 w2 ho
   r="$(blocker 40)"; wait_state "$r" running 60
   o="$(submit --cores "$NC" --mem 256M --time 1m -- true)"
   x="$(W2CWD=$P3 submit2 --cores "$NC" --mem 256M --time 1m -- true)"
@@ -407,7 +418,7 @@ q26() {
   qend $?
 }
 q27() {
-  qpre; local r b a c ql n qtext h1 h2 m1 m2 al
+  qpre || return 1; local r b a c ql n qtext h1 h2 m1 m2 al
   r="$(blocker 30)"; wait_state "$r" running 60
   b="$(WCWD=$P2 submit --cores "$NC" --mem 256M --time 1m -- true)"
   a="$(submit --cores "$NC" --mem 256M --time 1m -- true)"
@@ -441,7 +452,7 @@ S
 }
 use_node() { echo "$1" | sudo tee /home/mu/.local/share/mu/default >/dev/null; asmu systemctl --user restart mu-node.service; sleep 3; }
 q28() {
-  qpre; local r h a ho qo cs x y q hs xs n
+  qpre || return 1; local r h a ho qo cs x y q hs xs n
   prev_release || { M="the previous release (v2026.11.9) could not be fetched"; return 1; }
   r="$(blocker 30)"; wait_state "$r" running 60
   h="$(submit --cores 1 --mem 256M --time 1m -- true)"; ws hold "$h" --json >/dev/null
@@ -465,6 +476,38 @@ q28() {
   local rc=$?; use_node v2026.11.7; qend $rc
 }
 
+ws_prev_release() {   # the previous release's src/mu as a toolchain of the workstation ws (μ v2026.11.9, its git tag)
+  sudo test -f "$WSH/toolchains/v2026.11.9/MANIFEST.json" && return 0
+  local d; d="$(mktemp -d)"
+  git -C "$ROOT" fetch -q --depth 1 origin "+refs/tags/v2026.11.9:refs/tags/v2026.11.9" 2>&1 | tail -2
+  git -C "$ROOT" archive v2026.11.9 src/mu | tar -x -C "$d" || return 1
+  sudo bash -s "$d" "$WSH/toolchains/v2026.11.9" <<'S'
+T="$2"; mkdir -p "$T/recipe/bin" "$T/env/bin" "$T/recipe/src"; cp -R "$1/src/mu" "$T/recipe/src/mu"
+printf '{"version": "v2026.11.9", "recipe_commit": "0", "installed": "x", "layers": []}\n' > "$T/MANIFEST.json"
+printf '#!/bin/bash\ncase "$1" in run) shift; exec "$@" ;; esac\n' > "$T/recipe/bin/mu-toolchain"; chmod 755 "$T/recipe/bin/mu-toolchain"
+ln -sfn /usr/bin/python3 "$T/env/bin/python"; chown -R ws:ws "$T"
+S
+}
+ws_default() { echo "$1" | sudo tee "$WSH/default" >/dev/null; }
+q14b() {
+  qpre || return 1; local r h q o s1 l1 w1 rc1 rc2 rc3
+  ws_prev_release || { M="the previous release (v2026.11.9) could not be fetched"; return 1; }
+  r="$(blocker 45)"; wait_state "$r" running 60
+  h="$(submit --cores 1 --mem 256M --time 1m -- true)"; ws hold "$h" --json >/dev/null
+  q="$(submit --cores 1 --mem 256M --time 1m -- true)"
+  ws_default v2026.11.9   # from here the workstation runs the previous release's client (no scheduler in it)
+  s1="$(ws status "$h" --json 2>&1)"; rc1=$?
+  l1="$(ws status --json 2>&1)"; rc2=$?
+  w1="$(ws status "$q" --wait --timeout 4 --json 2>&1)"; rc3=$?
+  o="$(submit --cores 1 --mem 256M --time 1m -- sh -c 'echo $MU_JOB_CORES > n.txt')"
+  ws_default v2026.11.7
+  ws cancel "$r" --json >/dev/null; wait_state "$o" "succeeded failed" 90; ws cancel "$h" --json >/dev/null
+  M="the v2026.11.9 client against this node: status of a held job exit $rc1 state '$(printf '%s' "$s1" | jget state)'; the list exit $rc2 ($(printf '%s' "$l1" | grep -c "$h") line(s) with it); --wait on a queued job exit $rc3 (state '$(printf '%s' "$w1" | jget state)'); its submit: $(jobstate "$o"), granted $(jobstate "$o" grant.cores) cores (MU_JOB_CORES $(sudo cat "/srv/mu/jobs/$o/work/n.txt" 2>/dev/null))"
+  [ "$rc1" = 0 ] && [ "$(printf '%s' "$s1" | jget state)" = held ] && [ "$rc2" = 0 ] && printf '%s' "$l1" | grep -q "$h" && \
+    [ "$rc3" = 10 ] && [ "$(jobstate "$o")" = succeeded ] && [ "$(jobstate "$o" grant.cores)" = "$NC" ]
+  local rc=$?; ws_default v2026.11.7; qend $rc
+}
+
 # ---------------------------------------------------------------------------------------------- updates on a busy node
 REL=/home/mu/rel.git
 release_repo() {   # release_repo TAG...: fake releases of this checkout's src/mu in $REL (as mu: git refuses repositories
@@ -473,7 +516,7 @@ release_repo() {   # release_repo TAG...: fake releases of this checkout's src/m
   sudo cp -R "$ROOT/src" "$w/src"; sudo chown -R mu:mu "$w/src"
   sudo -u mu -H bash -s "$w" "$@" <<'S'
 w="$1"; shift
-[ -d /home/mu/rel.git ] || git init -q --bare /home/mu/rel.git
+rm -rf /home/mu/rel.git; git init -q --bare /home/mu/rel.git   # anew: no tag of an earlier row stays
 cd "$w" && git init -q && git config user.name rel && git config user.email rel@example.invalid
 cat > install.sh <<'I'
 #!/bin/bash
@@ -484,7 +527,8 @@ while [ $# -gt 0 ]; do case "$1" in --version) V="$2"; shift 2 ;; *) shift ;; es
 T="$MU_HOME/toolchains/$V"; mkdir -p "$T/recipe/bin" "$T/env/bin" "$T/recipe/src"; touch "$T/.installing"
 rm -rf "$T/recipe/src/mu"; cp -R "$here/src/mu" "$T/recipe/src/mu"
 printf '#!/bin/bash\ncase "$1" in run) shift; exec "$@" ;; esac\n' > "$T/recipe/bin/mu-toolchain"; chmod 755 "$T/recipe/bin/mu-toolchain"
-ln -sfn /usr/bin/python3 "$T/env/bin/python"; sleep 3
+ln -sfn /usr/bin/python3 "$T/env/bin/python"
+cat "/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)/memory.max" > "$T/install-memory.max" 2>/dev/null || true; sleep 3
 printf '{"version": "%s", "recipe_commit": "0", "installed": "x", "layers": []}\n' "$V" > "$T/MANIFEST.json"; rm -f "$T/.installing"
 echo "fake μ $V is ready"
 I
@@ -497,23 +541,28 @@ S
 }
 au_state() { sudo sed -n "s/^$1=//p" /home/mu/.local/share/mu/state/autoupdate.state | tail -1; }
 v1() {
-  qpre; local a out d n ra rs
+  qpre || return 1; local a out d n ra rs a0 mm
+  # this row's own audit lines and releases: an earlier row's restart line or tag (V3 pushes v2026.11.11) proves nothing
+  a0="$(sudo wc -l < /srv/mu/audit.log)"
+  sudo rm -rf /home/mu/.local/share/mu/toolchains/v2026.11.10 /home/mu/.local/share/mu/toolchains/v2026.11.11
   release_repo v2026.11.10
   a="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 25)")"; wait_state "$a" running 60; sleep 2
   out="$(asmu "$NODEH/bin/mu" autoupdate run --force 2>&1)"
   d="$(sudo cat /home/mu/.local/share/mu/default)"
-  for n in $(seq 1 20); do sudo grep -q "runner started (μ v2026.11.10" /srv/mu/audit.log && break; sleep 1; done
-  rs="$(sudo grep -m1 "runner started (μ v2026.11.10" /srv/mu/audit.log | cut -d' ' -f1)"
+  mm="$(sudo cat /home/mu/.local/share/mu/toolchains/v2026.11.10/install-memory.max 2>/dev/null)"
+  for n in $(seq 1 20); do sudo tail -n +"$((a0 + 1))" /srv/mu/audit.log | grep -q "runner started (μ v2026.11.10" && break; sleep 1; done
+  rs="$(sudo tail -n +"$((a0 + 1))" /srv/mu/audit.log | grep -m1 "runner started (μ v2026.11.10" | cut -d' ' -f1)"
   ra="$(jobstate "$a")"
   wait_state "$a" "succeeded failed interrupted" 90
   n="$(nodelog "$a" | grep -c '^== μ job')"
-  M="with a job running: $out · default $d; the runner restarted on it at ${rs:-never} while the job was $ra; the job $(jobstate "$a"), attempt $(jobstate "$a" attempt), started $n time(s); deferred gc '$(au_state pending_gc)'"
-  [ "$d" = v2026.11.10 ] && [ -n "$rs" ] && [ "$ra" = running ] && [ "$(jobstate "$a")" = succeeded ] && [ "$(jobstate "$a" attempt)" = 1 ] && \
+  M="with a job running: $out · default $d; the install's memory.max $mm; the runner restarted on it at ${rs:-never} while the job was $ra (the job ended $(qt end "$a")); the job $(jobstate "$a"), attempt $(jobstate "$a" attempt), started $n time(s); deferred gc '$(au_state pending_gc)'"
+  [ "$d" = v2026.11.10 ] && [ -n "$rs" ] && [ "$ra" = running ] && lt "$(date -ud "$rs" +%s)" "$(qt end "$a")" && \
+    [ "$mm" = $((1572864 * 1024)) ] && [ "$(jobstate "$a")" = succeeded ] && [ "$(jobstate "$a" attempt)" = 1 ] && \
     [ "$n" = 1 ] && [ -n "$(au_state pending_gc)" ]
   local rc=$?; use_node v2026.11.7; qend $rc
 }
 v3() {
-  qpre; local a out h d n
+  qpre || return 1; local a out h d n
   release_repo v2026.11.10 v2026.11.11
   a="$(submit --cores "$NC" --mem 256M --time 2m -- sh -c "$(qcmd 40)")"; wait_state "$a" running 60; sleep 2
   out="$(ws compute update office-pc --json --wait --timeout 120 2>&1)"
@@ -552,6 +601,7 @@ sched_rows() {
   run_row Q26 "authorisation: ci-other cannot arrange avi-mac's jobs or pass them (exit 5); the owner's acts are sticky; no owners file with two keys: nobody, warned" q26
   run_row Q27 "one view of two workstations and three projects; the node's --others guard (exit 2 other-project) and its audit lines" q27
   run_row Q28 "mixed versions: the previous release's runner leaves a held job alone and cancels it as cancelling; a new client against it: node-too-old, queue falls back; the new runner adopts the old one's job without a grant" q28
+  run_row Q14B "an older workstation (the v2026.11.9 client) against this node: a held job's status, the list, --wait on a queued job (exit 10), its submit granted the whole node" q14b
   run_row V1 "a release installs beside a running job and becomes the default between starts; the runner restarts on it and adopts the job (run once); gc deferred" v1
   run_row V3 "mu compute update office-pc with a whole-node job running: installed and made the default at once (not queued behind it)" v3
 }
@@ -561,6 +611,7 @@ sched_faults() {
   must_fail Q03 no-core-admission 'nfault no-core-admission' nfault q03
   must_fail Q04 backfill-ignores-shadow 'nfault backfill-ignores-shadow' nfault q04
   must_fail Q05 no-head-reservation 'nfault no-head-reservation' nfault q05
+  must_fail Q05 backfill-ignores-shadow 'nfault backfill-ignores-shadow' nfault q05
   must_fail Q06 no-express 'nfault no-express' nfault q06
   must_fail Q06 no-express-quota 'nfault no-express-quota' nfault q06
   must_fail Q06 express-by-size 'nfault express-by-size' nfault q06
@@ -590,8 +641,9 @@ sched_faults() {
   must_fail Q27 queue-project-filter 'nfault queue-project-filter' nfault q27
   must_fail Q27 no-others-guard 'nfault no-others-guard' nfault q27
   must_fail Q28 held-as-queued 'nfault held-as-queued' nfault q28
+  must_fail Q14B held-as-queued 'nfault held-as-queued' nfault q14b
   must_fail V1 restart-only-idle 'nfault restart-only-idle' nfault v1
   must_fail V3 "busy-defers (the previous release's rule, in the update unit's environment)" f_v3_on f_v3_off v3
 }
-SCHED_ROWS="QS Q01 Q02 Q03 Q04 Q05 Q06 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q14 Q18 Q19 Q20 Q22 Q23 Q24 Q25 Q26 Q27 Q28 V1 V3"
-SCHED_FAULTS="Q01 Q02 Q03 Q04 Q05 Q06 Q06 Q06 Q07 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q13 Q14 Q18 Q19 Q20 Q22 Q22 Q23 Q23 Q24 Q25 Q25 Q26 Q26 Q26 Q27 Q27 Q28 V1 V3"
+SCHED_ROWS="QS Q01 Q02 Q03 Q04 Q05 Q06 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q14 Q18 Q19 Q20 Q22 Q23 Q24 Q25 Q26 Q27 Q28 Q14B V1 V3"
+SCHED_FAULTS="Q01 Q02 Q03 Q04 Q05 Q05 Q06 Q06 Q06 Q07 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q13 Q14 Q18 Q19 Q20 Q22 Q22 Q23 Q23 Q24 Q25 Q25 Q26 Q26 Q26 Q27 Q27 Q28 Q14B V1 V3"
