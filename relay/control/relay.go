@@ -238,7 +238,7 @@ func (r *Relay) mutate(f func(s *State, t *txn) error) error {
 	for _, e := range t.events {
 		r.event(e.invite, e.event, e.from, e.detail)
 	}
-	if len(t.evict) > 0 && r.sup != nil {
+	if len(t.evict) > 0 && r.sup != nil && !fault("no-evict") {
 		r.sup.Evict(strings.Join(t.evict, "; "))
 	}
 	close(r.changed)
@@ -372,6 +372,10 @@ func (r *Relay) grantPort(s *State, ws string, port int) bool {
 	if e, ok := r.isStatic(ws); ok {
 		if containsInt(e.Ports, port) || containsInt(s.Grants[ws], port) {
 			return false
+		}
+		if fault("copy-static-password") { // what the design did before review finding 2
+			s.Clients[ws] = &DynClient{Role: RoleWorkstation, Password: e.Password, Ports: sortedInts(append(append([]int(nil), e.Ports...), port)), Via: "copy"}
+			return true
 		}
 		s.Grants[ws] = sortedInts(append(s.Grants[ws], port))
 		return true

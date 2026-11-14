@@ -84,9 +84,6 @@ func (s *Supervisor) Restarts() int {
 // Evict restarts chisel now, or as soon as MinInterval has passed since the last start; requests in between are
 // batched into that one restart. It returns when the restart happened or was scheduled.
 func (s *Supervisor) Evict(reason string) {
-	if fault("no-evict") {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopping || s.cmd == nil {
