@@ -74,7 +74,12 @@ if [ "$(uname -s)" = Darwin ] && /usr/libexec/ApplicationFirewall/socketfilterfw
 else
   must_fail bind-all          "$PY1" http
 fi
+must_fail default-send-error  "$PY1" http
+must_fail static-follow-links "$PY1" http
+must_fail fault-guard-off     "$PY1" devguard
 must_fail open-url-argv       "$PY1" open
+must_fail open-trusts-port    "$PY1" open
+must_fail open-passes-faults  "$PY1" open
 must_fail submit-waits        "$PY1" submitline
 must_fail no-index            "$PY1" index
 must_fail default-limit       "$PY1" index

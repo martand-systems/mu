@@ -27,11 +27,15 @@ else
 fi
 trap 'rm -rf "$WORK"' EXIT
 
+# On the Mac, $WORK is a folder the sandboxed npm can write: this (unsandboxed) script never opens a file in it by path
+# (a symlink planted there by build-time code would turn the redirect into a write anywhere, tools/dashboard-npm). The
+# build's output is kept in memory; the fault builds are only handed to the e2e launcher, which serves regular files
+# only, opened with O_NOFOLLOW (src/mu/dashboard.py load_static).
 build() {   # build FAULT -> the folder of a fault build
-  local out="$WORK/build-$1"
-  [ -d "$out" ] && { printf '%s' "$out"; return 0; }
-  if ! MU_DASH_FAULT="$1" MU_DASH_OUT="$out" npm_exec vite build --logLevel error > "$WORK/build-$1.log" 2>&1; then
-    cat "$WORK/build-$1.log" >&2; return 1
+  local out="$WORK/build-$1" log
+  [ -d "$out" ] && [ ! -L "$out" ] && { printf '%s' "$out"; return 0; }
+  if ! log="$(MU_DASH_FAULT="$1" MU_DASH_OUT="$out" npm_exec vite build --logLevel error 2>&1)"; then
+    printf '%s\n' "$log" >&2; return 1
   fi
   printf '%s' "$out"
 }

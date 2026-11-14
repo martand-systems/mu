@@ -25,6 +25,11 @@ Test hooks: MU_LAUNCHCTL, MU_LAUNCH_AGENTS_DIR, MU_OPENER (the program that open
   cpu-first-call      the Mac's CPU from a first cpu_percent  default-limit       list without limit=100
   serve-last-as-live  an old value is sent as current          node-from-config    every job labelled with the first node
   swap-mem-fields     a node's available memory sent as used
+  default-send-error  http.server's own error pages (no CSP)  static-follow-links symlinks in the static folder followed
+  fault-guard-off     a real serve takes the unsafe faults     open-passes-faults  `open` hands MU_JOBS_FAULT to its server
+  open-trusts-port    `open` trusts whatever answers the port
+A real (non-dev) `serve` refuses to start with any fault that weakens its security (UNSAFE_FAULTS); open-url-argv
+works only with MU_OPENER (a test's stub opener).
 """
 import calendar
 import codecs
@@ -1221,36 +1226,62 @@ class ApiError(Exception):
 def load_static(root):
     """The fixed table of files served: {url path: (bytes, content type, cache-control)}. Built once at start from
     regular files whose names match NAME (no symlink, no folder beyond assets/). No request path is ever joined to a
-    folder."""
+    folder. Every file and assets/ are opened relative to their folder with O_NOFOLLOW and checked with fstat on the
+    open descriptor: the folder may be one that sandboxed build code can write (a fault build, share/dashboard/ in a
+    checkout), and a symlink swapped in after a check must not make this server read a file outside it."""
+    import stat as _s
     table, total = {}, 0
+    nofollow = 0 if fault("static-follow-links") else getattr(os, "O_NOFOLLOW", 0)
 
-    def add(url, path, name, cache):
+    def add(url, dfd, name, cache):
         nonlocal total
         ext = os.path.splitext(name)[1].lower()
         if ext not in TYPES or not NAME.match(name) or name.startswith("."):
             return
         try:
-            st = os.lstat(path)
+            fd = os.open(name, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), dir_fd=dfd)
         except OSError:
             return
-        import stat as _s
-        if not _s.S_ISREG(st.st_mode) or st.st_size > 4 << 20 or total + st.st_size > 32 << 20:
-            return
-        with open(path, "rb") as f:
-            data = f.read()
+        try:
+            st = os.fstat(fd)
+            if not _s.S_ISREG(st.st_mode) or st.st_size > 4 << 20 or total + st.st_size > 32 << 20:
+                return
+            chunks, n = [], 0
+            while n <= st.st_size:
+                c = os.read(fd, 1 << 20)
+                if not c:
+                    break
+                chunks.append(c)
+                n += len(c)
+            data = b"".join(chunks)
+            if len(data) > 4 << 20:
+                return
+        finally:
+            os.close(fd)
         total += len(data)
         table[url] = (data, TYPES[ext], cache)
-    for name in ROOT_FILES:
-        add("/" if name == "index.html" else "/" + name, os.path.join(root, name), name,
-            "no-store" if name == "index.html" else "no-cache")
-    adir = os.path.join(root, "assets")
     try:
-        import stat as _s
-        if _s.S_ISDIR(os.lstat(adir).st_mode):
-            for e in sorted(os.listdir(adir)):
-                add("/assets/" + e, os.path.join(adir, e), e, "public, max-age=31536000, immutable")
+        rfd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     except OSError:
-        pass
+        rfd = None
+    if rfd is not None:
+        try:
+            for name in ROOT_FILES:
+                add("/" if name == "index.html" else "/" + name, rfd, name,
+                    "no-store" if name == "index.html" else "no-cache")
+            try:
+                afd = os.open("assets", os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0), dir_fd=rfd)
+            except OSError:
+                afd = None
+            if afd is not None:
+                try:
+                    if _s.S_ISDIR(os.fstat(afd).st_mode):
+                        for e in sorted(os.listdir(afd)):
+                            add("/assets/" + e, afd, e, "public, max-age=31536000, immutable")
+                finally:
+                    os.close(afd)
+        finally:
+            os.close(rfd)
     if "/" not in table:
         table["/"] = (NO_BUILD_PAGE, TYPES[".html"], "no-store")
     return table
@@ -1307,6 +1338,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def error_json(self, status, error, message, head=False):
         self.send_json(status, {"error": error, "message": message}, head)
+
+    def send_error(self, code, message=None, explain=None):
+        """http.server's own error answers (a malformed request line, a header too long: before handle_any runs) as
+        this server's JSON, with the same security headers as every other answer; never the request's text."""
+        if fault("default-send-error"):
+            return http.server.BaseHTTPRequestHandler.send_error(self, code, message, explain)
+        try:
+            self.log_error("code %d, message %s", code, message)
+            self.close_connection = True
+            body = json.dumps({"api": API, "ok": False, "error": "bad-request" if code < 500 else "server",
+                               "message": "malformed request (HTTP %d)" % code}).encode("utf-8")
+            self.send_response(code)
+            self.headers_common()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if getattr(self, "command", None) != "HEAD" and code >= 200 and code not in (204, 304):
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def host_ok(self):
         if fault("no-host-check"):
@@ -1472,8 +1524,19 @@ def build_real():
     return dict(dev=False, readers=readers)
 
 
+# test faults that weaken the server's security: a real (non-dev) server refuses to start with any of them, so a shell
+# with a leftover MU_JOBS_FAULT never serves the real nodes' data without its token, Host check or CSP
+UNSAFE_FAULTS = ("bind-all", "no-host-check", "no-token", "fixed-token", "csp-unsafe-inline", "default-send-error",
+                 "static-follow-links")
+
+
 def cmd_serve(a):
     dev = bool(a.dev)
+    bad = [f for f in UNSAFE_FAULTS if fault(f)]
+    if bad and not dev and not fault("fault-guard-off"):
+        raise MuError(proto.EXIT_USAGE, "test-fault", "MU_JOBS_FAULT holds %s, a test fault that weakens the "
+                      "dashboard's security; only `serve --dev` (fake nodes) takes it" % ", ".join(bad),
+                      "unset MU_JOBS_FAULT")
     rd = run_dir(dev)
     log = Log(os.path.join(jobs.mu_home(), "logs", "dashboard-dev.log" if dev else "dashboard.log"))
     lockf = None
@@ -1703,6 +1766,20 @@ def port_answers(port, timeout=1.0):
         return False
 
 
+def session_ok(port, token, timeout=3.0):
+    """GET /api/session with the token: 200 and api == API, or False."""
+    import http.client
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        c.request("GET", "/api/session", headers={"Host": "127.0.0.1:%d" % port, "X-Mu-Token": token})
+        r = c.getresponse()
+        body = r.read(65536)
+        c.close()
+        return r.status == 200 and json.loads(body.decode("utf-8")).get("api") == API
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+
+
 def cmd_open(a):
     info = read_info()
     if not info or not port_answers(info["port"]):
@@ -1710,9 +1787,9 @@ def cmd_open(a):
             launchctl("kickstart", "gui/%d/%s" % (os.getuid(), LABEL))
         else:
             cli = os.path.join(HERE, "cli.py")
-            env = {k: v for k, v in os.environ.items() if k in ("MU_HOME", "MU_CACHE", "MU_INFRA_VERSION", "HOME",
-                                                                "PATH", "LANG", "MU_JOBS_FAULT", "MU_SSH",
-                                                                "MU_SECURITY", "MU_CHISEL", "USER", "LOGNAME")}
+            keep = ("MU_HOME", "MU_CACHE", "MU_INFRA_VERSION", "HOME", "PATH", "LANG", "MU_SSH", "MU_SECURITY",
+                    "MU_CHISEL", "USER", "LOGNAME") + (("MU_JOBS_FAULT",) if fault("open-passes-faults") else ())
+            env = {k: v for k, v in os.environ.items() if k in keep}   # never MU_JOBS_FAULT (test faults) to it
             subprocess.Popen([sys.executable, "-I", "-S", cli, "dashboard", "serve"], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
                              close_fds=True, env=env)
@@ -1731,13 +1808,19 @@ def cmd_open(a):
     except OSError:
         raise MuError(proto.EXIT_ERROR, "no-token", "the dashboard's token file is missing", "mu dashboard open again")
     url = "http://127.0.0.1:%d/" % info["port"]
+    # the pid in dashboard.json is alive and the port answers; is it OUR server? (a reused pid and another program
+    # on the port would get the token and show its own page) It must accept this token on /api/session.
+    if not fault("open-trusts-port") and not session_ok(info["port"], token):
+        raise MuError(proto.EXIT_ERROR, "not-dashboard", "port %d answers, but not as the μ dashboard with the "
+                      "current token" % info["port"], "mu dashboard off, then mu dashboard open (or mu dashboard "
+                      "on); see %s" % proto.tilde(os.path.join(jobs.mu_home(), "logs", "dashboard.log")))
     page = os.path.join(run_dir(), "dashboard-open.html")
     full = "%s#t=%s" % (url, token)
     write_private(page, '<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
                   '<meta http-equiv="refresh" content="0;url=%s"><title>μ dashboard</title>'
                   '<p><a href="%s">Open the μ dashboard</a></p>\n' % (full, full))
     opener = os.environ.get("MU_OPENER") or ("open" if sys.platform == "darwin" else "xdg-open")
-    argv = [opener, full if fault("open-url-argv") else page]
+    argv = [opener, full if fault("open-url-argv") and os.environ.get("MU_OPENER") else page]
     try:
         r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=30)

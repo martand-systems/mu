@@ -87,6 +87,33 @@ def req(port, path, method="GET", host=None, headers=None, body=None, timeout=10
     return r.status, hdrs, data
 
 
+def raw(port, data, timeout=10):
+    """Send raw bytes; return (status, {header: value}, body) of the answer (status 0 if none)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    s.sendall(data)
+    buf = b""
+    try:
+        while True:
+            c = s.recv(65536)
+            if not c:
+                break
+            buf += c
+    except OSError:
+        pass
+    s.close()
+    head, _, body = buf.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    try:
+        status = int(lines[0].split()[1])
+    except (IndexError, ValueError):
+        status = 0
+    hdrs = {}
+    for ln in lines[1:]:
+        k, _, v = ln.partition(":")
+        hdrs[k.strip().lower()] = v.strip()
+    return status, hdrs, body
+
+
 def jget(port, path, token):
     st, h, d = req(port, path, headers={"X-Mu-Token": token})
     return st, (json.loads(d) if d else None)
@@ -354,6 +381,16 @@ def t_http():
             except (http.client.HTTPException, OSError):
                 s, d = 400, b""
             check("static: %s is not served" % bad_path, s in (400, 404) and b"SECRET" not in d, (s, d[:100]))
+        # http.server's own error answers (before the Host check runs) carry the same headers, as JSON (§4.6)
+        for what, data in (("a malformed request line", b"GET / HTTP/1.1 extra\r\nHost: 127.0.0.1:%d\r\n\r\n" % port),
+                           ("a header line over 64 kB", b"GET / HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nX-Long: %s\r\n\r\n"
+                            % (port, b"a" * 70000)),
+                           ("an unsupported HTTP version", b"GET / HTTP/2.5\r\nHost: 127.0.0.1:%d\r\n\r\n" % port)):
+            s, h, d = raw(port, data)
+            check("errors: %s -> %d with the CSP, nosniff, X-Frame-Options DENY, as JSON" % (what, s),
+                  400 <= s < 600 and h.get("content-security-policy") == dashboard.CSP and
+                  h.get("x-content-type-options") == "nosniff" and h.get("x-frame-options") == "DENY" and
+                  h.get("content-type", "").startswith("application/json") and b"<" not in d, (s, h, d[:200]))
         s, h, d = req(port, "/api/session", "POST", headers={"X-Mu-Token": tok})
         check("API: POST to a read route -> 405", s == 405)
         s, h, d = req(port, "/api/nodes/office-pc/retry", "POST", headers={"X-Mu-Token": tok,
@@ -374,6 +411,18 @@ def t_http():
         check("every /api answer carries api: 1", j.get("api") == 1 and j.get("ok") is True)
     finally:
         stop_proc(p)
+    # a static folder the sandboxed build can write: symlinks (to a file, or assets/ itself) are never followed
+    st2 = tmpdir("static2")
+    sec = tmpdir("secret2")
+    open(os.path.join(sec, "secret.js"), "w").write("SECRET")
+    open(os.path.join(sec, "index.html"), "w").write("SECRET")
+    os.symlink(os.path.join(sec, "index.html"), os.path.join(st2, "index.html"))
+    os.symlink(os.path.join(sec, "secret.js"), os.path.join(st2, "theme.js"))
+    os.symlink(sec, os.path.join(st2, "assets"))
+    tbl = dashboard.load_static(st2)
+    check("static: a symlinked index.html, theme.js or assets/ is never read",
+          all(b"SECRET" not in v[0] for v in tbl.values()) and "/theme.js" not in tbl and
+          not any(k.startswith("/assets/") for k in tbl), sorted(tbl))
     # the token rotates with each start; the old one is refused (D14 fixed-token)
     p = serve_proc(home, port, static=st)
     try:
@@ -494,6 +543,55 @@ def t_open():
         check("D15: the token is not in logs/dashboard.log", tok not in log)
     finally:
         stop_proc(p)
+    # a live pid in dashboard.json and something else on its port: `open` must not hand that program the token
+    import http.server as hs
+
+    class Any(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            b = b'{"api": 1, "ok": true}' if "X-Mu-Token" not in self.headers else b"squatter"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a):
+            pass
+    sq = hs.HTTPServer(("127.0.0.1", 0), Any)
+    threading.Thread(target=sq.serve_forever, daemon=True).start()
+    home2 = tmpdir("open2")
+    os.makedirs(os.path.join(home2, "run"), mode=0o700)
+    rec2 = os.path.join(home2, "opener.argv")
+    opener2 = os.path.join(home2, "opener.sh")
+    open(opener2, "w").write('#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done >> "%s"\n' % rec2)
+    os.chmod(opener2, 0o755)
+    open(os.path.join(home2, "run", "dashboard.json"), "w").write(json.dumps({"pid": os.getpid(), "port": sq.server_address[1]}))
+    open(os.path.join(home2, "run", "dashboard.token"), "w").write("ab" * 32 + "\n")
+    r = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "open"], env=dict(os.environ, MU_HOME=home2,
+                       MU_OPENER=opener2), capture_output=True, text=True, timeout=30)
+    check("`open`: another program on the port (a reused pid) is not given the token; no browser is opened",
+          r.returncode != 0 and not os.path.exists(rec2) and not os.path.exists(os.path.join(home2, "run",
+                                                                                           "dashboard-open.html")),
+          r.stdout + r.stderr)
+    sq.shutdown()
+    sq.server_close()
+    # `open` with a leftover MU_JOBS_FAULT=no-token starts a server that still needs the token
+    home3 = tmpdir("open3")
+    env3 = dict(os.environ, MU_HOME=home3, MU_OPENER=opener2,
+                MU_JOBS_FAULT=",".join(x for x in (os.environ.get("MU_JOBS_FAULT"), "no-token") if x))
+    r = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "open", "--json"], env=env3, capture_output=True,
+                       text=True, timeout=60)
+    try:
+        info = json.load(open(os.path.join(home3, "run", "dashboard.json")))
+    except (OSError, ValueError):
+        info = {}
+    st3 = req(info["port"], "/api/session")[0] if info.get("port") else None
+    check("`open` never hands MU_JOBS_FAULT to the server it starts (it still needs the token)",
+          r.returncode == 0 and st3 == 401, (r.stdout + r.stderr, st3))
+    if info.get("pid"):
+        try:
+            os.kill(info["pid"], signal.SIGTERM)
+        except OSError:
+            pass
 
 
 # ------------------------------------------------------------------------------------------------ D19, D22, submit's line
@@ -810,6 +908,29 @@ def t_devguard():
         refused = True
     check("§4.8: in dev mode no real NodeReader can be built", refused)
     dashnode.dev_mode(False)
+    # a real `serve` refuses the test faults that weaken its security (a leftover MU_JOBS_FAULT in a shell)
+    home = tmpdir("guard")
+    for f in dashboard.UNSAFE_FAULTS:
+        if f == "bind-all" and sys.platform == "darwin" and not os.environ.get("CI"):
+            skip("a real `serve` with MU_JOBS_FAULT=bind-all refuses to start", "on a Mac only in CI: with the guard "
+                 "off (its must-fail) it would listen on 0.0.0.0 and the application firewall would ask the user")
+            continue
+        env = dict(os.environ, MU_HOME=home, MU_JOBS_FAULT=",".join(x for x in (os.environ.get("MU_JOBS_FAULT"), f) if x))
+        p = subprocess.Popen([sys.executable, "-I", "-S", CLI, "dashboard", "serve", "--port", str(free_port())],
+                             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = p.communicate(timeout=8)
+            check("a real `serve` with MU_JOBS_FAULT=%s refuses to start" % f, p.returncode != 0 and
+                  "weakens" in out + err and not os.path.exists(os.path.join(home, "run", "dashboard.token")), out + err)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            check("a real `serve` with MU_JOBS_FAULT=%s refuses to start" % f, False, "it is serving")
+        for x in ("dashboard.token", "dashboard.json"):
+            try:
+                os.unlink(os.path.join(home, "run", x))
+            except OSError:
+                pass
 
 
 def t_logs():

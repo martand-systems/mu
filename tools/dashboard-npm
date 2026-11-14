@@ -9,11 +9,17 @@
 #     $MU_CACHE/dev/ (never on the global PATH; no Homebrew, nvm or install script);
 #   - with a scrubbed environment (env -i: PATH, a HOME under $MU_CACHE/dev/home, npm's cache under $MU_CACHE/dev/);
 #     no SSH_AUTH_SOCK, MU_*, GIT_* or tokens;
-#   - under sandbox-exec: no reading anything in the home folder except this repository, $MU_CACHE/dev and
-#     $MU_HOME/run/dev (the dev server's token); ~/.ssh, ~/Library/Keychains, $MU_HOME and git's and gh's credentials
-#     denied outright; the Security server's mach services and /usr/bin/security denied; writes only to dashboard/,
-#     share/dashboard/, $MU_CACHE/dev/ and the temp folders; the network only for `install`, `lock` and `browsers`,
-#     else 127.0.0.1 only.
+#   - under sandbox-exec: no reading anything in the home folder except this repository, $MU_CACHE/dev,
+#     $MU_CACHE/dev-node (Node, read-only) and $MU_HOME/run/dev (the dev server's token); ~/.ssh,
+#     ~/Library/Keychains, $MU_HOME and git's and gh's credentials denied outright; the Security server's mach
+#     services and /usr/bin/security denied; writes only to dashboard/{node_modules,test-results,playwright-report},
+#     share/dashboard/ and $MU_CACHE/dev/{tmp,home,npm-cache,ms-playwright} (never dashboard's sources, Node, /tmp
+#     or the other temp folders); no unix socket in the home folder, $MU_HOME, launchd's (ssh-agent) or /tmp/mu-*
+#     (the ssh ControlMaster sockets); the network only for `install`, `lock` and `browsers`, else 127.0.0.1 only and
+#     no DNS (mDNSResponder's socket denied: DNS names carry data out too).
+#   - the rule for this script and every script that calls it: no step OUTSIDE the sandbox opens, by path, a file in
+#     a folder the sandbox can write (a planted symlink would turn it into a write anywhere). The profile is passed
+#     with -p, Node is downloaded into $MU_CACHE/dev-node (not writable inside), build logs are kept in memory.
 #
 #   tools/dashboard-npm install          npm ci --ignore-scripts            (network)
 #   tools/dashboard-npm lock             npm install --package-lock-only --ignore-scripts, after editing package.json:
@@ -25,6 +31,7 @@
 #                                        (MU_DASH_FAULT + MU_DASH_OUT: a fault build into a folder under $MU_CACHE/dev)
 #   tools/dashboard-npm npm ARGS...      any other npm command (127.0.0.1 only)
 #   tools/dashboard-npm selftest         shows that the sandbox denies what it must
+#   tools/dashboard-npm selftest-faults  each selftest check fails with its rule taken out of the profile (must-fail)
 #   tools/dashboard-npm node-path        the Node it uses
 # CI does not use this wrapper: it runs npm directly in a job with no secrets (.github/workflows/dashboard.yml).
 set -euo pipefail
@@ -39,36 +46,55 @@ case "$VER" in *[!0-9.]*|"") die "dashboard/.nvmrc does not hold a Node version"
 TARBALL="node-v$VER-darwin-$ARCH.tar.xz"
 SUM="$(awk -v f="$TARBALL" '$2 == f { print $1 }' "$DASH/node.sha256")"
 [ -n "$SUM" ] || die "dashboard/node.sha256 has no SHA-256 for $TARBALL"
-DEV="$MU_CACHE/dev"; NODE="$DEV/node-v$VER-darwin-$ARCH"
-mkdir -p "$DEV/home" "$DEV/npm-cache" "$DEV/tmp" "$DEV/ms-playwright" "$REPO/share/dashboard"; chmod 700 "$DEV"
+DEV="$MU_CACHE/dev"; NODES="$MU_CACHE/dev-node"; NODE="$NODES/node-v$VER-darwin-$ARCH"
+mkdir -p "$DEV/home" "$DEV/npm-cache" "$DEV/tmp" "$DEV/ms-playwright" "$NODES" "$REPO/share/dashboard" \
+  "$DASH/node_modules" "$DASH/test-results" "$DASH/playwright-report"
+chmod 700 "$DEV" "$NODES"
+# Node used to live in $DEV, which the sandbox can write: a copy there is not trusted any more
+for old in "$DEV"/node-v*; do [ -e "$old" ] && rm -rf "$old"; done
+rm -f "$DEV"/sandbox-*.sb
 
-ensure_node() {
+ensure_node() {   # Node into $NODES: the sandbox can read it, never write it; downloaded into a fresh mktemp folder
   [ -x "$NODE/bin/node" ] && return 0
   printf 'dashboard-npm: fetching Node %s (%s) from nodejs.org, checked against %s…\n' "$VER" "$TARBALL" "${SUM:0:12}" >&2
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$DEV/$TARBALL.part" "https://nodejs.org/dist/v$VER/$TARBALL"
-  got="$(shasum -a 256 "$DEV/$TARBALL.part" | awk '{ print $1 }')"
-  [ "$got" = "$SUM" ] || { rm -f "$DEV/$TARBALL.part"; die "SHA-256 mismatch for $TARBALL: got $got, pinned $SUM"; }
-  rm -rf "$NODE.part"; mkdir -p "$NODE.part"
-  tar -xJf "$DEV/$TARBALL.part" -C "$NODE.part" --strip-components 1
-  mv "$NODE.part" "$NODE"; rm -f "$DEV/$TARBALL.part"
+  local dl got; dl="$(mktemp -d "$NODES/dl.XXXXXX")"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$dl/$TARBALL" "https://nodejs.org/dist/v$VER/$TARBALL" || { rm -rf "$dl"; die "download failed"; }
+  got="$(shasum -a 256 "$dl/$TARBALL" | awk '{ print $1 }')"
+  [ "$got" = "$SUM" ] || { rm -rf "$dl"; die "SHA-256 mismatch for $TARBALL: got $got, pinned $SUM"; }
+  mkdir "$dl/node"; tar -xJf "$dl/$TARBALL" -C "$dl/node" --strip-components 1
+  chmod -R go-w "$dl/node"; rm -rf "$NODE"; mv "$dl/node" "$NODE"; rm -rf "$dl"
 }
 
-q() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }   # a path inside an SBPL string
+q() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }                 # a path inside an SBPL string
+rx() { printf '%s' "$1" | sed -e 's/[][\\.^$|?*+(){}]/\\&/g' -e 's/"/\\"/g'; }   # a path inside an SBPL regex
+SB_DROP=""   # selftest-faults only: the profile rule left out (never read from the environment)
+has() { case ",$SB_DROP," in *",$1,"*) return 1 ;; esac; return 0; }
 profile() {   # profile NET(0|1) -> the sandbox profile's text
   local h; h="$(cd "$HOME" && pwd -P)"
   cat <<P
 (version 1)
 (allow default)
 (deny file-read-data (subpath "$(q "$h")"))
-(allow file-read-data (subpath "$(q "$REPO")") (subpath "$(q "$DEV")") (subpath "$(q "$MU_HOME/run/dev")"))
+(allow file-read-data (subpath "$(q "$REPO")") (subpath "$(q "$DEV")") (subpath "$(q "$NODES")") (subpath "$(q "$MU_HOME/run/dev")"))
 (deny file-read* (subpath "$(q "$h/.ssh")") (subpath "$(q "$h/Library/Keychains")") (subpath "/Library/Keychains")
   (subpath "$(q "$h/.config/gh")") (subpath "$(q "$h/.config/git")") (literal "$(q "$h/.git-credentials")")
   (subpath "$(q "$h/.claude")") (subpath "$(q "$MU_HOME/compute")") (subpath "$(q "$MU_HOME/relay")")
   (subpath "$(q "$MU_HOME/invites")") (subpath "$(q "$REPO/.git")"))
 (deny file-write*)
-(allow file-write* (subpath "$(q "$DASH")") (subpath "$(q "$REPO/share/dashboard")") (subpath "$(q "$DEV")")
-  (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero")
-  (regex #"^/dev/tty") (regex #"^/dev/fd/") (literal "/dev/dtracehelper"))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (regex #"^/dev/tty") (regex #"^/dev/fd/")
+  (literal "/dev/dtracehelper"))
+P
+  if has dash-write; then
+    cat <<P
+(allow file-write* (subpath "$(q "$DASH/node_modules")") (subpath "$(q "$DASH/test-results")")
+  (subpath "$(q "$DASH/playwright-report")") (subpath "$(q "$REPO/share/dashboard")")
+  (subpath "$(q "$DEV/tmp")") (subpath "$(q "$DEV/home")") (subpath "$(q "$DEV/npm-cache")") (subpath "$(q "$DEV/ms-playwright")"))
+P
+  else printf '(allow file-write* (subpath "%s"))\n' "$(q "$DASH")"; fi
+  has tmp-write || printf '(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders"))\n'
+  has node-write || printf '(allow file-write* (subpath "%s"))\n' "$(q "$NODES")"
+  [ "$1" = lock ] && printf '(allow file-write* (literal "%s"))\n' "$(q "$DASH/package-lock.json")"
+  cat <<P
 (deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc")
   (global-name "com.apple.security.agent") (global-name "com.apple.secd") (global-name "com.apple.security.keychain-circle-notification"))
 (deny process-exec (literal "/usr/bin/security") (literal "/usr/bin/ssh") (literal "/usr/bin/git") (literal "/usr/bin/ssh-add"))
@@ -78,27 +104,36 @@ P
 (deny network-outbound)
 (allow network-outbound (remote ip "localhost:*") (remote unix-socket))
 P
+    has dns && printf '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))\n'
   fi
+  # unix sockets: ssh's ControlMaster sockets (the mux protocol needs no key) and ssh-agent are never reachable
+  has unix-home && printf '(deny network-outbound (remote unix-socket (path-regex #"^%s/")))\n(deny network-outbound (remote unix-socket (path-regex #"^%s/")))\n' "$(rx "$h")" "$(rx "$MU_HOME")"
+  has unix-launchd && printf '(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/var/run/com\\.apple\\.launchd\\.")))\n'
+  printf '(deny network-outbound (remote unix-socket (path-regex #"^(/private)?/tmp/mu-")))\n'
+  printf '(allow network-outbound (remote unix-socket (path-regex #"^%s/")))\n' "$(rx "$DEV/tmp")"
+}
+
+mu_python() {   # μ's own Python (the default toolchain's), for steps that run outside the sandbox
+  local d py; d="$(cat "$MU_HOME/default" 2>/dev/null || true)"; py="$MU_HOME/toolchains/$d/env/bin/python"
+  [ -n "$d" ] && [ -x "$py" ] || py="$(command -v python3)"; printf '%s' "$py"
 }
 
 sandboxed() {   # sandboxed NET CMD...: run CMD in dashboard/ with the scrubbed environment, under the profile
-  local net="$1" sb; shift
+  local net="$1" prof; shift
   ensure_node
-  sb="$DEV/sandbox-$$.sb"; profile "$net" > "$sb"
-  local rc=0
+  prof="$(profile "$net")"; [ "$net" = lock ] && net=1
   ( cd "$DASH" && exec env -i PATH="$NODE/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$DEV/home" TMPDIR="$DEV/tmp/" \
       LANG=en_US.UTF-8 npm_config_cache="$DEV/npm-cache" npm_config_update_notifier=false npm_config_fund=false \
       npm_config_audit=false PLAYWRIGHT_BROWSERS_PATH="$DEV/ms-playwright" DASH_DEV_RUN="$MU_HOME/run/dev" \
       ${CI:+CI="$CI"} ${MU_DASH_FAULT:+MU_DASH_FAULT="$MU_DASH_FAULT"} ${MU_DASH_OUT:+MU_DASH_OUT="$MU_DASH_OUT"} \
       ${DASH_SCREENS:+DASH_SCREENS="$DASH_SCREENS"} \
-      /usr/bin/sandbox-exec -f "$sb" "$@" ) || rc=$?
-  rm -f "$sb"; return "$rc"
+      /usr/bin/sandbox-exec -p "$prof" "$@" )
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
   install)   sandboxed 1 npm ci --ignore-scripts "$@" ;;
-  lock)      sandboxed 1 npm install --package-lock-only --ignore-scripts --no-audit "$@" ;;
+  lock)      sandboxed lock npm install --package-lock-only --ignore-scripts --no-audit "$@" ;;
   browsers)  sandboxed 1 npx --no-install playwright install chromium webkit "$@" ;;
   run)       [ $# -ge 1 ] || die "usage: tools/dashboard-npm run SCRIPT" 2; sandboxed 0 npm run "$@" ;;
   npm)       sandboxed 0 npm "$@" ;;
@@ -106,8 +141,7 @@ case "$cmd" in
     # the dev servers are μ's own code: the launcher (tools/test-dashboard/e2e-launcher.py) starts them OUTSIDE the
     # sandbox, a fresh one per test, and Playwright runs inside it. DASH_E2E_STATIC: the build to serve (a fault
     # build for a must-fail run); DASH_E2E_SERVER_FAULTS, DASH_E2E_ENV: put into every server (must-fail runs).
-    d="$(cat "$MU_HOME/default" 2>/dev/null || true)"; py="$MU_HOME/toolchains/$d/env/bin/python"
-    [ -n "$d" ] && [ -x "$py" ] || py="$(command -v python3)"
+    py="$(mu_python)"
     base="$MU_HOME/run/dev/e2e"; mkdir -p "$base"; chmod 700 "$MU_HOME/run/dev" "$base"; rm -f "$base/launcher.json"
     "$py" -I "$REPO/tools/test-dashboard/e2e-launcher.py" --base "$base" --static "${DASH_E2E_STATIC:-$REPO/share/dashboard}" \
       --python "$py" ${DASH_E2E_SERVER_FAULTS:+--faults "$DASH_E2E_SERVER_FAULTS"} ${DASH_E2E_ENV:+--env "$DASH_E2E_ENV"} \
@@ -117,6 +151,7 @@ case "$cmd" in
     [ -f "$base/launcher.json" ] || { cat "$base/launcher.log" >&2; die "the e2e launcher did not start"; }
     sandboxed 0 npm run e2e -- "$@" ;;
   selftest)
+    [ "${1:-}" = --drop ] && SB_DROP="${2:-}"
     ensure_node; fails=0
     t() { if sandboxed 0 /bin/sh -c "$2" >/dev/null 2>&1; then printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); else printf '  ok    %s\n' "$1"; fi; }
     t "~/.ssh cannot be listed or read" "ls '$HOME/.ssh' || cat '$HOME'/.ssh/* "
@@ -124,15 +159,42 @@ case "$cmd" in
     t "/usr/bin/security cannot run" "/usr/bin/security find-generic-password -s systems.martand.mu.relay"
     t "\$MU_HOME's node configs cannot be read" "ls '$MU_HOME/compute'"
     t "files elsewhere in the home folder cannot be read" "cat '$HOME/.zshrc' '$HOME/.bash_profile' '$HOME/.profile'"
-    t "no writes outside dashboard/, share/dashboard/, the cache and temp" "touch '$HOME/dashboard-npm-canary'"
+    t "no writes in the home folder outside the allowed folders" "touch '$HOME/dashboard-npm-canary'"
+    t "no writes to dashboard's sources [dash-write]" "touch '$DASH/src/.dashboard-npm-canary'"
+    t "no writes to /tmp (agents' scratch folders, /tmp/mu-*) [tmp-write]" "touch /private/tmp/dashboard-npm-canary"
+    t "no writes to Node [node-write]" "touch '$NODE/bin/.dashboard-npm-canary'"
+    rm -f "$HOME/dashboard-npm-canary" "$DASH/src/.dashboard-npm-canary" /private/tmp/dashboard-npm-canary "$NODE/bin/.dashboard-npm-canary"
     t "no network beyond 127.0.0.1 outside install" "curl -fsS -m 5 https://registry.npmjs.org/ > /dev/null"
+    t "no DNS outside install (names carry data out) [dns]" \
+      "node -e \"require('dns').lookup('example.com',(e)=>process.exit(e?1:0))\""
+    if sandboxed 0 node -e "require('dns').lookup('localhost',(e)=>process.exit(e?1:0))" >/dev/null 2>&1; then
+      printf '  ok    localhost still resolves\n'; else printf '  FAIL  localhost does not resolve\n'; fails=$((fails + 1)); fi
     t "SSH_AUTH_SOCK and MU_* are not passed" "env | grep -E '^(SSH_AUTH_SOCK|MU_HOME|MU_CACHE|GIT_|GH_|GITHUB_TOKEN)='"
-    if sandboxed 0 node -e "require('fs').writeFileSync('node_modules/.dashboard-npm-selftest', 'ok')" 2>/dev/null \
-       || sandboxed 0 node -e "require('fs').writeFileSync('.dashboard-npm-selftest', 'ok')"; then
-      printf '  ok    Node runs and can write in dashboard/\n'; rm -f "$DASH/node_modules/.dashboard-npm-selftest" "$DASH/.dashboard-npm-selftest"
-    else printf '  FAIL  Node cannot write in dashboard/\n'; fails=$((fails + 1)); fi
+    # a unix socket in the home folder (as ~/Library/Mu/run/<node>.sock, an ssh ControlMaster) cannot be reached
+    mkdir -p "$MU_HOME/run/dev"; chmod 700 "$MU_HOME/run" "$MU_HOME/run/dev"; sock="$MU_HOME/run/dev/selftest-$$.sock"; rm -f "$sock"
+    "$(mu_python)" -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(4); time.sleep(60)' "$sock" &
+    lp=$!; for _ in $(seq 50); do [ -S "$sock" ] && break; sleep 0.1; done
+    conn="node -e \"const c=require('net').connect(process.argv[1]); c.on('connect',()=>process.exit(0)); c.on('error',()=>process.exit(1))\""
+    if [ -S "$sock" ]; then t "no unix socket in the home folder or \$MU_HOME (ssh ControlMaster) [unix-home]" "$conn '$sock'"
+    else printf '  FAIL  the test socket could not be made\n'; fails=$((fails + 1)); fi
+    kill "$lp" 2>/dev/null || true; wait "$lp" 2>/dev/null || true; rm -f "$sock"
+    agent="$(ls -d /private/var/run/com.apple.launchd.*/Listeners 2>/dev/null | head -1)"
+    if [ -n "$agent" ]; then t "ssh-agent's launchd socket cannot be reached [unix-launchd]" "$conn '$agent'"
+    else printf '  skip  ssh-agent'"'"'s launchd socket (none on this Mac)\n'; fi
+    if sandboxed 0 node -e "require('fs').writeFileSync('node_modules/.dashboard-npm-selftest', 'ok')" 2>/dev/null; then
+      printf '  ok    Node runs and can write in dashboard/node_modules\n'; rm -f "$DASH/node_modules/.dashboard-npm-selftest"
+    else printf '  FAIL  Node cannot write in dashboard/node_modules\n'; fails=$((fails + 1)); fi
     [ "$fails" = 0 ] || exit 1 ;;
+  selftest-faults)   # each rule taken out must make its check fail (the must-fail of the selftest)
+    bad=0
+    for f in dash-write tmp-write node-write dns unix-home unix-launchd; do
+      out="$("$0" selftest --drop "$f" 2>&1)" || true
+      if printf '%s\n' "$out" | grep -q "^  FAIL .*\[$f\]"; then printf '  ok    without the rule %s, its check fails\n' "$f"
+      elif [ "$f" = unix-launchd ] && printf '%s\n' "$out" | grep -q "skip  ssh-agent"; then printf '  skip  %s (no launchd socket)\n' "$f"
+      else printf '  FAIL  without the rule %s, its check still passes\n' "$f"; printf '%s\n' "$out" | sed 's/^/        | /'; bad=1; fi
+    done
+    [ "$bad" = 0 ] || exit 1 ;;
   node-path) ensure_node; printf '%s\n' "$NODE/bin/node" ;;
-  ""|-h|--help|help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
+  ""|-h|--help|help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command '$cmd' (tools/dashboard-npm --help)" 2 ;;
 esac
