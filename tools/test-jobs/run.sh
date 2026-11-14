@@ -218,7 +218,7 @@ echo "  info  5 starts of a job command: $((t1 - t0)) s"
 # ---------------------------------------------------------------- python units
 for p in $PYS; do
   section "unit checks, $p"
-  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report; do
+  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report sched sched-sim sched-runner; do
     py_section "$p" "$s"
   done
   py_section "$p" atomic "$([ "${QUICK:-0}" = 1 ] && echo 30 || echo 120)"
@@ -247,6 +247,22 @@ must_fail "runner: no start below the free-disk minimum" no-start-disk-check "$P
 must_fail "runner: the log cap" no-log-cap "$PY1" runner
 must_fail "runner: a damaged job folder is kept" delete-damaged "$PY1" runner
 must_fail "runner: results are written once" overwrite-result "$PY1" runner
+# the scheduler (docs/design/scheduler.md §13, layers 1 and 2): each fault must make plan(), the simulation or the
+# runner's passes fail
+for f in one-at-a-time cpus-reused no-core-admission no-mem-admission backfill-ignores-shadow no-head-reservation \
+         margin-zero extra-not-reduced no-express express-from-pool express-by-size grantless-counts-zero legacy-sized \
+         hold-ignored bands-ignored walk-by-accepted-ns priority-to-front no-auth-check owner-acts-not-sticky no-others-guard; do
+  must_fail "scheduler: plan, walk, authorisation" "$f" "$PY1" sched
+done
+for f in cpus-reused margin-zero extra-not-reduced express-from-pool hold-ignored; do
+  must_fail "scheduler: the randomised simulation" "$f" "$PY1" sched-sim
+done
+for f in one-at-a-time cpus-from-plan-cache mem-max-is-capacity no-thread-env grant-in-memory-only free-on-cancel-request \
+         requeue-new-ns keep-tmp-on-rerun stamp-before-checkout grantless-counts-zero no-express-quota hold-ignored \
+         rebuild-held-as-queued holds-in-order-file-only walk-by-accepted-ns partial-order-write drop-field no-auth-check \
+         no-others-guard owner-acts-not-sticky bands-ignored queue-project-filter; do
+  must_fail "scheduler: the runner's passes and the queue verbs" "$f" "$PY1" sched-runner
+done
 
 section "chisel pins agree (apps.toml, relay/Dockerfile, the distro script)"
 py_section "$PY1" pins "$REPO"

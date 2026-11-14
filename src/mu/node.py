@@ -65,6 +65,7 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   rebuild-held-as-queued  a lost state.json of a held job is rebuilt as queued
   owner-from-node-json    owners are read from node.json (a file jobs can write), not /etc/mu/owners
   queue-project-filter    `queue` lists only the caller's project
+  drop-field              the arranging answers lack `place` (the JSON-shape check must notice)
 """
 import fcntl
 import hashlib
@@ -498,13 +499,10 @@ def running_info(jobs, here_only=False):
 def queue_items(w, cap):
     out = []
     for it in w:
-        if it["held"]:
-            out.append({"id": it["id"], "held": True})
-            continue
         try:
-            out.append({"id": it["id"], "held": False, "req": sched.resolve(it["j"]["job"], cap)})
+            out.append({"id": it["id"], "held": it["held"], "req": sched.resolve(it["j"]["job"], cap)})
         except sched.TooBig as e:
-            out.append({"id": it["id"], "held": False, "error": e})
+            out.append({"id": it["id"], "held": it["held"], "error": e})
     return out
 
 
@@ -1378,6 +1376,8 @@ def verb_arrange(key, args, op):
            "band": s1.get("band"), "place": s1.get("place"), "was": was, "higher_bands_ahead": len(higher),
            "held": s1.get("held"), "starts_by": s1.get("starts_by"), "waiting_for": s1.get("waiting_for"),
            "by": {"key": key, "owner": key in own, "from": frm, "others": others}, "delays": delays}
+    if fault("drop-field"):
+        out.pop("place")
     return out
 
 
