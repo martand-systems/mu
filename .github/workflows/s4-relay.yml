@@ -76,7 +76,10 @@ jobs:
       - name: Unit and integration tests (race detector, the real chisel)
         working-directory: relay/control
         env: {GOFLAGS: -mod=readonly, GOPROXY: "off", GOTOOLCHAIN: local}
-        run: go test -race -count=1 -v ./... 2>&1 | tee "$RUNNER_TEMP/go-test.txt" | grep -E '^(=== RUN|--- |PASS|FAIL|ok)' ; test "${PIPESTATUS[0]}" = 0
+        run: |
+          rc=0; go test -race -count=1 -v ./... > "$RUNNER_TEMP/go-test.txt" 2>&1 || rc=$?
+          grep -E '^(=== RUN|--- |PASS|FAIL|ok)|_test\.go:[0-9]+:' "$RUNNER_TEMP/go-test.txt"
+          [ "$rc" = 0 ] || { tail -n 80 "$RUNNER_TEMP/go-test.txt"; exit 1; }
       - name: The production build has no fault code
         working-directory: relay/control
         env: {GOFLAGS: -mod=readonly, GOPROXY: "off", GOTOOLCHAIN: local, CGO_ENABLED: "0"}
