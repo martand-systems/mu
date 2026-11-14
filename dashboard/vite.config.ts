@@ -10,7 +10,32 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin, type ProxyOptions } from "vite";
 
 const here = import.meta.dirname;
-const outDir = join(here, "..", "share", "dashboard");
+// MU_DASH_OUT: a fault build goes elsewhere (the committed share/dashboard/ is only ever the real build)
+const outDir = process.env.MU_DASH_OUT || join(here, "..", "share", "dashboard");
+
+// ---- test faults (docs/design/dashboard.md §7.1: every page test is shown to fail with its fault put in). Each is a
+// build-time constant __FAULT_<NAME>__, false in every real build, so the minifier removes the faulty code entirely;
+// MU_DASH_FAULT=name[,name] turns faults on for a throw-away build (MU_DASH_OUT) or a Vitest run.
+export const FAULTS = ["assume-features", "keep-fragment", "inner-html", "div-button", "faint-text", "style-tag",
+  "radix-scrollarea", "inner-html-lib", "theme-in-bundle", "chart-fixed-colours", "boundary-shows-error",
+  "server-down-as-offline", "copy-after-await", "interpolate-gap", "network-mode-default", "refused-as-offline",
+  "mac-swap-mem", "faint-series"] as const;
+const activeFaults = (process.env.MU_DASH_FAULT ?? "").split(",").filter(Boolean);
+for (const f of activeFaults) {
+  if (!(FAULTS as readonly string[]).includes(f)) throw new Error(`MU_DASH_FAULT: unknown fault ${f}`);
+}
+const faultDefines = Object.fromEntries(FAULTS.map((f) =>
+  [`__FAULT_${f.toUpperCase().replace(/-/g, "_")}__`, JSON.stringify(activeFaults.includes(f))]));
+
+// theme-in-bundle (D42's fault): the pre-paint script is left out of index.html and the bundle sets the theme instead
+function themeFault(): Plugin {
+  return {
+    name: "mu-theme-fault",
+    transformIndexHtml(html) {
+      return activeFaults.includes("theme-in-bundle") ? html.replace(/\s*<script src="\/theme\.js"><\/script>/, "") : html;
+    },
+  };
+}
 
 // ---- the source fingerprint: the same files and the same hashing as tools/dashboard-build-info.py
 const TOP = ["index.html", "package.json", "package-lock.json", ".nvmrc", "vite.config.ts", "tsconfig.json"];
@@ -77,6 +102,7 @@ function buildFiles(): Plugin {
     name: "mu-build-files",
     apply: "build",
     closeBundle() {
+      if (activeFaults.length) writeFileSync(join(outDir, "FAULT.txt"), activeFaults.join(",") + "\n");
       writeFileSync(join(outDir, "BUILD.json"), JSON.stringify({ schema: 1, ...sourceInfo() }, null, 1) + "\n");
       writeFileSync(join(outDir, "THIRD-PARTY.txt"), thirdParty());
     },
@@ -96,7 +122,8 @@ function devProxy(): Record<string, ProxyOptions> {
 }
 
 export default defineConfig(({ command }) => ({
-  plugins: [react(), tailwindcss(), buildFiles()],
+  plugins: [react(), tailwindcss(), themeFault(), buildFiles()],
+  define: faultDefines,
   server: { host: "127.0.0.1", port: 5173, strictPort: true, proxy: command === "serve" ? devProxy() : {} },
   build: {
     outDir,

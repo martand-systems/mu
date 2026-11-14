@@ -20,8 +20,9 @@
 #                                        records every platform's optional native packages (D35)  (network)
 #   tools/dashboard-npm browsers         Playwright's Chromium and WebKit for the pinned Playwright  (network)
 #   tools/dashboard-npm run SCRIPT       npm run SCRIPT: build, typecheck, lint, test, dev  (127.0.0.1 only)
-#   tools/dashboard-npm e2e [ARGS]       starts `mu dashboard serve --dev` OUTSIDE the sandbox (it is μ's own code), then
-#                                        npm run e2e inside it; stops the server after
+#   tools/dashboard-npm e2e [ARGS]       starts the e2e launcher OUTSIDE the sandbox (it starts `mu dashboard serve --dev`,
+#                                        μ's own code, a fresh one per test), then npm run e2e inside it; stops it after
+#                                        (MU_DASH_FAULT + MU_DASH_OUT: a fault build into a folder under $MU_CACHE/dev)
 #   tools/dashboard-npm npm ARGS...      any other npm command (127.0.0.1 only)
 #   tools/dashboard-npm selftest         shows that the sandbox denies what it must
 #   tools/dashboard-npm node-path        the Node it uses
@@ -88,7 +89,8 @@ sandboxed() {   # sandboxed NET CMD...: run CMD in dashboard/ with the scrubbed 
   ( cd "$DASH" && exec env -i PATH="$NODE/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$DEV/home" TMPDIR="$DEV/tmp/" \
       LANG=en_US.UTF-8 npm_config_cache="$DEV/npm-cache" npm_config_update_notifier=false npm_config_fund=false \
       npm_config_audit=false PLAYWRIGHT_BROWSERS_PATH="$DEV/ms-playwright" DASH_DEV_RUN="$MU_HOME/run/dev" \
-      ${DASH_E2E_PORT:+DASH_E2E_PORT="$DASH_E2E_PORT"} ${CI:+CI="$CI"} \
+      ${CI:+CI="$CI"} ${MU_DASH_FAULT:+MU_DASH_FAULT="$MU_DASH_FAULT"} ${MU_DASH_OUT:+MU_DASH_OUT="$MU_DASH_OUT"} \
+      ${DASH_SCREENS:+DASH_SCREENS="$DASH_SCREENS"} \
       /usr/bin/sandbox-exec -f "$sb" "$@" ) || rc=$?
   rm -f "$sb"; return "$rc"
 }
@@ -101,14 +103,19 @@ case "$cmd" in
   run)       [ $# -ge 1 ] || die "usage: tools/dashboard-npm run SCRIPT" 2; sandboxed 0 npm run "$@" ;;
   npm)       sandboxed 0 npm "$@" ;;
   e2e)
-    port="${DASH_E2E_PORT:-47999}"
+    # the dev servers are μ's own code: the launcher (tools/test-dashboard/e2e-launcher.py) starts them OUTSIDE the
+    # sandbox, a fresh one per test, and Playwright runs inside it. DASH_E2E_STATIC: the build to serve (a fault
+    # build for a must-fail run); DASH_E2E_SERVER_FAULTS, DASH_E2E_ENV: put into every server (must-fail runs).
     d="$(cat "$MU_HOME/default" 2>/dev/null || true)"; py="$MU_HOME/toolchains/$d/env/bin/python"
     [ -n "$d" ] && [ -x "$py" ] || py="$(command -v python3)"
-    "$py" -I -S "$REPO/src/mu/cli.py" dashboard serve --dev --fake-mac --port "$port" --static "$REPO/share/dashboard" \
-      --scenario "${DASH_SCENARIO:-busy}" >/dev/null 2>&1 &
-    srv=$!; trap 'kill "$srv" 2>/dev/null || true' EXIT
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -f "$MU_HOME/run/dev/dashboard.token" ] && break; sleep 0.25; done
-    DASH_E2E_PORT="$port" sandboxed 0 npm run e2e -- "$@" ;;
+    base="$MU_HOME/run/dev/e2e"; mkdir -p "$base"; chmod 700 "$MU_HOME/run/dev" "$base"; rm -f "$base/launcher.json"
+    "$py" -I "$REPO/tools/test-dashboard/e2e-launcher.py" --base "$base" --static "${DASH_E2E_STATIC:-$REPO/share/dashboard}" \
+      --python "$py" ${DASH_E2E_SERVER_FAULTS:+--faults "$DASH_E2E_SERVER_FAULTS"} ${DASH_E2E_ENV:+--env "$DASH_E2E_ENV"} \
+      > "$base/launcher.log" 2>&1 &
+    srv=$!; trap 'kill "$srv" 2>/dev/null || true; wait "$srv" 2>/dev/null || true' EXIT
+    for _ in $(seq 100); do [ -f "$base/launcher.json" ] && break; sleep 0.1; done
+    [ -f "$base/launcher.json" ] || { cat "$base/launcher.log" >&2; die "the e2e launcher did not start"; }
+    sandboxed 0 npm run e2e -- "$@" ;;
   selftest)
     ensure_node; fails=0
     t() { if sandboxed 0 /bin/sh -c "$2" >/dev/null 2>&1; then printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); else printf '  ok    %s\n' "$1"; fi; }

@@ -31,3 +31,18 @@ export async function apiGet(path: string): Promise<unknown> {
   }
   return body;
 }
+
+// The one state-changing request of phase 1a: ask a refused node again (POST /api/nodes/<name>/retry). Same origin,
+// so the browser adds Origin and Sec-Fetch-Site: same-origin, which the server requires besides the token.
+export async function apiPost(path: string): Promise<void> {
+  const t = token();
+  if (t === null) throw new NoToken("no token");
+  let r: Response;
+  try {
+    r = await fetch(path, { method: "POST", headers: { "X-Mu-Token": t }, cache: "no-store", credentials: "omit" });
+  } catch {
+    throw new ServerDown("the dashboard server is not running");
+  }
+  if (r.status === 401) throw new NoToken("stale token");
+  if (!r.ok) throw new ApiFailed(r.status, "post");
+}

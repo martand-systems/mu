@@ -9,7 +9,9 @@ export function takeTokenFromFragment(): boolean {
   if (t === null) return false;
   params.delete("t");
   const rest = params.toString();
-  window.history.replaceState(null, "", window.location.pathname + window.location.search + (rest ? "#" + rest : ""));
+  if (!__FAULT_KEEP_FRAGMENT__) {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search + (rest ? "#" + rest : ""));
+  }
   if (!TOKEN.test(t)) return false;
   try {
     window.localStorage.setItem(KEY, t);
