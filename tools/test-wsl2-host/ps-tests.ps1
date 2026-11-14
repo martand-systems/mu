@@ -52,6 +52,18 @@ if ($bad.Count -eq 0) { ok 'no "$var:x" drive-qualified variables by accident' }
 . $Script
 $Json = $false
 
+# pair: the stage folder's name, the relay URL check, the code's bytes (one LF; PowerShell 5.1 would pipe CR LF)
+eq 'stage version from a release path' 'v2026.11.9' (Get-StageVersion '\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\v2026.11.9\recipe\install\hosts\wsl2\mu-wsl2-host.ps1')
+eq 'stage version from elsewhere' 'local' (Get-StageVersion 'C:\Mu\host\mu-wsl2-host.ps1')
+eq 'relay URL: https accepted' $true (Test-RelayUrl 'https://relay.martand.systems')
+eq 'relay URL: http refused' $false (Test-RelayUrl 'http://relay.martand.systems')
+eq 'relay URL: a path refused' $false (Test-RelayUrl 'https://relay.martand.systems/x')
+eq 'relay URL: a quote refused' $false (Test-RelayUrl "https://relay.martand.systems'; calc")
+$sec = New-Object System.Security.SecureString
+foreach ($ch in '7K3M-Q9TD-4WXR-HN2C-PB8F-ZJEM'.ToCharArray()) { $sec.AppendChar($ch) }
+$cb = ConvertTo-CodeBytes $sec
+eq 'the code goes to wsl.exe as UTF-8 with one LF' '7K3M-Q9TD-4WXR-HN2C-PB8F-ZJEM|10|30' ((([Text.Encoding]::UTF8.GetString($cb, 0, 29)) + '|' + $cb[29] + '|' + $cb.Length))
+
 # .wslconfig
 $l = New-IniLines "# mine`r`n[wsl2]`r`nmemory=16GB`r`nkernelCommandLine = quiet`r`n`r`n[experimental]`r`nsparseVhd=true`r`n"
 $r1 = Set-IniValue $l 'wsl2' 'memory' '23GB'

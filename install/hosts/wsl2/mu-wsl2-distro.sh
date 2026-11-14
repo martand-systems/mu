@@ -24,6 +24,14 @@
 #                                         else (its egress filter); mu-tunnel-refresh.timer runs it hourly
 #   mu-wsl2-distro windows-reach          can a process of the distro start Windows programs or open the Windows drive
 #                                         (changes nothing); exit 0 closed, 1 open
+# Pairing by one code (docs/design/pairing.md §9.3; the code on stdin, never an argument; asked without echo at a
+# terminal). They run /usr/local/lib/mu/mu-pair.py (a root-owned copy of src/mu/pair.py that install puts there):
+#   mu-wsl2-distro pair claim             claim the invite with the code and check its offer (mu-wsl2-host.ps1 pair)
+#   mu-wsl2-distro pair finish            the relay credential, the inviter's key, the answer, the Mac's confirm
+#   mu-wsl2-distro pair run               claim and finish in one (a root shell; CI)
+#   mu-wsl2-distro pair abort             undo a pairing that was not answered yet
+#   mu-wsl2-distro pair status            is a pairing half done
+#   --relay URL                           the relay (default https://relay.martand.systems)
 #
 #   --user NAME          the unprivileged user μ runs as (default: mu); created without sudo
 #   --repo URL           the μ repo (default: git@github.com:martand-systems/mu.git)
@@ -43,6 +51,7 @@
 #   --no-wsl             not a WSL distro (the CI runner): leave out the Windows steps and checks (interop, drives)
 #   --wait SECONDS       tunnel credential: how long to wait for the tunnel to connect (default 30)
 #   --from-host          install: run by mu-wsl2-host.ps1, which says how to restart (this script then does not)
+#   --relay URL          pair: the relay (default https://relay.martand.systems)
 #
 # What install does, each step only when needed:
 #   /etc/wsl.conf        [boot] systemd=true, [user] default=NAME, [interop] appendWindowsPath=false (other keys kept;
@@ -78,7 +87,7 @@ set -euo pipefail
 MU_USER="mu"
 REPO="git@github.com:martand-systems/mu.git"
 BRANCH=""; CLONE=0; INSTALL_MU=0; HEARTBEAT=""; JSON=0; OFFLINE=0; GAP=90
-NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""; FROM_HOST=0
+NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""; FROM_HOST=0; RELAY_URL_ARG="https://relay.martand.systems"
 # [automount] options: Windows drives mounted for root only (§13.4); mu can still ask their free space (statfs)
 AUTOMOUNT_OPTIONS='"uid=0,gid=0,umask=077"'
 STATE_DIR="/var/lib/mu-wsl2"
@@ -698,6 +707,8 @@ KEYS_DIR="${MU_KEYS_DIR:-$ETC_MU/authorized_keys}"   # MU_KEYS_DIR: tools/test-w
 LIB_MU=/usr/local/lib/mu
 GATE=$LIB_MU/mu-node-gate
 GATE_TEMPLATE=$LIB_MU/mu-node-gate.in
+PAIR_PY=$LIB_MU/mu-pair.py                  # src/mu/pair.py: root runs this copy, never the release folder's
+PAIR_STATE=/var/lib/mu-wsl2/pair
 CHISEL_BIN=$LIB_MU/chisel
 # the chisel client of the tunnel: the release and sums of toolchain/apps.toml and relay/Dockerfile (a test checks)
 CHISEL_VERSION="1.12.0"
@@ -787,6 +798,13 @@ ensure_self() {
   # the gate's source, kept where a later run of $SELF_PATH finds it (mu-wsl2-host.ps1 copies it there too)
   if [ -f "$g" ]; then
     if put_file "$GATE_TEMPLATE" 0644 < "$g"; then chown root:root "$GATE_TEMPLATE"; changed "$GATE_TEMPLATE (the gate's source)"; else same "$GATE_TEMPLATE"; fi
+  fi
+  # the pairing client (pair): next to this script (the host script's stage), or src/mu/pair.py of a checkout
+  local pp=""
+  for pp in "$(dirname "$me")/mu-pair.py" "$(dirname "$me")/../../../src/mu/pair.py"; do [ -f "$pp" ] && break; pp=""; done
+  if [ -n "$pp" ]; then
+    install -d -m 755 -o root -g root "$LIB_MU"
+    if put_file "$PAIR_PY" 0644 < "$pp"; then chown root:root "$PAIR_PY"; changed "$PAIR_PY (the pairing client)"; else same "$PAIR_PY"; fi
   fi
 }
 
@@ -1369,6 +1387,8 @@ uninstall_jobs() {
            "$DELEGATE_CONF" "$STATE_DIR/host-drive"; do
     if [ -e "$f" ]; then rm -f "$f"; changed "$f removed"; fi
   done
+  if [ -f "$PAIR_PY" ]; then rm -f "$PAIR_PY"; changed "$PAIR_PY removed"; fi
+  if [ -d "$PAIR_STATE" ]; then rm -rf "$PAIR_STATE"; changed "$PAIR_STATE removed (pairing state)"; fi
   rmdir "$KEYS_DIR" "$LIB_MU" "$(dirname "$TUNNEL_EGRESS")" 2> /dev/null || true
   if systemd_running; then systemctl daemon-reload; fi
   if id -u "$TUNNEL_USER" > /dev/null 2>&1; then userdel "$TUNNEL_USER" 2> /dev/null || true; changed "system user $TUNNEL_USER removed"; fi
@@ -1525,6 +1545,9 @@ do_status() {
   init_started="$(date -u -d "$(ps -o lstart= -p 1 2>/dev/null)" +%FT%TZ 2>/dev/null || true)"
   [ -z "$init_started" ] || check info started "distro started $init_started"
 
+  if [ -f "$PAIR_STATE/current.json" ]; then
+    check warn pairing "half done (invite $(sed -n 's/.*"id": *"\([0-9A-Z]\{4\}\)".*/\1/p' "$PAIR_STATE/current.json")): run the pair line again with its code, or mu-wsl2-distro pair abort"
+  fi
   local nfail ready why; nfail="$(awk -F'\t' '$1 == "fail"' "$CHECKS" | wc -l | tr -d ' ')"
   ready="$(ready_line < "$CHECKS")"; why="$(printf '%s' "$ready" | cut -s -f2)"; ready="$(printf '%s' "$ready" | cut -f1)"
   if [ "$JSON" = 1 ]; then
@@ -1961,6 +1984,24 @@ cmd_windows_reach() {
   [ "$nfail" = 0 ]
 }
 
+# pair claim|finish|run|abort|status: the node's side of pairing by one code (docs/design/pairing.md §9.3). The code
+# comes on stdin (a terminal: asked without echo); mu-pair.py calls this script back for the credential, the key and the
+# tunnel's state. Exit codes are mu-pair.py's: 0 paired, 2 typo or usage, 4 unreachable, 5 refused, 9 expired
+cmd_pair() {
+  local ver py=/usr/bin/python3 a
+  need_root pair
+  [ -f "$PAIR_PY" ] || fail_with 1 "the pairing client $PAIR_PY is missing" "run mu-wsl2-distro install (from the release that has pairing)"
+  [ -x "$py" ] || py="$(command -v python3 || true)"
+  [ -n "$py" ] || fail_with 1 "python3 is missing" "apt-get install python3-minimal"
+  ver="$(head -n 1 "$(mu_home_of)/default" 2> /dev/null || true)"
+  case "$ver" in ''|*[!A-Za-z0-9._-]*) ver=unknown ;; esac
+  set -- "$ARG1" --relay "$RELAY_URL_ARG" --mu-version "$ver"
+  [ "$JSON" = 0 ] || set -- "$@" --json
+  # a clean environment: nothing of the caller's reaches root's Python but the test hooks named here
+  exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 ${MU_PAIR_FAULT:+MU_PAIR_FAULT=$MU_PAIR_FAULT} \
+    ${MU_PAIR_CONFIRM_WAIT:+MU_PAIR_CONFIRM_WAIT=$MU_PAIR_CONFIRM_WAIT} "$py" -I -S "$PAIR_PY" "$@"
+}
+
 # ================================================================ main
 usage() { sed -n '2,/^set -euo/p' "$SELF_SRC" | sed '$d' | sed 's/^# \{0,1\}//'; }
 main() {
@@ -1972,6 +2013,7 @@ main() {
     revoke) [ $# -ge 1 ] || { echo "usage: mu-wsl2-distro revoke NAME" >&2; exit 2; }; ARG1="$1"; shift ;;
     tunnel) case "${1:-}" in status|credential|refresh) ARG1="$1"; shift ;; *) echo "usage: mu-wsl2-distro tunnel status|credential|refresh" >&2; exit 2 ;; esac ;;
     tunnel-credential) action=tunnel; ARG1=credential ;;
+    pair) case "${1:-}" in claim|finish|run|abort|status) ARG1="$1"; shift ;; *) echo "usage: mu-wsl2-distro pair claim|finish|run|abort|status [--relay URL] [--json] (the code on stdin)" >&2; exit 2 ;; esac ;;
     heartbeat) HEARTBEAT="${1:-}"; [ $# -gt 0 ] && shift ;;
     stop-marker)
       case "${1:-}" in boot) marker_boot "$STATE_DIR" ;; stop) marker_stop "$STATE_DIR" ;; *) usage >&2; exit 2 ;; esac
@@ -1995,6 +2037,7 @@ main() {
       --node-name) NODE_NAME="${2:-}"; shift 2 ;;
       --wait) WAIT="${2:-}"; shift 2 ;;
       --from-host) FROM_HOST=1; shift ;;
+      --relay) RELAY_URL_ARG="${2:-}"; shift 2 ;;
       *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
   done
@@ -2015,6 +2058,7 @@ main() {
     host-key) cmd_host_key ;;
     tunnel) case "$ARG1" in status) cmd_tunnel_status ;; refresh) cmd_tunnel_refresh ;; *) cmd_tunnel_credential ;; esac ;;
     windows-reach) cmd_windows_reach ;;
+    pair) cmd_pair ;;
     heartbeat)
       [ "$(id -u)" = 0 ] || die "run as root"
       case "$HEARTBEAT" in on) heartbeat_on ;; off) heartbeat_off ;; *) echo "heartbeat on|off" >&2; exit 2 ;; esac ;;
