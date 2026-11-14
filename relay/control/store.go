@@ -167,8 +167,9 @@ func (st *Store) writable() error {
 	return os.Remove(name)
 }
 
-// load: state.json, else state.json.prev. (nil, nil) when neither exists: a new store.
-func (st *Store) load() (*State, string, error) {
+// load: state.json, else state.json.prev, the first that parses and passes valid (when not nil). (nil, nil) when
+// neither exists: a new store.
+func (st *Store) load(valid func(*State) error) (*State, string, error) {
 	var errs []string
 	for _, name := range []string{"state.json", "state.json.prev"} {
 		b, err := os.ReadFile(st.path(name))
@@ -180,6 +181,9 @@ func (st *Store) load() (*State, string, error) {
 			continue
 		}
 		s, err := parseState(b)
+		if err == nil && valid != nil {
+			err = valid(s)
+		}
 		if err != nil {
 			errs = append(errs, name+": "+err.Error())
 			continue

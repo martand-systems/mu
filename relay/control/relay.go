@@ -88,7 +88,7 @@ func NewRelay(cfg Config, sup Evicter) (*Relay, error) {
 		r.mode, r.modeErr = modeUnwritable, err.Error()
 		r.st = newState(now)
 		cfg.Logf("the state volume %s is not writable (%v): static clients only, pairing off (docs/design/pairing.md §6.6)", cfg.StateDir, err)
-	} else if s, from, err := r.store.load(); err != nil {
+	} else if s, from, err := r.store.load(r.loadCheck); err != nil {
 		r.mode, r.modeErr = modeDamaged, err.Error()
 		r.st = newState(now)
 		cfg.Logf("%v: static clients only, pairing off until POST /mu/v1/store/reset (docs/design/pairing.md §6.6)", err)
@@ -147,6 +147,20 @@ func NewRelay(cfg Config, sup Evicter) (*Relay, error) {
 }
 
 func (r *Relay) unix() int64 { return r.cfg.Now().Unix() }
+
+// loadCheck: a stored state must make an auth file that passes its check. One that parses but does not is treated like
+// one that does not parse (security review of ff2c707, finding 8): .prev, else mode damaged with the static clients,
+// never a failed start (a restart loop that takes the static clients down too).
+func (r *Relay) loadCheck(s *State) error {
+	if fault("bad-state-fatal") {
+		return nil
+	}
+	entries, _ := merge(r.cfg.Static, s, r.cfg.Revoked)
+	if err := checkAuthFile(render(entries, r.sentinel)); err != nil {
+		return fmt.Errorf("its auth file fails the check: %w", err)
+	}
+	return nil
+}
 
 // renderFor returns the auth file for a state, checked.
 func (r *Relay) renderFor(s *State) ([]byte, []Shadowed, error) {

@@ -90,7 +90,7 @@ func TestEmptyVolumeIsANewStore(t *testing.T) {
 // storeCrashChild writes generations as fast as it can and prints each one after save returned (acknowledged).
 func storeCrashChild() {
 	st := &Store{dir: os.Getenv("MU_STORE_CRASH_CHILD")}
-	s, _, err := st.load()
+	s, _, err := st.load(nil)
 	if err != nil || s == nil {
 		s = newState(1)
 	}
@@ -131,7 +131,7 @@ func TestStoreSurvivesKills(t *testing.T) {
 			}
 		}
 		cmd.Wait()
-		s, from, err := (&Store{dir: dir}).load()
+		s, from, err := (&Store{dir: dir}).load(nil)
 		if err == nil && s == nil && acked == 0 && last == 0 {
 			continue // killed before its first write
 		}
