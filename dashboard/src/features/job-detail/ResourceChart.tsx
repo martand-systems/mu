@@ -95,7 +95,7 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
     legend: { show: false },
     cursor: { sync: { key: syncKey }, drag: { x: false, y: false }, points: { size: 5 } },
     scales: { x: { time: true }, y: { range: (_u, _lo, hi) => [0, Math.max(limitCores ?? 0, hi, 1) * 1.05] } },
-    axes: axes(colours, (v) => num(v, 0), false),
+    axes: axes(colours, (v) => num(v, Number.isInteger(v) ? 0 : 1), false), // 0.5 steps: "1.5", never "2, 2"
     series: [
       {},
       { label: "cores", stroke: colours.cores, width: 1.5, spanGaps: false, points: { show: false } },
