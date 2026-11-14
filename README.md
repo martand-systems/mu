@@ -107,11 +107,14 @@ if they pass**. Nothing else changes:
   power.
 - **Compute jobs hold `state/busy`** (a compute node's job runner, while any job is queued or running; its pid on the
   first line). A busy node still updates: the release installs beside the running jobs (each runs under its
-  project's pin), provided 2 GB of memory are available, and becomes the default between two job starts (the runner
-  holds `state/start.lock` while it starts jobs; the switch takes it). The runner then restarts on the new release and
-  adopts the running jobs. Nothing is removed while `state/busy` exists: the clean-up after the switch waits until the
-  node is idle, and `mu gc --yes` is refused until then. `mu compute update NODE` from a workstation runs this update
-  on the node at once (docs/design/scheduler.md §9).
+  project's pin), provided 2 GB of memory are available, in a scope of its own held to 1.5 GB (so the kernel never
+  stops a job for its sake), and becomes the default between two job starts (the runner holds `state/start.lock`
+  while it starts jobs; the switch takes it). The runner then restarts on the new release and adopts the running
+  jobs. Nothing is removed while `state/busy` exists: the clean-up after the switch waits until the node is idle, and
+  `mu gc --yes` is refused until then; it then keeps the default as it is at that moment (a rollback with `mu use`
+  stays) and every version a queued, held or running job needs (`state/needed-versions`, written by the runner).
+  `mu compute update NODE` from a workstation runs this update on the node at once; from the owner's key it is
+  forced (also with auto-update off), from another key it is the ordinary check (docs/design/scheduler.md §9).
 - **Old versions are cleaned up after a switch.** It keeps the new default, the previous one (roll back with
   `mu use <previous>`) and every version a registered project pins. If a registered project's `mu.toml` can't be read
   (an unplugged drive), nothing is removed.

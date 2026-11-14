@@ -176,7 +176,8 @@ mu status <id>                        # queued|running|succeeded|failed|cancelle
 mu status <id> --wait --timeout 500   # keep below your Bash timeout; exit 10 = still running: call again
 mu log <id> --tail 50                 # or --json --offset N to poll; never `mu log -f` in a call with a time limit
 mu fetch <id>                         # outputs into the project at their paths (overwrites) + runs/<id>.json
-mu cancel <id>                        # also forgets a job that was never accepted (state sending)
+mu cancel <id>                        # also forgets a job that was never accepted (state sending); another
+                                      # workstation's job: exit 5 not-allowed (only its own workstation or an owner)
 mu status                             # this project's jobs. (`mu` alone is the toolchain status)
 mu queue --json                       # the whole node: every project's jobs, in the order they start
 ```

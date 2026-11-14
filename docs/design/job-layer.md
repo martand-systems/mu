@@ -767,7 +767,10 @@ against the user slice. Sandboxing (`ProtectHome`, `PrivateTmp`) is stage 3.
 - The node's own code is the default version (§3). **Changed with the scheduler** (scheduler.md §9 "Version switch",
   superseded 2026-11-14): a new release installs while jobs run and the default moves between two job starts (the
   runner's `state/start.lock`); the runner restarts on it and adopts the running units; clean-up (gc) still waits
-  for `state/busy` to go. `mu compute update NODE` starts that update from a workstation.
+  for `state/busy` to go, and keeps every version in `$MU_HOME/state/needed-versions` (the runner writes the μ
+  version of every queued, held and running job there: held jobs alone leave the node idle, and a project's pin moves
+  on with its next submit) and the default as it is then. `mu compute update NODE` starts that update from a
+  workstation (forced only from an owner key).
 
 ## 13. What needs root on the node
 

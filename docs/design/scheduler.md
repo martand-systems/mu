@@ -2,7 +2,8 @@
 
 **Status: release 1 built on branch `scheduler-r1` (2026-11-15): parts A, B and C (§3, §4, §5.2, §6, §7, §20.2-§20.4,
 §20.8-§20.12) and the busy-node version switch of §9, with `mu compute update`; part D (pause, §20.5-§20.7) is release
-2. Where the build differs from this text it says so in the build note (§12 has the probe's results).** Earlier:
+2. Where the build differs from this text, §21 "Release 1 as built" says so, with the review of 2026-11-15 and what
+is untested (§12 has the probe's results).** Earlier:
 design, revised after an independent review. Written on branch `scheduler` from `main` at
 a3a7016 (v2026.11.8, 2026-11-14), from the research note of the same day (build or adopt, algorithm, enforcement, WSL2
 hybrid cores) and the code it cites. Every claim about μ's code was read in `src/mu/node.py`, `src/mu/jobs.py`,
@@ -29,7 +30,8 @@ Sections: [1 Goal](#1-goal) · [2 Build or adopt](#2-build-or-adopt-plan-17) · 
 [13 Tests](#13-tests-ci-ubuntu-runner-real-systemd) · [14 PC checks after release](#14-pc-checks-after-the-release-by-jobs-no-visit) ·
 [15 Effort and order](#15-effort-and-place-in-the-roadmap) · [16 Risks](#16-risks) · [17 Questions](#17-open-questions-for-the-owner) ·
 [18 Read](#18-read-in-sources) · [19 Review](#19-review-2026-11-14) ·
-[**20 Queue control**](#20-queue-control-the-owners-requirements-of-2026-11-14) (hold, move, priority, pause, the node's queue)
+[**20 Queue control**](#20-queue-control-the-owners-requirements-of-2026-11-14) (hold, move, priority, pause, the node's queue) ·
+[**21 Release 1 as built**](#21-release-1-as-built-2026-11-15)
 
 ## 1. Goal
 
@@ -1099,8 +1101,12 @@ The same `by`, `from` and `others` go into each `delays` entry of the answer. Th
 job-layer §14 states (written by code `mu` owns).
 
 **What another workstation sees.** Everything `mu queue` shows, for every job: name, project, owner workstation,
-`submitted.host` and `user`, sizes, states, who held, moved or paused it. No command lines, environment or logs in
-`queue` (`mu log` of another's job remains possible, as today).
+`submitted.host` and `user`, sizes, states, who held, moved or paused it. No environment or logs in `queue` (`mu log`
+of another's job remains possible, as today). **As built:** a job's `name` defaults to the first 80 characters of its
+command (`mu submit` without `--name`), so `queue` does show the start of every command line; any key could already
+read the whole of it from `fetch` (`result.json` `argv`), so this is no new access, but a token on a command line is
+seen by every workstation: pass secrets in files, not arguments. The node stores and shows the free text with control
+and format characters replaced (one line each), of bounded length (Release 1 as built, review 2026-11-15).
 
 ### 20.5 Pause and resume: the mechanism
 
@@ -1541,3 +1547,119 @@ owner's case on its own together with `--quick`: it ships **in the first release
 **second release** (2.5.5), after the first has run real JATAYU work on the PC for some days. Whether the auto-pause
 policy ships in that release or later, once hand pauses show it is needed, is §17 Q9 (default: with it, as the owner
 asked for both). Step 2.5 in all grows from 7–9 days to about 16½–19.
+
+## 21. Release 1 as built (2026-11-15)
+
+Branch `scheduler-r1` from `main` 72d23a9. What this section says overrides the text above where they differ. The
+build notes (what was built, file by file) are the commit messages; this is what a reader of the design needs.
+
+### 21.1 Built
+
+- **Node** (`src/mu/sched.py`, pure; `src/mu/node.py`): capacity (§3.1: C = the runner's CPUs, M = MemTotal − 2 GiB −
+  1 GiB express, `node.json sched` may lower them), `resolve` (§4.2), the walk (§20.3), `plan` (admission by cores,
+  memory and CPU ids; head reservation `S` with EASY backfill, `extra`, MARGIN 70 s, the valve; the express lane, two
+  slots in its 1 GiB, falling through as a 1-core job; a grant-less running job holds the node; disk low), the
+  invariants (`MU_NODE_CHECK=1` or `node.json sched.check`), authorisation (§20.4). The runner plans every pass from
+  the grants in running jobs' `state.json` (nothing kept only in memory); a start is checkout → backfill re-check →
+  grant, start time and `start_unconfirmed` in one write → `systemd-run` with `MemoryMax` = grant, `RuntimeMaxSec` =
+  time, `CPUQuota=100%` for express, the §6 environment and `TMPDIR`. The sampler (every 5 ticks, outside the lock)
+  writes `usage.json` and flags a thread whose CPU mask is wider than the grant. Verbs `queue`, `hold`, `release`,
+  `move`, `priority`, `update`; `submit`, `status`, `list`, `hello` carry the §7.1 and §20.9 fields. Protocol 1.
+- **Workstation** (`src/mu/jobs.py`, `src/mu/qctl.py`, `src/mu/cli.py`): `mu submit --quick/--priority/--hold/
+  --others`, the capacity check before the snapshot, `mu queue [--mine]`, `mu hold|release|move|priority`,
+  `mu compute update NODE [--wait]`, status wording, the `next` size hint from `runs/*.json`.
+- **`bin/mu`** (dispatcher rev 11): a busy node installs beside its jobs, switches between two starts under the
+  runner's start lock, defers gc until idle (§9 "Version switch" as superseded).
+
+### 21.2 Deviations from the text above
+
+| Where | The text | As built, and why |
+|---|---|---|
+| §9, `mu compute update` | an express job | a node verb that starts `mu autoupdate run` in a transient unit `mu-update.service` (Nice=10, log in `/srv/mu/maint/`): a queue job needs a snapshot, and an express job's 10 minutes would kill an install that builds layers. It starts at once, whatever the queue. **Forced (`--force`: also with auto-update off, and past a release's three failed tries) only from an owner key**; from another key it is the ordinary check, now |
+| §9, busy install | (no memory rule) | installs only while 2 GB are available, **in a transient scope of the user's systemd with `MemoryMax` = 1.5 GiB**: the jobs' grants may add up to MemTotal − 3 GiB and grow into them at any time, and the kernel's OOM killer would pick the largest process, a job. Killed under that cap, the install counts as an install error (retried daily), not as a failure of the release. A Linux node without `systemd-run` defers the install until idle. An install started while the node is idle is not capped; a job that starts during it is not protected (residual, see 21.5) |
+| §9, gc | keeps NEW, previous, pins | also the **default at the moment gc runs** (a deferred gc after a rollback planned from an older NEW), `MU_INFRA_VERSION`, and **every version in `$MU_HOME/state/needed-versions`**, which the runner writes each pass (when it changes) and `submit` extends: the μ version of every queued, held and running job. Held jobs alone leave the node idle (§20.6), and a project's registered pin follows its last submit, so a held job's version had no other protection |
+| §9, the switch | between two starts | the runner holds `$MU_HOME/state/start.lock` through its starts and refreshes it before each; the lock holds `pid`, boot id and the process's start time (`/proc/PID/stat` field 22); a lock whose process is gone, is from another boot, names a pid that is now another process (or a thread id, which `kill(0)` accepts), or was not refreshed for 960 s (`MU_SWITCH_WAIT_S` + 60) is stale on both sides, and the runner clears a stale one at its start. Once the default differs from the one the runner started with, it starts nothing more until it has restarted |
+| §9, cancel and ends | grant freed when the unit ended | also for a job whose shim wrote its result: its grant stays counted while its unit is still stopping (results of the last 60 s are checked with systemd) |
+| §20.4 | cancel not in the table | **`cancel` follows the hold rule**: the job's own workstation or an owner key, else exit 77 `not-allowed` (journalled). No `--others` guard on cancel (older workstations send no `from=`) |
+| §20.4 | "no command lines in `queue`" | see the note in §20.4: the default name is the command's first 80 characters |
+| §4, specs | sizes positive integers | at most 4096 cores, 2^50 bytes, 365 days (`bad-spec` at submit; `too-big` in `resolve` for jobs already on disk); `name`, `project`, `submitted.{at,host,user}` strings of ≤ 200 characters (`submitted` an object); the node stores and shows them with control and format characters replaced. A job whose request cannot be worked out fails `bad-spec`; a plan that raises is replaced by one in which nothing starts, so status, queue and hello still answer |
+| §7.1 | `delays` with times | the `submit --priority high` answer's `delays` lists the jobs passed without `starts_by_was`/`starts_by`; `status` adds `starts_by_why` |
+| §13 | JSON-shape fixtures | key presence checks in the unit tests (fault `drop-field`), not golden files |
+| §13 | Q01–Q28 with fixed sizes | rows sized by the CI runner's CPUs (NC = min(nproc, 4), HC = NC / 2); workstation keys `avi-mac` (owner) and `ci-other`; Q15, Q16, Q17 and Q21 at unit level only; Q14B (new) runs the real v2026.11.9 client against this node; there is no V2 |
+| re-run | (not said) | a re-queued job's `usage.json` is removed with its `tmp/`, so attempt 2 reports its own figures |
+| audit | §20.4 lines | refused lines carry what was asked (`to=`, `before=`, `after=`, `class=`); outcome lines show `band normal->high` when the band changed |
+
+### 21.3 Review of 2026-11-15 (correctness, security, tests) and what was done
+
+Three independent reviews of caa0612. Every finding was checked; each fix has a test that fails with a fault undoing
+it (`tools/test-jobs/run.sh` counts only checks tagged with that fault for the scheduler sections).
+
+| Finding | Done | Test · fault |
+|---|---|---|
+| A start lock left by a dead process whose pid is alive again stops every start and switch | identity (pid, boot id, start time), age bound with refresh, cleared at runner start; same rule in `bin/mu` | sched-runner 11 · `runner-ignores-start-lock`, `start-lock-pid-only`; test-autoupdate · `start-lock-pid-only` |
+| gc can remove a held job's version | `needed-versions` | sched-runner 12 · `no-needed-versions`; test-autoupdate · `gc-ignores-needed` |
+| a deferred gc after a rollback removes the default | gc keeps the current default and `MU_INFRA_VERSION`; deferred gc plans from the current default | test-autoupdate · `gc-forgets-default` |
+| an install beside jobs is not counted against memory | the scope with `MemoryMax` (21.2) | test-autoupdate (stub `systemd-run`) · `install-uncapped`; e2e V1 reads the install's own `memory.max` |
+| one more batch of starts after a switch | no start once the default moved | sched-runner 11 · `starts-after-switch` |
+| a job's grant freed before its unit ends | `draining()` | sched-runner 13 · `free-on-result` |
+| a re-run keeps attempt 1's usage | `usage.json` removed | sched-runner 4 · `keep-usage-on-rerun` |
+| `update` open to any key, always `--force` | forced only for owners | sched-runner 14 · `update-always-force` |
+| HIGH: `time_s` = 10**400 stalls the node and every answer | bounds in `check_spec` and `resolve`; `safe_plan`; `wall_of` tolerant | sched, sched-runner 10 · `no-size-bounds` |
+| `submitted` not an object breaks `queue`; free text forges lines, crashes `mu queue`, reaches other Claude sessions | type and length checks; control characters replaced on the node and again in the client | sched-runner 10 · `no-display-check` |
+| `cancel` unguarded | the hold rule | sched-runner 9 · `no-cancel-auth` |
+| audit lines leave out the request | `asked`, `old->new` | sched-runner 9 · `audit-terse` |
+| `queue` shows command lines | spec corrected (§20.4), not the client: no new access, and the name helps the queue view | — |
+| V1 passed its fault pass for the wrong reason (a leftover v2026.11.11 tag, an earlier row's audit line) | the release repository made anew; the row's own audit lines; leftover toolchains removed; the restart must precede the job's end | e2e V1 · `restart-only-idle` |
+| Q05's timing assertion never shown failing | `must_fail Q05 backfill-ignores-shadow` (keeps S) | e2e Q05 |
+| Q04 failed its fault on the reason string | waits for B to end, then watches C for 6 s with B's cores free | e2e Q04 · `backfill-ignores-shadow` |
+| the simulation cannot catch a missing reservation | while jobs wait there must be a head with a `starts_by` | sched-sim · `no-head-reservation` |
+| Q16 untested | the `systemd-run` stub copies `state.json` at its call: the grant must be there; check 5 strict (started once, attempt 1, the 4-core job waits) | sched-runner 1, 5 · `grant-after-systemd-run`, `unconfirmed-as-interrupted` |
+| runner side of the start lock untested | sched-runner 11 | `runner-ignores-start-lock` |
+| Q21 `note_active` untested | the stub reports `ActiveEnterTimestampMonotonic` and `ControlGroup` | sched-runner 6b · `no-note-active` |
+| move `--after`/`--back`, a held reference, a re-run passed by `--front`, a low job re-queued at the front of low, one key without owners file | sched-runner 15 | `walk-by-accepted-ns`, `requeue-new-ns`, `owner-from-node-json` |
+| old workstation vs new node only simulated | e2e Q14B: the v2026.11.9 client (from its tag) against this node: a held job's status, the list, `--wait` exit 10, its submit granted the whole node | e2e Q14B · `held-as-queued` |
+| Q08 asked for the whole node | `--cores $HC` | e2e Q08 · `no-thread-env` |
+| `drain()` never checked | a row that cannot drain fails with "drain failed", and a fault pass that does is MISSED, not FAILS-OK | — |
+| a unit fault proven only by another check | `must_fail_tagged`; `queue.json zeroed` tagged with `bands-ignored` | all scheduler unit faults |
+| sched-runner crashed under `one-at-a-time`; sched under `no-head-reservation` | the checks no longer raise under a fault | — |
+| fixed sleeps before samples (Q02, Q06, Q18, Q25) | waits on the state sampled | — |
+
+Found correct by the reviews and kept as is: grants only from durable files; crashes during a start; races (the
+queue lock); admission by cores and memory including same-pass starts; the express lane inside its reserve;
+adoption of the previous release's state; hello fields only, protocol 1; gate and `ARG_RULES`; authorisation on the
+node under the lock; passing judged by position; unit properties built only from integers and the job id.
+
+### 21.4 Corrections to the build report
+
+- "34 rows pass" counted the set-up rows S0–S4 and the bookkeeping rows Z1/Z2: the scheduler rows were QS plus 26
+  (Q01–Q14, Q18–Q20, Q22–Q28, V1, V3). With Q14B there are now 27; there is no V2.
+- "All 36 faults fail as they must" was wrong for V1 (a false FAILS-OK) and needed a caveat for Q04 and Q05 (they
+  failed on side assertions). Both rows now fail on the assertion they are about; Q05 has a second fault.
+- "3.65 with the quota fault off" means with the fault `no-express-quota` on (no quota).
+- "Q15–Q17, Q21 covered at unit level": Q16 had no fault, Q17's `cpus-from-plan-cache` is an alias of
+  `cpus-reused` within one `plan()` call (it does not model a death between two starts: still so), and Q21 covered
+  only the backfill re-check. Q16 and Q21 now have their own unit checks and faults (21.3).
+
+### 21.5 Untested and known limits
+
+- **Nothing of release 1 has run on the office PC.** CPUQuota on a user unit there (§12 item 8 half-probed), the
+  express lane beside a 20-thread job (item 9), the system's own memory footprint (item 7, which decides whether the
+  2 GiB system reserve and the 1.5 GiB install cap are right), Open MPI's mask (item 3: `binding_policy=none` is the
+  untested fallback; no MPI in CI), whether a release's real install (micromamba, pip, flatpak) fits in 1.5 GiB.
+- The start lock's start-time check runs on Linux only (no `/proc` on macOS, where the unit tests use the boot id and
+  the age); the busy-install scope is tested with a stub `systemd-run` on macOS and for real only in e2e V1/V3.
+- **The head can start after `S`**: checkouts during a pass (also for jobs started into `extra`) delay the pass in which
+  the runner sees that the head fits. G1 in its strict form (a job named in no act's `delays` never sees its
+  `starts_by` grow) is not asserted; the simulation resets its head tracking after every act or VM stop.
+- Q15 (express does not move the head) and Q17 (death after the first of two starts) are unit level only, Q17 as
+  the `cpus-reused` alias.
+- An install begun while the node was idle is not capped; a job started during it can meet it in memory.
+- No queue length cap or per-key quota; no upper bound on `--time` as policy below 365 days (a long 1-core job holds
+  back every whole-node job until an owner cancels it).
+- Jobs run as `mu` and can rewrite `state.json`, `queue.json`, `audit.log` and `needed-versions`: the rules are a
+  guard against mistakes (§20.4); `from=` and `others=` are claims.
+- The second workstation in CI is a copy of the paired one with its own key; a real second pairing is not tested.
+- The office PC's dispatcher today (rev 10, v2026.11.8/9) still defers an install while busy: release 1 reaches it
+  only at an idle moment or by a hand-submitted `mu update` job; from then on releases install beside jobs.
+- Queued jobs from before the update are sized by the new rule: an unflagged job gets M (1 GiB less than before), and
+  one whose `--mem` lies between the new M and the old limit fails `too-big` in the runner (§11).
