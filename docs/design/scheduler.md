@@ -779,6 +779,8 @@ owner answers §17 Q1 and Q2 before the release. Dashboard sub-step 3.1 then reu
 
 ## 17. Open questions for the owner
 
+> **Answered 2026-11-15** by the lead at the owner's word: see docs/ROADMAP.md §2.2a.
+
 Defaults apply until the owner says otherwise. **Q1 and Q2 need an explicit answer before the release**, because the
 office PC is "not to be disturbed".
 

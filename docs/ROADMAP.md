@@ -189,6 +189,21 @@ decision overrides any of these; record it here with its date.
 | Q10 Windows test window | No uninstall/reinstall on the office PC (see 2.1). Phase 1b's Windows-only checks become the non-destructive checklist | Owner |
 | Q11 automatic fetch | Yes, opt-in, into `runs/<id>/` only, never over the working tree (phase 2) | Lead: Claude drives jobs; this saves a step without risking files |
 
+### 2.2a Scheduler (docs/design/scheduler.md §17)
+
+Decided by the lead on 2026-11-15, at the owner's word ("decide on your own; also start building the scheduler r1"):
+
+| Question | Decision |
+|---|---|
+| Cores kept free for people at the PC | None: all 20 vCPUs for jobs (a node setting, changeable without a release) |
+| Memory for a job without sizes | Node job memory minus the 1 GiB express reserve (about 20 GB instead of 21) |
+| Stricter CPU separation (cpuset delegation, a root step) | Later, with a PC visit (step 4.2), only if the probe shows it works |
+| Automatic pausing | Only for `urgent` jobs, and only of jobs submitted `--pausable`; ships with pause in release 2 |
+| Priority | Four strict bands (urgent, high, normal, low), explicit order inside; `urgent` owner key only |
+| A paused job's memory | Lent when the PC check shows it can be; otherwise pause helps only beside sized jobs (accepted) |
+| Pause limits | 2 h per pause, 4 h per run, as designed |
+| Release split | Release 1: concurrency, queue order and view, per-job usage, updates on a busy node, `mu compute update`. Release 2: pause/resume |
+
 ### 2.3 Dashboard (docs/design/dashboard.md §9)
 
 Decided by the owner:
