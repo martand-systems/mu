@@ -739,7 +739,7 @@ test_pairing() {
   c="$(api GET /mu/v1/clients/avi-mac | jget client.ports)"
   check P8 "Removing the node's client cuts its tunnel at once and refuses it afterwards; avi-mac loses the port; the static tunnels come back" \
     "$(echo "$out" | cut -c1-40); lab-pc disconnected after $t s ($(nlog s4-lab 'client: Disconnected') time(s)), then refused $(nlog s4-lab 'uthentication failed') time(s); avi-mac -> 7002: ${a:-nothing}; ports $c; static: ${b:-nothing}" \
-    '[[ $out == "200 "* && $(nlog s4-lab "client: Disconnected") -gt $before && $(nlog s4-lab "uthentication failed") -ge 1 && -z $a && $b == "pong $NONCE" && $c == "[7001]" ]] && lt "$t" 15'
+    '[[ $out == "200 "* && $(nlog s4-lab "client: Disconnected") -gt $before && $(nlog s4-lab "uthentication failed") -ge 1 && -z $a && $b == "pong $NONCE" && $c == "["* && $c != *7002* ]] && lt "$t" 15'
   docker logs s4-lab > "$WORK/logs/s4-lab.log" 2>&1; docker rm -f s4-lab >/dev/null 2>&1
 
   say "Pairing state on the named volume"

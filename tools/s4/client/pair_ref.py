@@ -124,6 +124,24 @@ class Relay:
         self.ctx = ssl.create_default_context(cafile=ca)
 
     def call(self, method, path, body=None, auth=None, timeout=35):
+        """One request, retried for up to 30 s while the relay is briefly away: a chisel restart (an eviction, at most
+        every 10 s) answers 502 through Traefik for about a second and cuts long polls. Every request here is safe to
+        repeat: a claim carries its session, answers and confirms are idempotent, the first contest stands."""
+        end = time.time() + 30
+        while True:
+            try:
+                st, body = self._call(method, path, body, auth, timeout)
+            except (urllib.error.URLError, OSError) as e:
+                if time.time() > end:
+                    raise SystemExit(out({"ok": False, "error": "relay-unreachable", "detail": str(e)[:80]}, 4))
+                time.sleep(1)
+                continue
+            if st in (502, 503, 504) and not (isinstance(body, dict) and body.get("error")) and time.time() < end:
+                time.sleep(1)
+                continue
+            return st, body
+
+    def _call(self, method, path, body=None, auth=None, timeout=35):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.url + path, data=data, method=method)
         if data is not None:
@@ -138,8 +156,8 @@ class Relay:
                 return e.code, json.loads(e.read(), object_pairs_hook=no_dupes)
             except ValueError:
                 return e.code, {}
-        except (urllib.error.URLError, OSError) as e:
-            raise SystemExit(out({"ok": False, "error": "relay-unreachable", "detail": str(e)[:80]}, 4))
+        except ValueError:
+            return 0, {}
 
 
 def no_dupes(pairs):
