@@ -1663,8 +1663,10 @@ function Invoke-Elevated {
     $tmp = Join-Path $env:TEMP ('mu-wsl2-host-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     Copy-Item -Path $src -Destination $tmp
-    $sib = Join-Path (Split-Path $src -Parent) $script:DistroScriptName
-    if (Test-Path $sib) { Copy-Item -Path $sib -Destination $tmp }
+    foreach ($n in @($script:DistroScriptName, $script:GateName)) {
+      $sib = Join-Path (Split-Path $src -Parent) $n
+      if (Test-Path $sib) { Copy-Item -Path $sib -Destination $tmp }
+    }
     $src = Join-Path $tmp (Split-Path $src -Leaf)
   }
   $argv = Get-RelaunchArguments $src

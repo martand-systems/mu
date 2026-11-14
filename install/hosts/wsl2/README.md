@@ -5,7 +5,9 @@ Two scripts turn a Windows 11 PC into a μ compute node (ADR-001 in `docs/PLAN.m
 - **`mu-wsl2-host.ps1`** (Windows, run by a person once) installs a WSL2 distro, makes it run with nobody signed in,
   makes Windows stop it cleanly before a shutdown or restart, and then runs the Linux script inside it.
 - **`mu-wsl2-distro.sh`** (Linux, run as root inside the distro) sets up the distro: systemd, the unprivileged user `mu`,
-  write-back timers, a clean-stop marker, and access to the μ repo through a read-only deploy key.
+  write-back timers, a clean-stop marker, access to the μ repo through a read-only deploy key, and the job layer's
+  node: an sshd on loopback behind a forced command (`mu-node-gate`, the third file here), the relay tunnel, security
+  updates, and Windows interop off ([Job layer](#job-layer-the-node-side-docsdesignjob-layermd-13)).
 
 Both scripts can be rerun at any time. A second `install` changes nothing and says so, and `status` checks everything
 without changing anything. They reproduce the setup tested in spike S3
@@ -18,7 +20,7 @@ elevation itself:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File .\mu-wsl2-host.ps1 install
 
-- Keep the two scripts together. A copy of the repo folder, a downloaded zip, or the folder seen through
+- Keep the three files together (the two scripts and `mu-node-gate`). A copy of the repo folder, a downloaded zip, or the folder seen through
   `\\wsl.localhost\<distro>\...` all work. `-ExecutionPolicy Bypass` is needed because downloaded and network-path
   scripts are blocked by default. It applies to this one run only.
 - Run from a `\\wsl.localhost` path, the script copies itself to `%TEMP%` before elevating, because the elevated process
@@ -114,10 +116,48 @@ VM off, so no cached data is lost.
 | `~mu/.ssh/mu_github` | ed25519 key, made once. If only `mu_github.pub` is missing, it is rebuilt from the key. A block at the top of `~/.ssh/config`, between `# >>> mu-wsl2` and `# <<< mu-wsl2`, maps `github.com` to it. `known_hosts` pins GitHub's ed25519 key from `api.github.com/meta`, cross-checked with `ssh-keyscan` |
 | `/home/mu/mu` | the clone, once the key works. An existing clone is never touched again: μ updates itself |
 | `/usr/local/sbin/mu-wsl2-distro` | the script itself, so you can run `wsl -d mu-compute -u root -- mu-wsl2-distro status` |
+| the job layer | see [Job layer](#job-layer-the-node-side-docsdesignjob-layermd-13) below |
 
 μ's own units should set `TimeoutStopSec=5`, and the job layer (`docs/PLAN.md` §6.4a) should write its state
 atomically (temp file, fsync, rename, fsync the directory) and re-run any job whose result was not durably written.
 The clean-stop marker above is what it reads to report an unclean stop.
+
+## Job layer: the node side (`docs/design/job-layer.md` §13)
+
+`install` also makes the distro a node that workstations reach through the relay. Each step is idempotent, has a
+check in `status`, and is undone by `uninstall`, except the node's host key (its identity: a reinstall keeps every
+workstation's pin) and the job folders in `/srv/mu` (data).
+
+| What | Value |
+|---|---|
+| Ubuntu's `ssh.socket`, `ssh.service` | masked **before** `openssh-server` is installed, so port 22 never opens |
+| packages | `openssh-server`, `unattended-upgrades`, `python3` (status reads JSON); the first two are removed again by uninstall if install added them |
+| `/etc/mu/ssh_host_ed25519_key` | the node's host key (root, 0600). Kept by uninstall |
+| `/etc/mu/sshd_config`, `mu-sshd.service` | sshd's whole configuration (`/etc/ssh` is not read): `127.0.0.1:2222` only, key only, user `mu` only, no terminal, no forwarding, no sftp, `ForceCommand /usr/local/lib/mu/mu-node-gate`. Checked with `sshd -t` before it replaces the old one; `status` compares every value `sshd -T -C user=mu,host=localhost,addr=127.0.0.1` reports with the specification |
+| `/etc/mu/authorized_keys/mu` | root, 0644: the workstations' keys, one line each, `restrict ssh-ed25519 <key> <name>`. Only root changes it (`authorize`, `revoke`) |
+| `/usr/local/lib/mu/mu-node-gate` | the forced command, root 0755, with this machine's two paths written in (its source is `mu-node-gate` next to the scripts) |
+| `/srv/mu` | the job folders: owner `mu`, 0700 |
+| cgroup delegation | only if `mu`'s user manager lacks `memory` or `pids` (Ubuntu 24.04 delegates them already): `user@.service.d/60-mu-delegate.conf` |
+| `/usr/local/lib/mu/chisel`, user `mu-tunnel`, `mu-tunnel.service` | the relay tunnel: chisel 1.12.0 (SHA-256 of the archive and of the binary pinned; the archive of μ's download cache is the fallback), run as a system user without a login, sandboxed, `Restart=always`. It holds `R:127.0.0.1:<port>` in the relay, pointing at `127.0.0.1:2222` |
+| `/etc/mu/tunnel.env` | the relay credential: root:`mu-tunnel`, 0640. Written only by `tunnel credential` from stdin; a job (user `mu`) cannot read it |
+| `/etc/apt/apt.conf.d/52mu-unattended-upgrades` | unattended upgrades every day, security pockets only, no automatic reboot; `apt-daily*.timer` enabled |
+| `/etc/wsl.conf` | also `[interop] enabled=false` (no Linux process starts a Windows program) and `[automount] options="uid=0,gid=0,umask=077"` (the drives stay mounted, for root only). They apply at the next start of the distro |
+| `/var/lib/mu-wsl2/host-drive` | `C /mnt/c`: the drive that holds the distro, passed by `mu-wsl2-host.ps1` (`--host-drive`). μ's disk check reads it first, since it can no longer ask Windows |
+| `mu node enable` as `mu` | the job runner `mu-node.service` (a user unit) and the memory-limit self-test, once `mu`'s μ has the job layer (the release after v2026.11.6). Until then install says so and runs it at its next run |
+
+Commands, as root (`wsl -d mu-compute -u root -- mu-wsl2-distro …`); each takes `--json`:
+
+| Command | |
+|---|---|
+| `tunnel credential` | reads the relay settings **from stdin**: the lines `relay/gen-credentials.sh client office-pc` prints on the Mac (or `AUTH=`, `RELAY_URL=`, `RELAY_FINGERPRINT=`, `RELAY_PORT=`). From a terminal it reads until an empty line and shows nothing you paste. Writes `tunnel.env`, starts the tunnel, waits up to `--wait` seconds (30). Exit 0 connected, 1 not (with the reason and what to do), 2 input refused |
+| `tunnel status` | connected or not, the reason, the last line of chisel's log. Exit 0, 1, or 3 when not set up |
+| `host-key` | the node's public host key and its SHA256 fingerprint, and the `mu compute add` line for the workstation |
+| `authorize <name> '<key>'` | the line `mu compute add` printed; `-` reads the key from stdin. The name is `[a-z0-9-]`, 1–32 characters; the key must be one ed25519 key (`ssh-keygen -l` decides). Exit 2 refused, 3 the key is authorised under another name |
+| `revoke <name>`, `keys` | remove a workstation; list names and fingerprints |
+| `windows-reach` | changes nothing: whether root, and `mu` inside a `systemd-run --user` unit, can start a Windows program, and whether `mu` can open or only measure the drive. Exit 0 closed, 1 open |
+
+`mu-wsl2-host.ps1 install` copies `mu-node-gate` into the distro with the script and passes `--host-drive`; on
+Windows nothing else changes. The owner's first visit is `docs/design/first-job-checklist.md`.
 
 ## GitHub access: the one manual step
 
@@ -154,7 +194,8 @@ Inside the distro: `wsl -d mu-compute -u root -- mu-wsl2-distro status` (`--json
 
     powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 uninstall
 
-This removes the task, the service and its `PreshutdownOrder` entry, and inside the distro the drop-ins, the units and
+This removes the task, the service and its `PreshutdownOrder` entry, and inside the distro the drop-ins, the units,
+the job layer (sshd, tunnel, keys, gate, the runner; not the host key and not `/srv/mu`) and
 `/usr/local/sbin/mu-wsl2-distro`. It puts back `/etc/wsl.conf` only if install changed it (a file that already had the
 values stays as it is). It restores every Windows setting it changed to the value recorded in
 `C:\Mu\state\wsl2-host.json` before its first change: power, Fast Startup, ARSO, and each `.wslconfig` key (keys that
@@ -217,6 +258,11 @@ without fsync, like most tools do. Each test ends with `status`. Three checks de
   restart. The pure functions are tested on macOS by `tools/test-wsl2-host/run.sh`. That covers the
   `wsl.conf`/`.wslconfig` merges, heartbeat analysis, the task definition and its comparison, quoting, the PowerShell
   5.1 syntax check, and a C# 5 compile of the hook.
+- **The job layer's steps have not run on the PC yet.** They run for real on a GitHub `ubuntu-24.04` runner
+  (`.github/workflows/job-layer.yml`: install three times, status with each check shown to fail with its fault, the
+  end-to-end suite through a relay replica, uninstall, reinstall). Not there: everything WSL-specific (interop and the
+  drive mount after a restart of the distro, the host drive record, the sandboxed tunnel under WSL's kernel, the
+  office network). `docs/design/first-job-checklist.md` checks each at the PC.
 - **Who started WSL decides when it ends.** WSL keeps one session per Windows user, created by the first `wsl.exe`
   call when none exists and tied to the Windows session of that caller. If you sign in and run `wsl` before the
   startup task has run (or after a WSL update restarted WSL), signing out later stops the distro. The watchdog

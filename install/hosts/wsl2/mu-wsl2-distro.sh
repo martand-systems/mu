@@ -1752,6 +1752,8 @@ cmd_tunnel_credential() {
   if [ -f "$TUNNEL_ENV" ] && cmp -s "$tmp" "$TUNNEL_ENV"; then rm -f "$tmp"; fix_owner_mode "$TUNNEL_ENV" "root:$TUNNEL_USER" 640 > /dev/null
   else fsync_path "$tmp"; mv -f "$tmp" "$TUNNEL_ENV"; fsync_path "$ETC_MU"; chg=true; TUNNEL_RESTART=1; fi
   tunnel_enable_start > /dev/null
+  # the runner, if enabled, takes the relay user as the node's name (install ran before there was a credential)
+  if [ -z "$NODE_NAME" ] && mu_job_layer && user_manager_up; then ensure_node_enabled > /dev/null 2>&1 || true; fi
   if systemd_running; then
     for i in $(seq 1 "$WAIT"); do
       st="$(tunnel_journal | tunnel_classify)"; state="$(printf '%s' "$st" | cut -f1)"
