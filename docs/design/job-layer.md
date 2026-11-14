@@ -1281,7 +1281,7 @@ R09), atomic write (R16), pins agree (R28), bash 3.2 (R29), each with its fault.
 ## 22. The host script: §13 in `mu-wsl2-distro.sh`, in CI
 
 The root steps of §13 are in `install/hosts/wsl2/mu-wsl2-distro.sh`, and CI makes its node with them: since run
-43540384372 the probe and e2e jobs no longer build the node by hand. The owner's visit is
+43541460952 the probe and e2e jobs no longer build the node by hand. The owner's visit is
 `docs/design/first-job-checklist.md` (one sequence, about 15 minutes; it replaces the order of §19, whose points it
 checks one by one).
 
@@ -1326,7 +1326,7 @@ answer, run as sshd runs it); on WSL also `host-drive`, `reach.root`, `reach.mu.
 | 14 | — | from PowerShell, commands as `mu` pass `--cd ~` | after §13.4, `mu` cannot enter the Windows folder PowerShell starts in |
 | 15 | — | `apt-get` is retried for up to 10 minutes while another apt holds a lock | with the daily apt timers on, `apt-daily` may be running `apt-get update`; `DPkg::Lock::Timeout` does not cover the lists lock (CI run 43539220281: a reinstall stopped with exit 100) |
 
-### 22.3 CI (run 43540384372)
+### 22.3 CI (run 43541460952)
 
 `tools/test-jobs/node-setup.sh` runs `mu-wsl2-distro.sh install --no-wsl` from the checkout, then
 `tunnel credential` with the replica's `gen-credentials` output on stdin, then install twice more; `e2e.sh` pairs

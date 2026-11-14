@@ -351,7 +351,7 @@ when the Mac is used over ssh.
 
 ## What CI already showed
 
-`.github/workflows/job-layer.yml` on branch `job-layer` makes the node on a GitHub `ubuntu-24.04` runner with these
+`.github/workflows/job-layer.yml` on branch `job-layer` (green in run 43541460952: 45 PASS, 30 faults each shown to fail) makes the node on a GitHub `ubuntu-24.04` runner with these
 very scripts (`mu-wsl2-distro.sh install --no-wsl` three times, the credential through `tunnel credential` on stdin
 from the relay replica's `gen-credentials` output), runs the whole job-layer suite through a replica of the relay and
 Traefik against that sshd, gate and tunnel, checks the script's own `status` (each check shown to fail with its fault
