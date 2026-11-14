@@ -177,6 +177,9 @@ is building, in the phases P0 to P8 of [`docs/PLAN.md`](docs/PLAN.md) §13.
 ([`docs/design/first-job-checklist.md`](docs/design/first-job-checklist.md) §5); then the job layer's second stage and
 the JATAYU frame model on the office PC (P7). The list is in `docs/PLAN.md` §13.
 
+**Roadmap:** what is built next and in what order (pairing fixes, then a local dashboard, then a simpler shell
+experience), with the owner's decisions: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## Known issues
 
 Queued for the next release:
