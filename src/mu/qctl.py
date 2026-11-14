@@ -182,11 +182,10 @@ def cmd_queue(a):
     conf = node_for(a)
     conn = jobs.Conn(conf)
     frm = project_id()
-    try:
+    # an older node refuses the verb, and before it the from= argument (bad-argument): ask hello what it has
+    if has(jobs.hello(conn), "queue-control"):
         ans = conn.call("queue", **({"from": frm} if frm else {}))
-    except MuError as e:
-        if e.error != "unknown-verb":
-            raise
+    else:
         ans = conn.call("list", limit=0)   # an older node: all its jobs, without order or bands
         ans = {"ok": True, "node": conf["name"], "fallback": "list", "jobs": ans.get("jobs", []),
                "note": "%s is older than the scheduler: the list of its jobs, without order or bands" % conf["name"]}
@@ -253,12 +252,9 @@ def cmd_arrange(op, a):
         args[k] = v
     if op == "priority":
         args["class"] = a.band
-    try:
-        ans = conn.call(op, **args)
-    except MuError as e:
-        if e.error == "unknown-verb":
-            raise too_old(conf, "queue control")
-        raise
+    if not has(jobs.hello(conn), "queue-control"):   # an older node would refuse from= as a bad argument
+        raise too_old(conf, "queue control")
+    ans = conn.call(op, **args)
     ans.setdefault("exit", 0)
     ans.update(node=conf["name"], next="mu queue --json")
     if a.json:
