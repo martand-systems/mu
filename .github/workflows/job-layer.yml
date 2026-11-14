@@ -76,6 +76,8 @@ jobs:
         run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
       - name: tools/test-autoupdate/run.sh (bin/mu)
         run: /bin/bash tools/test-autoupdate/run.sh
+      - name: tools/test-wsl2-host/run.sh (the host scripts' pure functions under bash 3.2; pwsh for the Windows one)
+        run: /bin/bash tools/test-wsl2-host/run.sh
 
   probe:
     name: probe (systemd, cgroup v2, delegation, oom-kill, mu-sshd)

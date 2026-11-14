@@ -1281,7 +1281,7 @@ R09), atomic write (R16), pins agree (R28), bash 3.2 (R29), each with its fault.
 ## 22. The host script: §13 in `mu-wsl2-distro.sh`, in CI
 
 The root steps of §13 are in `install/hosts/wsl2/mu-wsl2-distro.sh`, and CI makes its node with them: since run
-@RUN@ the probe and e2e jobs no longer build the node by hand. The owner's visit is
+43540384372 the probe and e2e jobs no longer build the node by hand. The owner's visit is
 `docs/design/first-job-checklist.md` (one sequence, about 15 minutes; it replaces the order of §19, whose points it
 checks one by one).
 
@@ -1326,13 +1326,26 @@ answer, run as sshd runs it); on WSL also `host-drive`, `reach.root`, `reach.mu.
 | 14 | — | from PowerShell, commands as `mu` pass `--cd ~` | after §13.4, `mu` cannot enter the Windows folder PowerShell starts in |
 | 15 | — | `apt-get` is retried for up to 10 minutes while another apt holds a lock | with the daily apt timers on, `apt-daily` may be running `apt-get update`; `DPkg::Lock::Timeout` does not cover the lists lock (CI run 43539220281: a reinstall stopped with exit 100) |
 
-### 22.3 CI (run @RUN@)
+### 22.3 CI (run 43540384372)
 
 `tools/test-jobs/node-setup.sh` runs `mu-wsl2-distro.sh install --no-wsl` from the checkout, then
 `tunnel credential` with the replica's `gen-credentials` output on stdin, then install twice more; `e2e.sh` pairs
 the workstation with `host-key` and `authorize`, runs every row of §21.3 against that sshd, gate and tunnel, and adds:
 
-@TABLE@
+| # | Check | Result, measured | Fault put in → result |
+|---|---|---|---|
+| S2 | the node made by the host script: install, `tunnel credential` on stdin, install twice more | **PASS**: 35 changes, then 1 (the runner, once μ of `mu` had the job layer), then 0 | — |
+| S3 | `mu compute add` with `host-key`'s key, then `authorize` | **PASS** | — |
+| H1 | the script's `status` (`--no-wsl --offline`) | **PASS**: 40 checks, none failed | `PermitTTY yes` in `/etc/mu/sshd_config` → **FAILS-OK** (`sshd.config: permittty yes (want no)`); a line added to the gate → **FAILS-OK** (`gate`); `/etc/mu/test-fault` present → **FAILS-OK**; `tunnel.env` 0644 → **FAILS-OK** (`tunnel.credential`); a listener on port 22 → **FAILS-OK** (`listeners`); the tunnel stopped → **FAILS-OK** (`tunnel`) |
+| H2 | install is idempotent | **PASS**: the third run, `nothing to change, already set up` | — |
+| H3 | `tunnel status` | **PASS**: connected (`client: Connected`); the relay password in no output of the set-up | — |
+| H4 | `keys`, `host-key` | **PASS**: `avi-mac` with the workstation's fingerprint, its line with `restrict`; the host key's fingerprint is the one the workstation pinned | — |
+| H5 | security pocket only | **PASS**: `unattended-upgrade --dry-run`: `Allowed origins are: o=Ubuntu,a=noble-security, o=UbuntuESMApps,a=noble-apps-security, o=UbuntuESM,a=noble-infra-security` | — |
+| H6 | `uninstall` | **PASS**: nothing left (units, files, `mu-tunnel`, masks, runner, listener on 2222); the host key unchanged; `/srv/mu/jobs` kept | — |
+| H7 | install again, credential, authorize | **PASS**: the workstation reaches the node with its old pin; one more install changes nothing | — |
+
+Every row of §21.3 passed again against this node (R00–R31, P1–P7), and each of their faults made its row fail:
+45 PASS, 30 FAILS-OK, nothing failed or missed.
 
 Unit level (`tools/test-wsl2-host/run.sh`, macOS bash 3.2 and Linux, plus `ps-tests.ps1` under pwsh): the
 `wsl.conf` merge with the Windows keys, the sshd text and its effective-value check (fixtures, and this machine's real
