@@ -251,8 +251,9 @@ must_fail "runner: results are written once" overwrite-result "$PY1" runner
 # runner's passes fail
 for f in one-at-a-time cpus-reused no-core-admission no-mem-admission backfill-ignores-shadow no-head-reservation \
          margin-zero extra-not-reduced no-express express-from-pool express-by-size grantless-counts-zero legacy-sized \
-         hold-ignored bands-ignored walk-by-accepted-ns priority-to-front no-auth-check owner-acts-not-sticky no-others-guard; do
-  must_fail "scheduler: plan, walk, authorisation" "$f" "$PY1" sched
+         hold-ignored bands-ignored walk-by-accepted-ns priority-to-front no-auth-check owner-acts-not-sticky no-others-guard \
+         no-capacity-check; do
+  must_fail "scheduler: plan, walk, authorisation, the workstation's sizing" "$f" "$PY1" sched
 done
 for f in cpus-reused margin-zero extra-not-reduced express-from-pool hold-ignored; do
   must_fail "scheduler: the randomised simulation" "$f" "$PY1" sched-sim

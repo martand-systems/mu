@@ -155,6 +155,35 @@ def t_sched():
           c2["cores"] == 4 and c2["cpus"] == [0, 1, 2, 3] and c2["mem_bytes"] == 2 * G and c3["cores"] == 20 and
           c3["mem_bytes"] == 23576412 * 1024 - 3 * G, (c2, c3))
 
+    # the workstation's side of sizing (scheduler.md §4.3, §11, §20.12)
+    from mu import jobs, proto
+
+    class A:
+        cores = mem = time = None
+        quick = hold = others = False
+        priority = None
+    new_node = {"features": ["sched", "usage", "queue-control"], "capacity": {"cores": 20, "mem_bytes": 20 * G}}
+    old_node = {"queue": {"running": 1, "queued": 2}}
+
+    def sizes(ans, limits, **kw):
+        a = A()
+        for k, v in kw.items():
+            setattr(a, k, v)
+        try:
+            return jobs.check_sizes(a, ans, "office-pc", limits), limits
+        except proto.MuError as e:
+            return (e.code, e.error), limits
+    r1 = sizes(new_node, {"cores": 64, "mem_bytes": None, "time_s": None}, cores=64)
+    r2 = sizes(new_node, {"cores": 8, "mem_bytes": 8 * G, "time_s": 60}, cores=8)
+    r3 = sizes(old_node, {"cores": None, "mem_bytes": None, "time_s": None, "quick": True}, quick=True)
+    r4 = sizes(old_node, {"cores": None, "mem_bytes": None, "time_s": None}, priority="high", others=True)
+    check("the workstation refuses --cores 64 on a 20-core node before anything is sent (exit 2 too-big)" +
+          flag("no-capacity-check"), r1[0] == (2, "too-big"), r1)
+    check("a request that fits passes", r2[0] is None, r2)
+    check("an older node: --quick is sent as --cores 1 --mem 512M --time 10m, with a note",
+          r3[1] == {"cores": 1, "mem_bytes": 512 * MI, "time_s": 600} and "one job at a time" in (r3[0] or ""), r3)
+    check("an older node: --priority is refused before the upload (exit 6 node-too-old)", r4[0] == (6, "node-too-old"), r4)
+
     # held jobs
     pl = sched.plan(now, cap, [], [{"id": "h", "held": True, "req": req(4, 256 * MI)}, {"id": "a", "req": req(4, 256 * MI)}])
     check("a held job is skipped: the next starts, the held one waits {held: true}" + flag("hold-ignored"),
