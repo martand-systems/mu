@@ -11,7 +11,8 @@ Sections: [0 After the review](#0-after-the-review) · [1 Summary](#1-summary) �
 [7 Container and Dokploy](#7-container-compose-dokploy) · [8 Mac](#8-the-workstation-side) ·
 [9 PC](#9-the-pc-side) · [10 Second workstation](#10-a-second-workstation-stage-p2) · [11 Migration](#11-migration) ·
 [12 Threat model](#12-threat-model) · [13 Tests](#13-tests) · [14 Not tested, open questions](#14-not-tested-and-open-questions) ·
-[15 Read in sources](#15-read-in-sources) · [16 Files and order of work](#16-files-and-the-order-of-work)
+[15 Read in sources](#15-read-in-sources) · [16 Files and order of work](#16-files-and-the-order-of-work) ·
+[17 Review](#17-review)
 
 ## 0. After the review
 
@@ -1377,3 +1378,30 @@ does not pass on a client's `X-Forwarded-For`; read timeout 60 s.
 
 `docs/PLAN.md` and `README.md` are updated by the lead at the merge. The merge to `main` redeploys the relay (legacy
 mode until the Dokploy edit of §11 step 2).
+
+## 17. Review
+
+The review of the built relay side (P1a, `79b51b1`…`49d762d`) by the fix-up pass of 2026-11-14.
+
+**Findings handed to the fix-up.** The security and the usability review each delivered no findings (their results
+reached the fix-up empty). Nothing was skipped for that reason, and nothing was applied from them; §0 remains the
+record of the design review.
+
+**Found while bringing CI back to green** (each with a test that fails without the fix):
+
+| # | What failed | Cause | Fix | Shown to fail |
+|---|---|---|---|---|
+| F1 | `TestIntegrationWithChisel` I6 on CI (run 43571059503): "the removed client connected again", its log `connection refused`, not `authentication failed` | A test fault, not a product one. The removed client's single try (`--max-retry-count 0`) fell between the old chisel draining and the new one listening, so the network refused it before the auth file could | I6 waits for `chisel restarted` and `/health` through chisel before the try (`bb2ab83`) | `must-fail.sh` with the real chisel: `no-evict` still fails I6 (at "the removed client's session was not cut"); all 24 unit faults and 4 integration rows noticed (local, Go 1.26.4, chisel 1.12.0 darwin_arm64) |
+| F2 | S4 P7 on Traefik v3.6.25 (same run): the second claimer's contest answered 403 `wrong-code` | The reference client's `Relay.call` reused the name `body` for the answer, so a retry after a 502 (chisel restarting for the eviction of the tampered invites) sent the 502's empty answer `{}` as the request: a contest without its claim token. The earlier P7 failure on v3.6.7 (run 43569958153) is the same retry path | `call()` keeps the request body; the relay's log of P1–P8 is now kept as `logs/relay-pairing.log` in the S4 artifact (`e8eff1a`) | `tools/s4/test-config.sh` "a retry after a 502 sends the same request body": with the old `call()` it reports `got '200 [{'claim': 'c'}, {}, {}]'` and exits 1 |
+
+**For P1b (the real clients).** F2 is the rule `pair.py` must keep: every retry of a claim, answer, contest, abort or
+confirm sends the identical request (same session, same body), and a client never treats a 502/503/504 without an
+`error` slug as an answer. `tools/test-pair/` should carry the same check against `pair.py`. mu-relayd itself behaved
+correctly in F2: a contest without a valid claim token must be refused, and it is counted as a wrong claim.
+
+**What the branch holds, and what it does not.** P1a (the relay) is built and tested (§13.1, §13.3). P1b (`pair.py`,
+`mu compute invite`, `mu relay login`, `mu node host-script`, the `pair` actions of `mu-wsl2-host.ps1` and
+`mu-wsl2-distro.sh`, `tools/test-pair/`) and P2 are **not built**: the owner flow of §3.1–§3.3 cannot be run yet, and
+the visit stays on the manual path of `first-job-checklist.md` until P1b is released. Merging this branch to `main`
+redeploys the production relay (Dokploy watches `relay/**`); without `RELAY_ADMIN_TOKEN` it runs chisel exactly as
+before (S4 legacy rows), with an unused empty volume.
