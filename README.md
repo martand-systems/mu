@@ -101,13 +101,17 @@ if they pass**. Nothing else changes:
   `max_hours`, 6) or is stopped mid-install is tried at most 3 times. Problems that aren't the release's don't use up
   those tries: no network, another install running, missing Ubuntu packages (shown as a one-time admin step:
   `sudo ./install.sh --system`). A newer release resets the count.
-- **It waits** while on battery (macOS), while less than `min_free_gb` (12 GB) is free, while an install is running,
-  and while `~/Library/Mu/state/busy` exists. A check that waited, or couldn't reach the repo, is tried again the next
-  hour, so a laptop that is closed or unplugged at check time still updates later that day. On macOS the install keeps
-  the Mac awake while it is on AC power.
-- **Compute jobs hold `state/busy`.** Create it before resolving a toolchain version (write your pid on its first line,
-  or leave it empty) and remove it when the jobs are done. While it exists, nothing is installed, the default doesn't
-  move and nothing is removed. A release that finished installing becomes the default at the next run after that.
+- **It waits** while on battery (macOS), while less than `min_free_gb` (12 GB) is free and while an install is
+  running. A check that waited, or couldn't reach the repo, is tried again the next hour, so a laptop that is closed
+  or unplugged at check time still updates later that day. On macOS the install keeps the Mac awake while it is on AC
+  power.
+- **Compute jobs hold `state/busy`** (a compute node's job runner, while any job is queued or running; its pid on the
+  first line). A busy node still updates: the release installs beside the running jobs (each runs under its
+  project's pin), provided 2 GB of memory are available, and becomes the default between two job starts (the runner
+  holds `state/start.lock` while it starts jobs; the switch takes it). The runner then restarts on the new release and
+  adopts the running jobs. Nothing is removed while `state/busy` exists: the clean-up after the switch waits until the
+  node is idle, and `mu gc --yes` is refused until then. `mu compute update NODE` from a workstation runs this update
+  on the node at once (docs/design/scheduler.md §9).
 - **Old versions are cleaned up after a switch.** It keeps the new default, the previous one (roll back with
   `mu use <previous>`) and every version a registered project pins. If a registered project's `mu.toml` can't be read
   (an unplugged drive), nothing is removed.

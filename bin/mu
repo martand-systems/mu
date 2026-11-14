@@ -2,8 +2,9 @@
 # μ dispatcher (installed as $MU_HOME/bin/mu and linked onto PATH). Shared by every installed version.
 # Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
-# The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node) always run on the default toolchain.
-MU_DISPATCHER_REV=10   # bump on every change (installers only replace an older dispatcher)
+# The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node, and the scheduler's queue, hold,
+# release, move, priority) always run on the default toolchain.
+MU_DISPATCHER_REV=11   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -300,6 +301,9 @@ cmd_remove() {
 cmd_gc() {
   local apply=0 keep v P f0 kept=""; [ "${1:-}" = "--yes" ] && apply=1
   ! install_running || die "an install is running; try again when it finishes"
+  # a job runner with jobs: a version it or a job's shim still runs from may no longer be the default (docs/design/
+  # scheduler.md §9): gc only when idle
+  if [ "$apply" = 1 ] && au_busy >/dev/null; then die "jobs are queued or running ($(tilde "$AU_BUSY")): run gc when the node is idle" 1; fi
   keep=" $(default_version) ${MU_VERSION:-} $(pinned_versions | tr '\n' ' ') "
   if P="$(find_project)"; then keep="$keep$(toml_version "$P/mu.toml") "; fi
   for v in $(versions); do case "$keep" in *" $v "*) kept="$kept $v" ;; esac; done
@@ -379,7 +383,8 @@ ${B}Versions${N}
   mu use V                 make V the default (used outside projects)
   mu pin [V]               pin this project (mu.toml) to V (default: the default version) and link it
   mu remove V [--force]    uninstall V (refuses the default, and versions projects pin unless --force)
-  mu gc [--yes]            remove versions, layers and cached flatpak commits nothing uses (dry run without --yes)
+  mu gc [--yes]            remove versions, layers and cached flatpak commits nothing uses (dry run without --yes;
+                           refused while a job runner has jobs, $(tilde "$AU_BUSY"))
 
 ${B}Updates${N}
   mu autoupdate [status]   automatic updates: on or off, schedule, last check and result (--json)
@@ -387,19 +392,26 @@ ${B}Updates${N}
                            makes it the default only if they pass. Projects keep their pins
   mu autoupdate run        check now (--force: also on battery, and after 3 failed tries)
   mu autoupdate set K V    settings: policy switch|install-only, min_free_gb, gc on|off, keep_previous, hour, minute,
-                           max_hours. Updates wait while $(tilde "$AU_BUSY") exists (a job runner holds it)
+                           max_hours. While $(tilde "$AU_BUSY") exists (a job runner has jobs) a release still installs
+                           beside them and becomes the default between two job starts; gc waits until it is gone
 
 ${B}Compute jobs${N} (always the default version; every command takes --json and --help)
   mu compute invite NODE   pair a compute node by one code typed at the PC (--no-wait, then --wait ID; --json)
   mu compute add NODE ...  pair one by hand (the fallback); list | status [NODE] | remove NODE
   mu relay login --stdin   this computer's admin token for the relay (status | clients | remove | backup | restore)
-  mu submit [--on NODE] [--mem SIZE] [--time DUR] [--cores N] [--output GLOB]... [--wait [--timeout S]] -- CMD...
-                           run CMD on the node from a snapshot of this project, under its pinned μ
-                           (defaults: node RAM - 2 GB, 12 h; mu submit --help for all options)
+  mu submit [--on NODE] [--cores N] [--mem SIZE] [--time DUR] | --quick  [--output GLOB]... [--wait] -- CMD...
+                           run CMD on the node from a snapshot of this project, under its pinned μ; several jobs
+                           run at once, each on the cores and memory it asks for (default: the whole node, 12 h;
+                           --quick: 1 core, 512 MB, 10 min, starts at once; mu submit --help for all options)
   mu status [JOB] [--wait [--timeout S]]   this project's jobs, or one job (not the toolchain status: that is plain \`mu\`)
   mu log JOB [-f] [--tail N] [--offset B]   the job's output
   mu fetch JOB [--into DIR] [--max-size 50M]   the declared outputs + runs/JOB.json
   mu cancel JOB            stop a queued or running job          mu node ...   the node's own side (enable, selftest)
+  mu queue [--mine]        the whole node's queue, in the order jobs start (every project, every workstation)
+  mu hold|release JOB      keep a queued job in place without starting it / let it go
+  mu move JOB --before J|--after J|--front|--back · mu priority JOB urgent|high|normal|low
+                           arrange queued jobs; another project's only with --others (when the owner asked)
+  mu compute update NODE   install the latest release on the node now, beside its running jobs
   Exit codes: 0 ok, 2 usage, 3 version, 4 unreachable, 5 refused, 6 node cannot, 7 job failed, 8 integrity,
   9 no such, 10 still running
 
@@ -426,6 +438,8 @@ H
 # MU_AUTOUPDATE_TIMEOUT_S, MU_AUTOUPDATE_RETRY_S.
 AU_CONF="$MU_HOME/autoupdate.conf"; AU_STATE="$MU_HOME/state/autoupdate.state"; AU_BUSY="$MU_HOME/state/busy"
 AU_LOCK="$MU_HOME/.autoupdate.lock"; AU_LOG=""; AU_WHY=""
+AU_START_LOCK="$MU_HOME/state/start.lock"   # held by the job runner while it starts jobs (src/mu/node.py take_start_lock)
+AU_BUSY_MEM_KB=2097152   # a release installs beside running jobs only while this much memory is available (Linux)
 AU_MAX_TRIES=3     # a release that fails its checks (or hangs, or is stopped mid-install) is tried this often
 AU_MAX_ERRORS=7    # a release that fails to download or build is tried once a day this often
 AU_RETRY_S="${MU_AUTOUPDATE_RETRY_S:-60}"
@@ -837,7 +851,7 @@ au_gc() {   # au_gc NEW PREV: remove releases older than NEW that nothing needs.
             # more of the newest older releases), every version a registered project pins, and everything not a release
   local new="$1" prev="$2" n keep v removed="" f0=0 p unread=""
   if install_running; then echo "gc: skipped (an install is running)"; return 0; fi
-  if au_busy >/dev/null; then echo "gc: skipped ($(tilde "$AU_BUSY") exists)"; return 0; fi
+  if [ "${MU_DISPATCH_FAULT:-}" != gc-while-busy ] && au_busy >/dev/null; then echo "gc: skipped ($(tilde "$AU_BUSY") exists)"; return 0; fi
   # a registered project whose mu.toml can't be read now (unmounted drive, other branch) may pin anything: keep all
   if [ -f "$MU_HOME/projects.txt" ]; then
     while IFS= read -r p; do [ -z "$p" ] || [ -r "$p/mu.toml" ] || unread="$unread $(tilde "$p")"; done < "$MU_HOME/projects.txt"
@@ -860,22 +874,62 @@ au_gc() {   # au_gc NEW PREV: remove releases older than NEW that nothing needs.
   printf 'gc: kept%s; removed:%s · ' "$(echo "$keep" | tr -s ' ' | sed 's/ $//')" "${removed:- no versions}"
   report_removed $((f0 + PRUNED_KB))
 }
-au_switch() {   # au_switch OLD NEW: make NEW (installed and checked) the default, unless a job holds the busy marker
-  local old="$1" new="$2"
+au_take_start_lock() {   # wait (MU_SWITCH_WAIT_S, default 900 s) until the job runner is not starting a job, and hold
+                         # its start lock: the default then moves between two starts (docs/design/scheduler.md §9)
+  local end=$((SECONDS + ${MU_SWITCH_WAIT_S:-900})) p
+  [ "${MU_DISPATCH_FAULT:-}" != ignore-start-lock ] || return 0
+  mkdir -p "$(dirname "$AU_START_LOCK")"
+  while :; do
+    if mkdir "$AU_START_LOCK" 2>/dev/null; then echo "$$" > "$AU_START_LOCK/pid"; return 0; fi
+    p="$(cat "$AU_START_LOCK/pid" 2>/dev/null | tr -cd '0-9')"
+    if [ -n "$p" ] && ! ps -p "$p" >/dev/null 2>&1; then rm -rf "${AU_START_LOCK:?}"; continue; fi
+    if [ -z "$p" ] && [ -n "$(find "$AU_START_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rm -rf "${AU_START_LOCK:?}"; continue; fi
+    [ "$SECONDS" -lt "$end" ] || return 1
+    sleep 1
+  done
+}
+au_drop_start_lock() { [ "$(cat "$AU_START_LOCK/pid" 2>/dev/null)" != "$$" ] || rm -rf "${AU_START_LOCK:?}"; }
+au_mem_kb() { awk '/^MemAvailable:/ { print $2; exit }' "${MU_MEMINFO:-/proc/meminfo}" 2>/dev/null || true; }
+au_switch() {   # au_switch OLD NEW: make NEW (installed and checked) the default. With a job runner busy, between two of
+                # its starts (it restarts with NEW and adopts the running jobs, which keep their pinned versions); gc
+                # then waits until no job is queued or running
+  local old="$1" new="$2" busy=0 how=""
   if au_busy >/dev/null; then
-    st_set pending_switch "$new"
-    au_note deferred "μ $new is installed and passed its checks; it becomes the default once $(tilde "$AU_BUSY") is gone"
-    return 0
+    busy=1
+    if [ "${MU_DISPATCH_FAULT:-}" = busy-defers ]; then   # the previous release's rule (test fault)
+      st_set pending_switch "$new"
+      au_note deferred "μ $new is installed and passed its checks; it becomes the default once $(tilde "$AU_BUSY") is gone"
+      return 0
+    fi
+    if ! au_take_start_lock; then
+      st_set pending_switch "$new"
+      au_note deferred "μ $new is installed and passed its checks; the job runner kept starting jobs for ${MU_SWITCH_WAIT_S:-900} s: it becomes the default at a later run"
+      return 0
+    fi
+    how=" between two job starts; the job runner restarts with it and adopts the running jobs"
   fi
   echo "$new" > "$MU_HOME/default.tmp.$$"; mv "$MU_HOME/default.tmp.$$" "$MU_HOME/default"
+  [ "$busy" = 0 ] || au_drop_start_lock
   st_set previous_default "$old"; st_set last_installed "$new"; st_set last_installed_time "$(now)"; st_set pending_switch ""
-  au_note installed "μ $new is the default${old:+ (was μ $old; roll back with: mu use $old)}"; au_done
+  au_note installed "μ $new is the default${how}${old:+ (was μ $old; roll back with: mu use $old)}"; au_done
   au_notify "μ $new installed" "It passed its checks and is now the default.${old:+ Projects keep their pins. Roll back: mu use $old}"
-  if [ "$(au_conf gc)" = on ]; then au_gc "$new" "$old"; fi
+  if [ "$(au_conf gc)" = on ]; then
+    if [ "$busy" = 1 ] && [ "${MU_DISPATCH_FAULT:-}" != gc-while-busy ]; then
+      st_set pending_gc "$new $old"; echo "gc: deferred until no job is queued or running (a job may still run from μ ${old:-?})"
+    else au_gc "$new" "$old"; fi
+  fi
+}
+au_pending_gc() {   # the gc a switch on a busy node deferred: run it once the node is idle (logged to the run's log)
+  local pg n o; pg="$(st_get pending_gc)"; [ -n "$pg" ] || return 0
+  if au_busy >/dev/null || install_running; then return 0; fi
+  n="${pg%% *}"; o="${pg#* }"; [ "$o" != "$pg" ] || o=""
+  echo "the gc deferred while jobs ran (μ $n, previous ${o:-none}):"
+  st_set pending_gc ""
+  au_gc "$n" "$o"
 }
 
 au_run_body() {
-  local force="$1" cur latest policy fc ec free where need rc t0 i lim res tflag ipid c stage why kind reason msg other
+  local force="$1" cur latest policy fc ec free where need rc t0 i lim res tflag ipid c stage why kind reason msg other mk
   local p_fv p_fc p_ft p_fl p_fr
   printf '== μ auto-update  %s  (pid %s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
   if [ "$(au_conf enabled)" != on ] && [ "$force" = 0 ]; then echo "auto-update is off (mu autoupdate on, or: mu autoupdate run --force)"; return 0; fi
@@ -903,11 +957,20 @@ au_run_body() {
   if [ -n "$cur" ] && ! is_release "$cur"; then
     au_note skipped "the default is $cur, a development build: auto-update only follows releases (mu use <release> to opt in)"; au_done; return 0
   fi
-  if [ -n "$cur" ] && ! ver_gt "$latest" "$cur"; then st_set pending_switch ""; au_note up-to-date "μ $cur is the latest release"; au_done; return 0; fi
+  if [ -n "$cur" ] && ! ver_gt "$latest" "$cur"; then st_set pending_switch ""; au_note up-to-date "μ $cur is the latest release"; au_done; au_pending_gc; return 0; fi
   if [ -n "$cur" ] && installed "$latest" && [ "$policy" = install-only ]; then
     au_note up-to-date "μ $latest is installed; the default stays μ $cur (policy install-only; switch with: mu use $latest)"; au_done; return 0
   fi
-  if au_busy; then au_note deferred "busy ($(tilde "$AU_BUSY") exists): μ $latest waits for a later run"; return 0; fi
+  # a busy node (a job runner with jobs) installs beside its jobs (they run under their projects' pins) and switches
+  # between two job starts (au_switch); scheduler.md §9 "Version switch", superseded 2026-11-14
+  if au_busy; then
+    if [ "${MU_DISPATCH_FAULT:-}" = busy-defers ]; then au_note deferred "busy ($(tilde "$AU_BUSY") exists): μ $latest waits for a later run"; return 0; fi
+    mk="$(au_mem_kb)"
+    if [ -n "$mk" ] && [ "$mk" -lt "$AU_BUSY_MEM_KB" ]; then
+      au_note deferred "busy, and only $((mk / 1024)) MB of memory available: μ $latest installs beside the jobs once $((AU_BUSY_MEM_KB / 1024)) MB are"; return 0
+    fi
+    echo "jobs are queued or running: μ $latest installs beside them, and becomes the default between two job starts"
+  fi
   if install_running; then au_note deferred "an install is running: μ $latest waits for a later run"; return 0; fi
   if installed "$latest"; then echo "μ $latest is already installed (it passed its checks then)"; au_switch "$cur" "$latest"; return 0; fi
 
@@ -1022,7 +1085,14 @@ au_run() {
   # the scheduler fires hourly: only the day's first check (or a retry of one that couldn't happen) does anything
   if [ "$sched" = 1 ]; then
     [ "$(au_conf enabled)" = on ] || return 0
-    au_due || return 0
+    if ! au_due; then
+      # nothing to check today; a gc deferred while jobs ran is done once the node is idle
+      if [ -n "$(st_get pending_gc)" ] && ! au_busy >/dev/null && ! au_running; then
+        AU_LOG="$MU_HOME/logs/autoupdate-$(date +%Y%m%d-%H%M%S)-gc.log"
+        ( set -e; au_pending_gc ) >> "$AU_LOG" 2>&1 || true
+      fi
+      return 0
+    fi
     ! au_running || return 0
   fi
   keep1="$(st_get fail_log)"; keep2="$(st_get err_log)"
@@ -1076,7 +1146,8 @@ au_status() {
     printf '"failing_version": %s, "fail_count": %s, "fail_reason": %s, "fail_log": %s, "error_version": %s, "error_count": %s, ' \
       "$(json_s "$fv")" "$fc" "$(json_s "$([ -z "$fv" ] || st_get fail_reason)")" "$(json_s "$([ -z "$fv" ] || st_get fail_log)")" \
       "$(json_s "$ev")" "$ec"
-    printf '"busy": %s, "linger": %s, "settings": %s}\n' "$(json_b "$busy")" "$(json_s "$linger")" "$(json_s "$AU_CONF")"
+    printf '"busy": %s, "pending_gc": %s, "linger": %s, "settings": %s}\n' "$(json_b "$busy")" "$(json_s "$(st_get pending_gc)")" \
+      "$(json_s "$linger")" "$(json_s "$AU_CONF")"
     return 0
   fi
   printf '%sauto-update: %s%s' "$B" "$en" "$N"
@@ -1099,7 +1170,8 @@ au_status() {
     "$(st_get fail_time)" "$(tilde "$(st_get fail_log)")"
   [ -z "$ev" ] || printf '  %s!%s μ %s could not be installed (%s of %s tries; last %s; log %s)\n' "$Y" "$N" "$ev" "$ec" "$AU_MAX_ERRORS" \
     "$(st_get err_time)" "$(tilde "$(st_get err_log)")"
-  [ "$busy" = no ] || printf '  busy        %s exists: updates wait\n' "$(tilde "$AU_BUSY")"
+  [ "$busy" = no ] || printf '  busy        %s exists (jobs queued or running): a release installs beside them and switches between two job starts; gc waits\n' "$(tilde "$AU_BUSY")"
+  [ -z "$(st_get pending_gc)" ] || printf '  gc          deferred until the node is idle (%s)\n' "$(st_get pending_gc)"
   printf '  settings    %s  (mu autoupdate set KEY VALUE)\n' "$(tilde "$AU_CONF")"
 }
 au_status_line() {   # one line for `mu`, once auto-update is configured
@@ -1186,6 +1258,7 @@ case "$cmd" in
   gc)                     cmd_gc "$@" ;;
   autoupdate|auto-update) cmd_autoupdate "$@" ;;
   compute|submit|status|log|fetch|cancel|relay|node) infra "$cmd" "$@" ;;
+  queue|hold|release|move|priority) infra "$cmd" "$@" ;;   # the scheduler's queue control (docs/design/scheduler.md §20)
   --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
   *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
 esac

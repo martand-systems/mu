@@ -66,6 +66,7 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   owner-from-node-json    owners are read from node.json (a file jobs can write), not /etc/mu/owners
   queue-project-filter    `queue` lists only the caller's project
   drop-field              the arranging answers lack `place` (the JSON-shape check must notice)
+  held-as-queued          a hold is written as state "queued" with a flag (the previous release's runner starts it)
 """
 import fcntl
 import hashlib
@@ -396,8 +397,12 @@ def autoupdate_info():
     conf = read_text(os.path.join(mu_home(), "autoupdate.conf"))
     st = read_text(os.path.join(mu_home(), "state", "autoupdate.state"))
     en = re.findall(r"^\s*enabled\s*=\s*(\S+)", conf, re.M)
-    lr = re.findall(r"^last_result=(.*)$", st, re.M)
-    return {"enabled": bool(en) and en[-1] == "on", "last_result": lr[-1] if lr else None}
+    def last(k):
+        v = re.findall(r"^%s=(.*)$" % k, st, re.M)
+        return v[-1] if v else None
+    return {"enabled": bool(en) and en[-1] == "on", "last_result": last("last_result"), "last_check": last("last_check"),
+            "last_message": last("last_message"), "pending_switch": last("pending_switch") or None,
+            "pending_gc": last("pending_gc") or None}
 
 
 # ------------------------------------------------------------------------------------------------ jobs on disk
@@ -449,6 +454,8 @@ def write_order(ids, **extra):
 
 
 def is_held(j, order=None):
+    if fault("held-as-queued"):
+        return not j["result"] and bool((j["state"] or {}).get("held_flag"))
     if fault("holds-in-order-file-only"):
         return not j["result"] and j["id"] in ((order if order is not None else read_order()).get("held") or [])
     return not j["result"] and (j["state"] or {}).get("state") == "held"
@@ -577,7 +584,9 @@ def status_of(j, v=None):
     if res:
         if not fault("no-usage"):
             out["usage"] = res.get("usage")
-        out["grant"] = public_grant(res.get("grant"))
+        out["grant"] = res.get("grant")
+        if res.get("affinity_widened"):
+            out["affinity_widened"] = res["affinity_widened"]
         return out
     if v:
         try:
@@ -675,6 +684,8 @@ def write_result(j, state, written_by, unit_result=None, note=None, **extra):
            "written_by": written_by, "note": note, "job": job_summary(j["job"])}
     if st.get("grant"):
         res["grant"] = public_grant(st["grant"])
+    if st.get("affinity_widened"):
+        res["affinity_widened"] = st["affinity_widened"]
     usage = extra.pop("usage", None)
     if usage is None and started and written_by == "runner":
         usage = sampled_usage(j, res.get("wall_s"))
@@ -758,7 +769,8 @@ def hello_answer(key, node):
                grant_of(j) is None for j in running) else {
                "cores": len(cap["cpus"]) - pl["allocated"]["cores"],
                "mem_bytes": max(0, cap["mem_bytes"] - pl["allocated"]["mem_bytes"])},
-           "owners": own, "you_are_owner": key in own, "warnings": owner_warnings(own)}
+           "owners": own, "you_are_owner": key in own, "warnings": owner_warnings(own),
+           "update": {"running": unit_props(UPDATE_UNIT).get("ActiveState") in ("active", "activating")}}
     if node.get("order_restored_at"):
         out["queue"]["order_restored_at"] = node["order_restored_at"]
     return out
@@ -1326,6 +1338,9 @@ def verb_arrange(key, args, op):
                 if fault("holds-in-order-file-only"):
                     o = read_order()
                     write_order([x["id"] for x in w0], held=(o.get("held") or []) + [jid])
+                elif fault("held-as-queued"):   # the shape §20.8 rejects: the previous release's runner starts it
+                    st.update(state="queued", held_flag=True, held={"by": key, "at": proto.iso(), "owner": is_owner})
+                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
                 else:
                     st.update(state="held", held={"by": key, "at": proto.iso(), "owner": is_owner}, updated=proto.iso())
                     durable.write_record(os.path.join(j["dir"], "state.json"), st)
@@ -1559,9 +1574,7 @@ def start_job(j, grant, S=None):
             return False
     if not fault("stamp-before-checkout"):
         stamp()
-    tmpd = os.path.join(d, "tmp")
-    shutil.rmtree(tmpd, ignore_errors=True)
-    os.makedirs(tmpd, mode=0o700, exist_ok=True)
+    os.makedirs(os.path.join(d, "tmp"), mode=0o700, exist_ok=True)   # removed with the result and before a re-run
     st["start_unconfirmed"] = True   # until systemd-run says it started the unit
     if fault("grant-after-systemd-run"):
         st0 = dict(st)
@@ -2166,8 +2179,8 @@ def set_busy(busy):
         if read_text(f).split("\n")[0].strip() != str(os.getpid()):
             os.makedirs(os.path.dirname(f), exist_ok=True)
             durable.write_durable(f, "%d\nμ job runner (mu node run): a job is queued or running\n" % os.getpid(), 0o644)
-    elif os.path.exists(f) and read_text(f).split("\n")[0].strip() == str(os.getpid()):
-        os.unlink(f)
+    elif os.path.exists(f) and read_text(f).split("\n")[0].strip() in (str(os.getpid()), "restarting"):
+        os.unlink(f)   # ours, or the one a runner left while restarting with a new default
 
 
 def run_runner():

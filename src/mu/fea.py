@@ -38,7 +38,7 @@ class Model:
         t0 = time.time()
         gmsh.initialize(["-noenv"])
         gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.option.setNumber("General.NumThreads", 4)
+        gmsh.option.setNumber("General.NumThreads", job_cores())   # a μ job's grant (scheduler.md §6), else 4
         gmsh.model.add(self.name)
         ents = []
         with tempfile.TemporaryDirectory() as d:
@@ -215,7 +215,8 @@ class Model:
                 f.write(f"*STEP\n*FREQUENCY\n{a}\n*NODE FILE\nU\n*END STEP\n")
         f.close()
 
-    def run(self, ncpu=4):
+    def run(self, ncpu=None):
+        ncpu = ncpu or job_cores()
         self.write()
         env = dict(os.environ, OMP_NUM_THREADS=str(ncpu), CCX_NPROC_EQUATION_SOLVER=str(ncpu))
         t0 = time.time()
@@ -271,6 +272,14 @@ class Model:
             g.point_data["S1"] = principal(S)[:, 2]
         return g
 
+
+
+def job_cores(default=4):
+    """The cores a μ job was granted ($MU_JOB_CORES, scheduler.md §6), else DEFAULT (a local run)."""
+    try:
+        return max(1, int(os.environ.get("MU_JOB_CORES") or default))
+    except ValueError:
+        return default
 
 def von_mises(s):
     xx, yy, zz, xy, a, b = s.T

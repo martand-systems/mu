@@ -269,18 +269,84 @@ has "on battery: skipped" "$out" "on battery power"
 mu autoupdate run --force >/dev/null
 eq "--force installs on battery" "$(def)" v2026.11.5
 
-section "busy marker defers"
+section "busy node (a job runner with jobs): installs beside them, switches between two starts, gc waits until idle"
+# docs/design/scheduler.md §9 "Version switch" (superseded 2026-11-14) and ROADMAP §2.1 "Updates on a busy node"
 mkrepo busy "v2026.11.4:success v2026.11.5:success"
 fresh busy busy
-echo "" > "$MU_HOME/state/busy"
+for v in v2026.11.2 v2026.11.3; do fake_installed "$v"; done
+sleep 120 & job=$!
+echo "$job" > "$MU_HOME/state/busy"
 out="$(mu autoupdate run)"
-eq "busy: installer not called" "$(calls)" 0
-has "busy: deferred" "$out" "deferred: busy"
+eq "busy: the release is installed beside the jobs" "$(calls)" 1
+eq "busy: and is the default (no start lock held)" "$(def)" v2026.11.5
+has "busy: says it switched between two job starts" "$out" "between two job starts"
+check "busy: v2026.11.3 is kept (gc deferred while jobs run)" test -f "$MU_HOME/toolchains/v2026.11.3/MANIFEST.json"
+eq "busy: the deferred gc is recorded" "$(st pending_gc)" "v2026.11.5 v2026.11.4"
+mu autoupdate run --scheduled >/dev/null 2>&1
+check "busy: a scheduled run while jobs still run does not gc" test -f "$MU_HOME/toolchains/v2026.11.3/MANIFEST.json"
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+mu autoupdate run --scheduled >/dev/null 2>&1
+check "idle (the marker's pid is gone): the next scheduled run does the deferred gc" test ! -e "$MU_HOME/toolchains/v2026.11.3"
+eq "  and clears it" "$(st pending_gc)" ""
+check "  keeping the previous default" test -f "$MU_HOME/toolchains/v2026.11.4/MANIFEST.json"
+# the faults: the previous release's rule (defer while busy), and gc while busy
+mkrepo busyf "v2026.11.4:success v2026.11.5:success"
+fresh busyf busyf
+sleep 120 & job=$!
+echo "$job" > "$MU_HOME/state/busy"
+MU_DISPATCH_FAULT=busy-defers mu autoupdate run >/dev/null 2>&1
+if [ "$(def)" = v2026.11.5 ]; then bad "must-fail: with busy-defers the default still moved"; else ok "must-fail: with fault busy-defers (the previous rule) nothing is installed while busy, as it must ($(def))"; fi
+fake_installed v2026.11.3
+MU_DISPATCH_FAULT=gc-while-busy mu autoupdate run >/dev/null 2>&1
+if [ -e "$MU_HOME/toolchains/v2026.11.3" ]; then bad "must-fail: gc-while-busy kept v2026.11.3"; else ok "must-fail: with fault gc-while-busy, gc removes a version while jobs run (as the check must notice)"; fi
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+# the start lock: the runner is starting jobs (it holds the lock): the switch waits, then defers
+mkrepo slock "v2026.11.4:success v2026.11.5:success"
+fresh slock slock
+sleep 120 & job=$!; sleep 120 & holder=$!
+echo "$job" > "$MU_HOME/state/busy"
+mkdir -p "$MU_HOME/state/start.lock"; echo "$holder" > "$MU_HOME/state/start.lock/pid"
+t0=$SECONDS
+out="$(MU_SWITCH_WAIT_S=3 mu autoupdate run)"
+eq "start lock held by a starting runner: the default stays" "$(def)" v2026.11.4
+eq "  the switch waits for it (MU_SWITCH_WAIT_S), then is deferred" "$(st last_result)" deferred
+eq "  pending_switch recorded" "$(st pending_switch)" v2026.11.5
+[ $((SECONDS - t0)) -ge 3 ] && ok "  it waited for the lock ($((SECONDS - t0)) s)" || bad "  it did not wait ($((SECONDS - t0)) s)"
+( sleep 2; kill "$holder" ) &
+out="$(MU_SWITCH_WAIT_S=30 mu autoupdate run --force)"
+eq "the lock's holder ends (pid gone: stale): the next run switches" "$(def)" v2026.11.5
+check "  and leaves no start lock behind" test ! -e "$MU_HOME/state/start.lock"
+eq "  pending_switch cleared" "$(st pending_switch)" ""
+echo v2026.11.4 > "$MU_HOME/default"
+sleep 120 & holder=$!
+mkdir -p "$MU_HOME/state/start.lock"; echo "$holder" > "$MU_HOME/state/start.lock/pid"
+MU_SWITCH_WAIT_S=2 MU_DISPATCH_FAULT=ignore-start-lock mu autoupdate run --force >/dev/null 2>&1
+if [ "$(def)" = v2026.11.5 ]; then ok "must-fail: with fault ignore-start-lock the default moves while the runner is starting a job (as the check must notice)"
+else bad "must-fail: ignore-start-lock did not move the default"; fi
+kill "$holder" "$job" 2>/dev/null; wait "$holder" "$job" 2>/dev/null
+# too little memory beside the jobs: deferred
+mkrepo bmem "v2026.11.4:success v2026.11.5:success"
+fresh bmem bmem
+sleep 120 & job=$!
+echo "$job" > "$MU_HOME/state/busy"
+printf 'MemTotal:       23576412 kB\nMemAvailable:    1048576 kB\n' > "$ROOT/meminfo"
+out="$(MU_MEMINFO="$ROOT/meminfo" mu autoupdate run)"
+eq "busy with 1 GB available: the installer is not called" "$(calls)" 0
+has "  deferred, saying why" "$out" "MB of memory available"
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+# a stale marker (its pid gone) is no marker at all
 sleep 0 & dead=$!; wait "$dead"
 echo "$dead" > "$MU_HOME/state/busy"
 mu autoupdate run >/dev/null
 eq "stale busy marker (pid gone): installs" "$(def)" v2026.11.5
 grep -q "ignoring a stale busy marker" "$(st last_log)" && ok "stale marker reported in the log" || bad "stale marker reported in the log"
+out="$(mu gc --yes 2>&1)"; rc=$?
+eq "mu gc --yes while idle: exit 0" "$rc" 0
+sleep 120 & job=$!; echo "$job" > "$MU_HOME/state/busy"
+out="$(mu gc --yes 2>&1)"; rc=$?
+eq "mu gc --yes while jobs run: refused (exit 1)" "$rc" 1
+has "  saying why" "$out" "run gc when the node is idle"
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null; rm -f "$MU_HOME/state/busy"
 
 section "locks: a running install, and two runs at once"
 mkrepo lock "v2026.11.4:success v2026.11.5:slow"
@@ -414,7 +480,7 @@ eq "run exits 0" "$rc" 0
 eq "installed the tag's content (mode success), not the branch's (fail)" "$(cut -d' ' -f2 "$MU_TEST_CALLS")" success
 eq "default v2026.11.5" "$(def)" v2026.11.5
 
-section "busy marker set during the install: no switch, no gc until it is gone"
+section "busy marker set during the install: the switch still happens (between starts), gc waits until it is gone"
 mkrepo busy2 "v2026.11.4:success v2026.11.5:slow"
 fresh busy2 busy2
 for v in v2026.11.2 v2026.11.3; do fake_installed "$v"; done
@@ -423,20 +489,17 @@ FAKE_SLEEP=3 mu autoupdate run > "$ROOT/busy2.out" 2>&1 & r1=$!
 sleep 1.5; echo "$job" > "$MU_HOME/state/busy"
 wait "$r1"; rc=$?
 eq "run exits 0" "$rc" 0
-eq "default not switched while busy" "$(def)" v2026.11.4
-check "v2026.11.5 is installed" test -f "$MU_HOME/toolchains/v2026.11.5/MANIFEST.json"
-check "v2026.11.2 not removed" test -f "$MU_HOME/toolchains/v2026.11.2/MANIFEST.json"
-check "v2026.11.3 not removed" test -f "$MU_HOME/toolchains/v2026.11.3/MANIFEST.json"
-eq "last_result deferred" "$(st last_result)" deferred
-eq "pending_switch recorded" "$(st pending_switch)" v2026.11.5
-has "summary says why" "$(cat "$ROOT/busy2.out")" "becomes the default once"
+eq "default switched although busy (no job was starting)" "$(def)" v2026.11.5
+check "v2026.11.2 not removed while busy" test -f "$MU_HOME/toolchains/v2026.11.2/MANIFEST.json"
+check "v2026.11.3 not removed while busy" test -f "$MU_HOME/toolchains/v2026.11.3/MANIFEST.json"
+eq "last_result installed" "$(st last_result)" installed
+eq "pending_gc recorded" "$(st pending_gc)" "v2026.11.5 v2026.11.4"
 kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
 mu autoupdate run >/dev/null; rc=$?
 eq "busy gone: run exits 0" "$rc" 0
-eq "busy gone: switched" "$(def)" v2026.11.5
 eq "busy gone: not installed again" "$(calls)" 1
-check "busy gone: gc removed v2026.11.3" test ! -e "$MU_HOME/toolchains/v2026.11.3"
-eq "pending_switch cleared" "$(st pending_switch)" ""
+check "busy gone: the deferred gc removed v2026.11.3" test ! -e "$MU_HOME/toolchains/v2026.11.3"
+eq "pending_gc cleared" "$(st pending_gc)" ""
 
 section "a hung install is stopped after the time limit and counts as a try"
 mkrepo hang "v2026.11.4:success v2026.11.5:hang"
