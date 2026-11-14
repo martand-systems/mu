@@ -960,8 +960,8 @@ the job layer applies, no Linux process reaches `C:`). Hence:
   new here (§14 Q6).
 
 **Staging.** Started from a `\\…` path, `pair` copies itself, `mu-wsl2-distro.sh`, `mu-node-gate` and
-`..\..\..\src\mu\pair.py` to `C:\Mu\stage\<version>` (a folder created with an ACL for Administrators and SYSTEM
-only; not `%TEMP%`, which a non-elevated process of the same user could rewrite between the copy and the run, review
+`..\..\..\src\mu\pair.py` to a new `C:\Mu\stage\<version>-<random>` (created together with its ACL for Administrators and
+SYSTEM only and owner Administrators, after `C:\Mu`'s own owner check and ACL; §17.2 S4; not `%TEMP%`, which a non-elevated process of the same user could rewrite between the copy and the run, review
 finding 13) and runs that copy in the same window (`Start-Process
 -NoNewWindow -Wait`, as `Invoke-As64Bit` does): the restart in the middle of `pair` takes `\\wsl.localhost` away for a
 minute. Not elevated: *as built* `pair` refuses (`open Terminal (Admin) and run the same line there`) instead of
@@ -1393,6 +1393,8 @@ mode until the Dokploy edit of §11 step 2).
 
 ## 17. Review
 
+### 17.1 The relay side (P1a)
+
 The review of the built relay side (P1a, `79b51b1`…`49d762d`) by the fix-up pass of 2026-11-14.
 
 **Findings handed to the fix-up.** The security and the usability review each delivered no findings (their results
@@ -1417,6 +1419,75 @@ correctly in F2: a contest without a valid claim token must be refused, and it i
 the visit stays on the manual path of `first-job-checklist.md` until P1b is released. Merging this branch to `main`
 redeploys the production relay (Dokploy watches `relay/**`); without `RELAY_ADMIN_TOKEN` it runs chisel exactly as
 before (S4 legacy rows), with an unused empty volume.
+
+### 17.2 The code reviews of `ff2c707` (released as v2026.11.8), and the first visit
+
+`ff2c707` was merged to `main` and released as v2026.11.8 (`52bc680`) at the owner's request before its security and
+usability reviews were applied. The production relay runs it with pairing on, and office-pc was paired with avi-mac
+(relay port 7001) and has run jobs. The fixes below are on branch `pairing` for the next release. None changes a
+protocol message, the relay's `state.json`, the node's pairing state or `node.conf`: the live pairing, the Mac's pin
+and keys and the relay's volume carry over unchanged. An invite still waiting on a Mac of v2026.11.8 (its Keychain
+item holds the code) is still read: its keys are derived from it.
+
+**The first visit (2026-11-14).** The printed second PC line, `powershell … -File (wsl -d mu-compute -u mu --cd ~ --
+mu node host-script) pair`, failed with `mu: command not found`: `wsl … -- CMD` runs a non-login shell, whose PATH
+lacks `~/.local/bin` (Ubuntu adds it in `~/.profile`). The owner used `/home/mu/.local/bin/mu`. The first line, `… --
+mu update`, worked only because it was typed inside a login shell. Fixed everywhere it is printed or documented
+(`invite.py` `PC_UPDATE`/`PC_PAIR`, `jobs.py` `PC_MUCMD` for every `on the PC: … mu …` hint, `node.py`'s hints, the ps1
+help, this file, the checklist, job-layer §13 row 14, CLAUDE-toolchain): `wsl -d mu-compute -u mu --cd /home/mu --
+/home/mu/.local/bin/mu …`. `--cd /home/mu` replaces `--cd ~` too (a newer PowerShell may expand an unquoted `~` to the
+Windows home). `tools/test-pair/run.sh` runs the printed lines as `wsl.exe` does (a non-login bash, WSL's default
+PATH, `/home/mu` mapped to the test's home); v2026.11.8's line is its must-fail (`mu: command not found`, exit 127).
+Root's lines (`wsl -d mu-compute -u root -- mu-wsl2-distro …`) are unaffected: `/usr/local/sbin` is on that PATH.
+
+**Security review** (findings in its order; "test" names the check, "must-fail" the fault that makes it fail):
+
+| # | Finding | Done | Test → must-fail |
+|---|---|---|---|
+| S1 | Anyone could empty the global admin bucket with header-less requests (no hold-off), locking the owner out (429) | fixed (`ef09175`): a request is charged to its address's `Unauth` bucket until its token verifies; a missing or malformed `Authorization` counts as a failed login; the global admin bucket is taken only after the token verifies | `TestAdminBucketNotStarved` → `admin-bucket-first`; the reviewer's two exploit tests now pass |
+| S2 | A tombstoned static client came back with its old password after an invite of its name ended (abort, contest, DELETE) | fixed (`ef09175`): `install` and `putClient` never delete a tombstone; only `DELETE /mu/v1/tombstones/{name}` does | `TestTombstoneOutlivesDynamicClient` → `untombstone`; the reviewer's three exploit tests now pass |
+| S3 | `mu compute remove` (a) said "can no longer reach the relay" when a static entry of that name came back; (b) matched the client by name and role only | fixed (`27c8460`): only a client whose ports are exactly `[relay_port]` of `node.conf` is deleted (else `kept`, with both ports named); when it `overrides_static`, a second DELETE tombstones the static entry (else `partly`, and says so). The relay's own rule (§6.2: deleting a dynamic client brings back the static one) is unchanged, so the reviewer's `StaticBackAfterRemoveOfReplacement` still describes the relay | test-pair `review` "security 3" (both) → `remove-any-port`, `static-comes-back` |
+| S4 | The staging folder could be pre-created by another user when `C:\Mu` did not exist yet (owner keeps WRITE_DAC: code execution as administrator) | fixed (`fe97129`): `New-StageDir` runs `Initialize-MuDirs` first (owner check and ACL of `C:\Mu`), refuses an existing `C:\Mu\stage` not owned by SYSTEM or Administrators, and stages into a **new** `<version>-<random>` folder created with its protected ACL and owner Administrators in one call (`[IO.Directory]::CreateDirectory(path, DirectorySecurity)`), so no other process ever owned it or held a handle to it; older stage folders are removed | ps-tests "pair stage" (the order of the checks in the source; the ACL calls themselves need Windows: **not run**) → `Initialize-MuDirs` taken out |
+| S5 | Any process of the Mac user can read Keychain items written by `/usr/bin/security` without a prompt, so the code was readable | fixed for the code (`27c8460`): the item holds `k1:<K_ic>:<K_ci>`, never the code; without K_claim it cannot claim the invite. The admin token and the backup are still readable that way (residual, below) | "security 5" → `keep-code`; the argv check now also looks for the MAC keys → `code-in-argv` |
+| S6 | The released clients honoured `MU_PAIR_*` test hooks from the environment, also as root (a variable from Windows through WSLENV could switch checks off in the elevated run) | fixed (`27c8460`): as root every `MU_PAIR_*` hook counts only while the root-owned, not group- or world-writable regular file `/etc/mu/test-hooks` exists (`hooks_allowed`); active faults are announced on stderr. The e2e creates the marker for its fault rows | "security 6" → `pair.py` with its root gate taken out; e2e Q14 → the marker forced |
+| S7 | `--wait` reported "paired" on the relay's `finished` alone | fixed (`27c8460`): paired only if this computer's `node.conf` says `paired_via "invite <ID>"`; else exit 5 `not-installed` | "security 7" → `trust-finished` |
+| S8 | A `state.json` that parses but fails the auth-file check stopped the relay (exit 70, restart loop, static clients down) | fixed (`ef09175`): treated like one that does not parse: `.prev`, else mode `damaged` with the static clients | `TestParseableBadStateDoesNotStopTheRelay` → `bad-state-fatal` |
+| S9 | The address of a request is the attacker's choice for anything reaching `mu-relay:8080` without Traefik (a container on `dokploy-network`) | **not changed**: a residual risk (below). Trusting X-Forwarded-For only from Traefik's address needs that address, which Dokploy assigns; a foothold on that network already reaches chisel's port directly | — |
+| S10 | Root read `~mu/.local/share/mu/default` through a symlink mu controls | fixed: `pair_mu_version` reads it as mu (`runuser`), and caps it at 64 characters | e2e H8 → the file read as root |
+| S11 | The PC's "the Mac's owner has been told" after a contest could be false (D10) | fixed (`27c8460`): "This PC told the relay, which removes the relay client the other machine got. Tell the Mac's owner" | text only |
+
+**Usability review:**
+
+| # | Finding | Done | Test |
+|---|---|---|---|
+| U1 | `invite --json` (waiting) showed neither the PC lines nor, with `--show-code stdout`, the code | fixed: stderr carries the invite line, the two PC lines and the code (or "in the dialog"); still-waiting JSON has `pc_commands` | "usability 1" |
+| U2 | One call could exceed the Bash tool's 600 s; a run killed after its finish then answered `no-such-invite` | fixed: `--timeout 400`; the hello is bounded by `--timeout`'s end (at least 30 s); `--wait` of an invite whose folder is gone answers exit 0 `finished` when a `node.conf` says `paired_via "invite <ID>"` | "usability 2" |
+| U3 | A dialog that failed was invisible; the dialog gave up after 30 min whatever the TTL; the test read the stub's file too early (flaky) | fixed: an `osascript` that exits non-zero within a second cancels the invite, exit 1 `no-dialog`; the dialog gives up at the invite's end and says "Keep this open until the PC says "code accepted""; the test polls for the file. **Skipped:** `--show ID` (show the code again): since S5 the code is no longer stored, so there is nothing to show; a lost dialog means `--cancel` and a new invite | "usability 3" → `no-dialog-check` |
+| U4 | Inside `pair`, install told the owner to do the manual steps | fixed: `pair` passes `--from-pair`: `info the relay credential comes from the pairing code (next)`, no `Next:` line; the ps1 says `the restart comes after the code (pair does it)` | not run (Windows) |
+| U5 | The last line said `not paired` when the pairing stood (exit 4, exit 5 confirm-integrity) | fixed: `pair status --json` lists the invites the node finished (`done`); `Get-PairVerdict` says "paired with …, but …" with the next step; not ready: the FAIL lines and `status` next | ps-tests "pair verdict" → the node's record ignored; test-pair "usability 5" → `forget-done` |
+| U6 | The line again on a paired PC ended red | fixed: "this PC is already paired (invite X): nothing to do", the restart if needed, the status, `already paired \| ready for jobs: …` | not run (Windows); `pair.py` returns the invite (flow) |
+| U7 | Hints at the PC were Linux commands; expired/contested/404 hints | fixed: `wsl -d mu-compute -u root -- ` prefixes; "a new code; then run this same line again here"; 404: "tell the Mac's owner (curl … "pairing":true)" | flow "its next step" |
+| U8 | After three wrong tries nothing said what next | fixed: "three tries: run the same line again …"; checklist row | not run (Windows) |
+| U9 | A failed restart was not retried by running the line again | fixed both ways: install sets `restart=1` while `/etc/wsl.conf` is right but root can still start `whoami.exe`; the throw names `test-stop` | not run (WSL) |
+| U10 | The checklist's expected outputs differed from the code | fixed (the `mu update` lines, the compact curl answer, the older-release texts, `remove-client`'s "no client", the rebuilt-PC row) | — |
+| U11 | The 30-minute invite was made before the PC's 15–20 minutes of update and install | fixed: §3 and the checklist give the PC lines first and make the invite when the PC asks | — |
+| U12 | CLAUDE-toolchain's pairing bullets | applied as proposed, with the full-path PC lines, `no-dialog`, `not-installed`, `invite-pending` | — |
+| U13 | Stale `mu compute add` remedies | fixed: `mu compute invite <node>`; `host-key`/`key-revoked`: `… --replace` for an invite-paired node; `relay-credential`: the login-bundle line; `compute add` kept for nodes paired by hand | test-jobs unit (4 hints), run.sh |
+| U14 | Smaller | fixed: a second invite for a waiting node exits 2 `invite-pending` (`--again` to insist); `expires` in UTC `Z`; the 404 hint names checklist §1; one line for a contest; `--wait` never echoes a bad id; no `(key )`; the JSON shapes in §18 | "usability 14" (three) |
+
+**Also fixed (the owner's known issues, README):** `mu gc` prints the Time Machine note on macOS only; the Linux
+installer runs `sudo` only for root, a passwordless sudo, or a terminal user in group `sudo`/`admin`/`wheel`, and
+otherwise names the `apt-get install` line for root (on the node: `wsl -d mu-compute -u root -- apt-get install -y …`);
+the install-time `mu autoupdate on` shows the last line of its error (systemctl's own words). Dispatcher rev 10. None
+of these three has an automated test (a non-sudoer Linux user and a failing systemctl are not set up in CI).
+
+**Residual risks** (accepted, in plain words): (1) Any program running as the Mac user can read the relay admin token
+and the backup from the login Keychain without a prompt, and so could create invites or delete relay clients; the
+pairing code itself is no longer stored. (2) A program on the Dokploy server's Docker network can bypass the relay's
+per-address limits by forging X-Forwarded-For. (3) On the Mac the clients still honour `MU_PAIR_FAULT` (announced on
+stderr); whoever sets the Mac user's environment already controls that user. (4) Everything in the ps1 that needs
+Windows (the stage ACL, `--from-pair`, already-paired, three tries, the restart retry) is untested until the next
+visit or re-pair.
 
 ## 18. P1b as built (the clients)
 
@@ -1450,6 +1521,25 @@ for the clients' tests (below); `docs/design/first-job-checklist.md` (rewritten)
 | D11 | `--ttl MIN` | `--ttl DUR` (`30m`, `90s`; 1–60 minutes) | the tests need a 1-minute invite |
 | D12 | The backup as one Keychain value | base64 of the JSON (`security -i` reads a quoted string) | quoting |
 | D13 | `mu-wsl2-distro uninstall` | removes `/var/lib/mu-wsl2/pair`, keeps `mu-pair.py` like the gate's source; the ps1's uninstall deletes it | as the other root-side scripts |
+
+**JSON shapes and exit codes** (usability review U14; the last line of stdout is the object; every error has `ok:
+false`, `exit`, `error`, `message`, `next`, as job-layer §4.2):
+
+| Command | Exit | Object |
+|---|---|---|
+| `mu compute invite NODE --no-wait --json` | 0 | `ok, invite, node, kind ("node"), port, code` (null unless `--show-code stdout`), `code_shown` (`dialog`\|`stdout`), `expires` (UTC, `…Z`), `pc_commands` (the two PC lines), `wait_command` |
+| `mu compute invite --wait ID --json [--timeout S]` still waiting | 10 | `ok:false, exit, error:"still-waiting", message, next` (the wait command), `invite, node, state` (the relay's state, or the pseudo-state `relay-unreachable`), `pc_commands` |
+| … paired | 0 | `ok, node, state:"finished", invite, host_key_fingerprint, port, outcome:"ok", hello{mu, runner, memory_limit, rtt_s}`; the form for an invite finished earlier (its folder gone, a `node.conf` says `paired_via "invite ID"`): `ok, node, state, invite` only |
+| … paired, not answering yet | 4 | `error` = the reason (`node-offline`, `relay-credential`, `timeout`, …), with `node, invite, host_key_fingerprint` |
+| … refused | 5 | `invite-used` (with `contest_verified`), `pair-integrity`, `invite-locked`, `not-installed` (the relay says finished, nothing installed here; with `invite, node`), `relay-admin`, `pairing-unsupported` |
+| … expired or unknown | 9 | `invite-expired`, `no-such-invite` |
+| usage | 2 | `exists`, `client-exists`, `port-taken`, `invite-pending` (with `invite`), `bad-invite`, `code-not-shown`, `not-logged-in` |
+| dialog | 1 | `no-dialog` (the invite was cancelled) |
+| `mu compute invite --cancel ID --json` | 0 | `ok, invite, cancelled:true` (exit 2 `finished` when it had already paired) |
+| PC: `mu-wsl2-distro pair claim --json` (code on stdin) | 0 | `ok, invite, node, port, inviter, inviter_key_fingerprint, resumed`; a resumed answered claim: `ok, invite, resumed:true, node, port, inviter` |
+| PC: `… pair finish` / `run --json` | 0 | `ok, invite, node, inviter, confirmed` (true, or false: "not yet confirmed"), `tunnel` |
+| PC: errors | 2/4/5/9 | `code-typo`; `relay-unreachable`, the outcome's reason; `wrong-code`, `invite-locked`, `invite-used`, `pair-integrity`, `already-paired` (with `invite`), `confirm-integrity`, `pairing-in-progress`, `pairing-unsupported`; `invite-expired` |
+| PC: `… pair status --json` | 0 | `ok, pairing` (null, or `{invite, phase, node, inviter, relay}`), `done` (the invites this PC finished, 48 h) |
 
 **Relay faults added for the clients' tests** (`-tags faults` only; `must-fail.sh` checks each): `tamper-offer-fp`
 (another relay fingerprint in the offer), `tamper-offer-url` (another relay URL), `any-claim` (any claim token is
@@ -1485,6 +1575,8 @@ stdin, `invite --wait`); every job-layer row runs against it. Q rows as built (e
 | Q11 | `--replace` with the Mac's confirm missing: the node exits 0 `not yet confirmed`, undoes nothing; the Mac finishes later with `--wait` | node `rollback-on-no-confirm` |
 | Q12 | no code, relay password or admin token in any argument list sampled during the pairings, any log, the journal or the relay's log | node `code-in-argv` |
 | Q13 | `mu compute remove` deletes the relay client; the node's tunnel is then refused | — |
+| Q14 | root's `pair` run ignores `MU_PAIR_FAULT` without the root-owned `/etc/mu/test-hooks`: a tampered offer is still refused (§17.2 S6) | the marker forced |
+| H8 | `pair` reads the mu user's default release as that user: a symlink to a root-only file sends `unknown` (§17.2 S10) | the file read as root |
 
 Not run in the e2e (covered by the fast tests only, or not at all): the 20-claim lockout (10 wrong claims from one
 address hold it off first; the relay's unit test covers both), the relay stopped while the Mac waits, a `pair` run

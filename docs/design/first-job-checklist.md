@@ -519,8 +519,8 @@ runs changes exactly this (everything else prints `ok`):
 
 On Windows (3):
 - `C:\Mu\host\mu-wsl2-host.ps1` and `C:\Mu\host\mu-wsl2-distro.sh` replaced by the new release's copies;
-  `C:\Mu\host\mu-node-gate` and `C:\Mu\host\mu-pair.py` added; `C:\Mu\stage\<version>` (the staged
-  copy).
+  `C:\Mu\host\mu-node-gate` and `C:\Mu\host\mu-pair.py` added; `C:\Mu\stage\<version>-<random>` (the staged
+  copy; a new one each run, the older ones removed).
 - Not changed: WSL, the distro, `.wslconfig`, power settings, the shutdown hook (its C# source is unchanged, so it is
   not rebuilt), the startup task. `-NoRestart`: WSL is not restarted by install.
 
