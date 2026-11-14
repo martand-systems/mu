@@ -273,7 +273,7 @@ def t_sched_sim(steps=3000, seed=20261115):
             else:
                 rq = req(rnd.randint(1, 8), rnd.randint(1, 16) * G // 2, rnd.choice([120, 300, 900, 1800, 3600, 7200]))
             queue.append({"id": jid, "req": rq, "ns": n_jobs, "held": False,
-                          "run": rq["time_s"] if rnd.random() < 0.3 else rnd.uniform(5, rq["time_s"])})
+                          "run": rq["time_s"] if rnd.random() < 0.5 else rnd.uniform(5, rq["time_s"])})
             next_arrival = now + rnd.expovariate(1 / 90.0)
         # random events
         e = rnd.random() if arrivals_on else 1.0
@@ -315,7 +315,7 @@ def t_sched_sim(steps=3000, seed=20261115):
             q = next(qq for qq in queue if qq["id"] == x["id"])
             if q["held"]:
                 held_started.append(q["id"])
-            act = now + (rnd.choice([0, 0, 1, 3, 30]) if x["grant"]["class"] != "express" else 0)
+            act = now + (rnd.choice([0, 1, 5, 30, 55]) if x["grant"]["class"] != "express" else 0)   # ≤ START_WAIT
             g = dict(x["grant"], start_mono=now, active_mono=act)
             run_s = min(q["run"], g["time_s"])
             running[q["id"]] = {"grant": g, "actual_end": act + run_s, "q": q}
