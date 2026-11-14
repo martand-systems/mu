@@ -558,13 +558,11 @@ def t_pins(repo):
                                                                               for u in urls), urls)
     check("the osx-arm64 sum is a sum", bool(re.match(r"^[0-9a-f]{64}$", mac)))
     distro = open(os.path.join(repo, "install", "hosts", "wsl2", "mu-wsl2-distro.sh")).read()
-    if "chisel" in distro:
-        ds = re.findall(r"[0-9a-f]{64}", distro[distro.index("chisel"):])
-        dvv = re.findall(r"chisel[_ A-Za-z]*VERSION=\"?([0-9.]+)", distro)
-        check("mu-wsl2-distro.sh names the same chisel version and linux-64 sum", lin in ds and (not dvv or dvv[0] == version),
-              (dvv, ds[:3]))
-    else:
-        print("skip  mu-wsl2-distro.sh has no chisel pin yet (the host script's tunnel step adds it)")
+    dvv = re.findall(r"^CHISEL_VERSION=\"?([0-9.]+)", distro, re.M)
+    dgz = re.findall(r"^CHISEL_GZ_SHA256=\"?([0-9a-f]{64})", distro, re.M)
+    durl = re.findall(r"^CHISEL_URL=\"?([^\"\s]+)", distro, re.M)
+    check("mu-wsl2-distro.sh pins chisel %s, the linux-64 archive's sum and URL of apps.toml" % version,
+          dvv == [version] and dgz == [lin] and len(durl) == 1 and durl[0] in urls, (dvv, dgz, durl))
 
 
 SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "proxy": t_proxy, "classify": t_classify,

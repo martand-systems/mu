@@ -71,6 +71,12 @@ $e = New-IniLines ''
 [void](Set-IniValue $e 'general' 'instanceIdleTimeout' '-1'); [void](Set-IniValue $e 'wsl2' 'swap' '8GB')
 eq '.wslconfig: from nothing' "[general]`r`ninstanceIdleTimeout=-1`r`n`r`n[wsl2]`r`nswap=8GB`r`n" (ConvertTo-IniText $e)
 eq '.wslconfig: BOM and LF line endings' 'memory=1GB' ((New-IniLines ([string][char]0xFEFF + "[wsl2]`nmemory=1GB`n"))[1])
+# the drive that holds the distro (passed to the distro script as --host-drive)
+eq 'host drive: C from the default location' 'C' (Get-HostDriveLetter 'C:\Mu\wsl\mu-compute')
+eq 'host drive: lower case, upper-cased' 'D' (Get-HostDriveLetter 'd:\wsl\x')
+eq 'host drive: the \\?\ prefix of a registry BasePath' 'E' (Get-HostDriveLetter '\\?\E:\wsl\x')
+eq 'host drive: a UNC path has none' '' (Get-HostDriveLetter '\\server\share\wsl')
+eq 'host drive: nothing' '' (Get-HostDriveLetter '')
 # uninstall: remove what was absent, restore what was there
 [void](Remove-IniValue $l 'general' 'instanceIdleTimeout')
 [void](Remove-IniValue $l 'wsl2' 'processors')

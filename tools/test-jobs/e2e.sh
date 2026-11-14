@@ -6,7 +6,8 @@
 # then fail. CI only (it creates users and services): .github/workflows/job-layer.yml.
 #
 #   tools/test-jobs/e2e.sh probe        the probe of what §18 only read (the first CI job)
-#   tools/test-jobs/e2e.sh all          set-up, every row, then every row with its fault
+#   tools/test-jobs/e2e.sh all          set-up, every row, then every row with its fault, then the host script's
+#                                       uninstall and reinstall (H rows: the node is made by mu-wsl2-distro.sh itself)
 #   ONLY="R01 R06" tools/test-jobs/e2e.sh all      a subset (set-up always runs)
 # Results: .scratch/jobs/results.tsv and summary.md; logs in .scratch/jobs/logs/.
 set -uo pipefail
@@ -105,18 +106,21 @@ setup() {
   TRAEFIK_VERSION="${TRAEFIK_VERSION:-3.7.16}" "$ROOT/tools/s4/run.sh" relay > "$WORK/logs/relay-up.log" 2>&1 \
     || { tail -30 "$WORK/logs/relay-up.log"; row FAIL S1 "relay replica" "did not start"; return 1; }
   row PASS S1 "relay and Traefik replica (tools/s4/run.sh relay)" "$(tail -1 "$WORK/logs/relay-up.log")"
-  sudo CI=true "$ROOT/tools/test-jobs/node-setup.sh" "$ROOT" "$WORK/chisel" "$S4W/certs/ca.crt" "$S4W/env/compute.env" \
-    > "$WORK/logs/node-setup.log" 2>&1 || { tail -40 "$WORK/logs/node-setup.log"; row FAIL S2 "node set-up" "failed"; return 1; }
+  sudo CI=true "$ROOT/tools/test-jobs/node-setup.sh" "$ROOT" "$WORK/chisel" "$S4W/certs/ca.crt" "$S4W/env/compute.env" "$WORK/out/host" \
+    > "$WORK/logs/node-setup.log" 2>&1 || { tail -60 "$WORK/logs/node-setup.log"; row FAIL S2 "node set-up" "failed"; return 1; }
+  sudo chown -R "$(id -u)" "$WORK/out/host"
   MU_UID="$(id -u mu)"   # the user exists only now
-  row PASS S2 "node set-up (§13 on the runner: mu-sshd, gate, /srv/mu, mu-tunnel, runner)" "uid of mu $MU_UID"
-  local fp pw out
+  row PASS S2 "node set-up by the host script: mu-wsl2-distro.sh install --no-wsl, tunnel credential on stdin, install twice more" \
+    "changes per run: $(for n in 1 2 3; do sed -n 's/^changed=//p' "$WORK/out/host/install-$n.result"; done | tr '\n' ' ')(run 3 must be 0); uid of mu $MU_UID"
+  local fp pw out hk
   fp="$(sed -n 's/^RELAY_FINGERPRINT=//p' "$S4W/env/workstation.env")"; pw="$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/workstation.env")"
-  out="$(printf '%s\n' "$pw" | sudo -u ws -H "$WSH/bin/mu" compute add office-pc --host-key "$(sudo cat /etc/mu/ssh_host_ed25519_key.pub)" \
+  hk="$(sudo mu-wsl2-distro host-key --json)"; echo "$hk" > "$WORK/out/host-key.json"
+  out="$(printf '%s\n' "$pw" | sudo -u ws -H "$WSH/bin/mu" compute add office-pc --host-key "$(printf '%s' "$hk" | jget public_key)" \
     --relay https://relay.martand.systems --relay-fingerprint "$fp" --relay-user avi-mac --relay-port 7001 --relay-password-stdin --json 2>&1)"
   echo "$out" > "$WORK/out/compute-add.json"
   [ "$(printf '%s' "$out" | jget ok)" = true ] || { row FAIL S3 "mu compute add" "$out"; return 1; }
   authorize
-  row PASS S3 "mu compute add (file store on Linux), key authorised on the node" "$(printf '%s' "$out" | jget key_fingerprint)"
+  row PASS S3 "mu compute add with mu-wsl2-distro host-key's key, then mu-wsl2-distro authorize" "$(printf '%s' "$out" | jget key_fingerprint)"
   newproj "$WCWD" v2026.11.6
   if ! wait_up 60; then
     { sudo ls -la "$WSH/compute/office-pc"; sudo cat /etc/mu/authorized_keys/mu; wssh -vv mu-office-pc hello protocol=1 < /dev/null; } \
@@ -126,8 +130,8 @@ setup() {
   row PASS S4 "first hello through the relay" "$(ws compute status office-pc --json | jget rtt_s) s"
 }
 PUB() { sudo cat "$WSH/compute/office-pc/id_ed25519.pub" | cut -d' ' -f1,2; }
-authorize() { printf 'restrict %s avi-mac\n' "$(PUB)" | sudo tee /etc/mu/authorized_keys/mu >/dev/null; }
-revoke() { sudo sh -c ': > /etc/mu/authorized_keys/mu'; }
+authorize() { sudo mu-wsl2-distro authorize avi-mac "$(sudo cat "$WSH/compute/office-pc/id_ed25519.pub")" > /dev/null; }   # the host script's own command
+revoke() { sudo mu-wsl2-distro revoke avi-mac > /dev/null; }
 
 # ================================================================================================== probe (§16)
 p_systemd() { M="$(cat /proc/1/comm)"; [ "$M" = systemd ]; }
@@ -609,8 +613,106 @@ faults() {
   must_fail R27 skip-limits-check true true r_limits_fault
 }
 
+# ================================================================================================== the host script (H rows)
+hstatus() { sudo mu-wsl2-distro status --no-wsl --offline --json 2>/dev/null | tail -n 1; }
+failed_checks() { python3 -c 'import json,sys
+d = json.loads(sys.stdin.read() or "{}")
+print(" ".join("%s(%s)" % (c["name"], c["detail"][:90]) for c in d.get("checks", []) if c["result"] == "fail") or "none")'; }
+h_status() {
+  local j; j="$(hstatus)"; echo "$j" > "$WORK/out/host-status-$RANDOM.json"
+  M="ok $(printf '%s' "$j" | jget ok); $(printf '%s' "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["checks"]), "checks")'); failed: $(printf '%s' "$j" | failed_checks)"
+  [ "$(printf '%s' "$j" | jget ok)" = true ]
+}
+h_idempotent() {
+  local c3 e3; c3="$(sed -n 's/^changed=//p' "$WORK/out/host/install-3.result")"; e3="$(sed -n 's/^exit=//p' "$WORK/out/host/install-3.result")"
+  M="run 1: $(sed -n 's/^changed=//p' "$WORK/out/host/install-1.result") changes, run 2: $(sed -n 's/^changed=//p' "$WORK/out/host/install-2.result"), run 3: $c3 (exit $e3); run 3 says: $(tail -n 3 "$WORK/out/host/install-3.log" | tr '\n' ' ')"
+  [ "$c3" = 0 ] && [ "$e3" = 0 ]
+}
+h_tunnel() {
+  local j; j="$(sudo mu-wsl2-distro tunnel status --json)"; M="$(printf '%s' "$j" | jget state): $(printf '%s' "$j" | jget line); user $(printf '%s' "$j" | jget relay_user) port $(printf '%s' "$j" | jget relay_port)"
+  [ "$(printf '%s' "$j" | jget ok)" = true ] && ! sudo grep -q "$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/compute.env")" "$WORK/out/host/tunnel-credential.log" "$WORK/logs/node-setup.log"
+}
+h_keys() {
+  local k hk a; k="$(sudo mu-wsl2-distro keys --json)"; hk="$(sudo mu-wsl2-distro host-key --json)"; a="$(cat "$WORK/out/compute-add.json")"
+  M="keys: $(printf '%s' "$k" | python3 -c 'import json,sys; print(" ".join(x["name"] + " " + x["fingerprint"] for x in json.load(sys.stdin)["keys"]))'); host key $(printf '%s' "$hk" | jget fingerprint), the workstation pinned $(printf '%s' "$a" | jget host_key_fingerprint)"
+  [ "$(printf '%s' "$k" | python3 -c 'import json,sys; print(" ".join(x["name"] + " " + x["fingerprint"] for x in json.load(sys.stdin)["keys"]))')" = "avi-mac $(printf '%s' "$a" | jget key_fingerprint)" ] \
+    && [ "$(printf '%s' "$hk" | jget fingerprint)" = "$(printf '%s' "$a" | jget host_key_fingerprint)" ] \
+    && sudo grep -qx "restrict $(PUB) avi-mac" /etc/mu/authorized_keys/mu
+}
+h_updates() {   # what unattended-upgrades itself says it would take, on the runner (a dry run)
+  local o; o="$(sudo unattended-upgrade --dry-run --debug 2>&1 | grep -m 1 -i 'allowed origins are' || true)"
+  M="${o:-unattended-upgrade printed no 'Allowed origins' line}"
+  [ -n "$o" ] && ! printf '%s' "$o" | grep -Eq -- '-updates|-backports|-proposed' && printf '%s' "$o" | grep -q -- '-security'
+}
+host_rows() {
+  run_row H1 "the host script's status: every check passes (--no-wsl --offline)" h_status
+  run_row H2 "install is idempotent: the third run changes nothing" h_idempotent
+  run_row H3 "tunnel status: connected; the relay password in no output of the set-up" h_tunnel
+  run_row H4 "keys, host-key: the workstation's key under its name, with restrict; the pinned host key is the node's" h_keys
+  run_row H5 "unattended-upgrades takes the security pocket only (its own dry run)" h_updates
+}
+# the faults that status must notice, each put in and taken out again
+hf_sshd_on() { sshd_edit 's/^PermitTTY no$/PermitTTY yes/'; }
+hf_sshd_off() { sshd_restore; }
+hf_gate_on() { sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.good"; echo '# changed' | sudo tee -a /usr/local/lib/mu/mu-node-gate > /dev/null; }
+hf_gate_off() { sudo cp "$WORK/gate.good" /usr/local/lib/mu/mu-node-gate; }
+hf_testfault_on() { echo nothing | sudo tee /etc/mu/test-fault > /dev/null; }
+hf_testfault_off() { sudo rm -f /etc/mu/test-fault; }
+hf_envmode_on() { sudo chmod 644 /etc/mu/tunnel.env; }
+hf_envmode_off() { sudo chmod 640 /etc/mu/tunnel.env; }
+hf_22_on() { sudo sh -c 'nohup python3 -m http.server 22 --bind 127.0.0.1 > /dev/null 2>&1 & echo $! > /tmp/mu-port22.pid'; sleep 1; }
+hf_22_off() { sudo sh -c 'kill "$(cat /tmp/mu-port22.pid)"; rm -f /tmp/mu-port22.pid'; sleep 1; }
+hf_tunnel_on() { sudo systemctl stop mu-tunnel.service; }
+hf_tunnel_off() { sudo systemctl start mu-tunnel.service; wait_up 90 > /dev/null; }
+host_faults() {
+  must_fail H1 "PermitTTY yes in /etc/mu/sshd_config" hf_sshd_on hf_sshd_off h_status
+  must_fail H1 "a line added to the gate" hf_gate_on hf_gate_off h_status
+  must_fail H1 "/etc/mu/test-fault present" hf_testfault_on hf_testfault_off h_status
+  must_fail H1 "tunnel.env readable by everyone (0644)" hf_envmode_on hf_envmode_off h_status
+  must_fail H1 "something listening on port 22" hf_22_on hf_22_off h_status
+  must_fail H1 "the tunnel stopped" hf_tunnel_on hf_tunnel_off h_status
+}
+# last: uninstall, then install again. The node's host key must survive, so the workstation's pin still holds
+h_uninstall() {
+  local fp0 fp1 left="" kept="" f u
+  fp0="$(sudo ssh-keygen -lf /etc/mu/ssh_host_ed25519_key.pub | awk '{ print $2 }')"
+  sudo mu-wsl2-distro uninstall > "$WORK/out/host/uninstall.log" 2>&1 || { M="uninstall failed: $(tail -n 5 "$WORK/out/host/uninstall.log" | tr '\n' ' ')"; return 1; }
+  for f in /etc/systemd/system/mu-sshd.service /etc/systemd/system/mu-tunnel.service /etc/mu/sshd_config /etc/mu/tunnel.env \
+           /etc/mu/authorized_keys/mu /usr/local/lib/mu/mu-node-gate /usr/local/lib/mu/mu-node-gate.in /usr/local/lib/mu/chisel \
+           /etc/apt/apt.conf.d/52mu-unattended-upgrades /home/mu/.config/systemd/user/mu-node.service; do
+    sudo test -e "$f" && left="$left $f"
+  done
+  id mu-tunnel > /dev/null 2>&1 && left="$left user:mu-tunnel"
+  ss -ltnH | awk '{ print $4 }' | grep -q ':2222$' && left="$left listener:2222"
+  for u in ssh.socket ssh.service; do [ "$(readlink "/etc/systemd/system/$u")" = /dev/null ] && left="$left masked:$u"; done
+  [ "$(asmu systemctl --user is-active mu-node.service 2>/dev/null)" = active ] && left="$left runner-active"
+  fp1="$(sudo ssh-keygen -lf /etc/mu/ssh_host_ed25519_key.pub 2>/dev/null | awk '{ print $2 }')"
+  sudo test -d /srv/mu/jobs && kept="$kept /srv/mu/jobs"
+  M="left behind:${left:- nothing}; host key $fp0 -> ${fp1:-gone}; kept:${kept:- (no job folders)}"
+  [ -z "$left" ] && [ -n "$fp1" ] && [ "$fp0" = "$fp1" ] && [ -n "$kept" ]
+}
+h_reinstall() {
+  local c rc=0
+  sudo mu-wsl2-distro install --no-wsl > "$WORK/out/host/reinstall-1.log" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || { M="install after uninstall: exit $rc"; return 1; }
+  sudo mu-wsl2-distro tunnel credential --wait 60 < "$S4W/env/compute.env" > "$WORK/out/host/reinstall-credential.log" 2>&1 || { M="tunnel credential: $(tail -n 2 "$WORK/out/host/reinstall-credential.log" | tr '\n' ' ')"; return 1; }
+  authorize
+  close_master
+  if ! wait_up 90; then M="the workstation (its pin unchanged since S3) does not reach the reinstalled node: $(ws compute status office-pc --json 2>&1 | tail -n 1)"; return 1; fi
+  sudo mu-wsl2-distro install --no-wsl > "$WORK/out/host/reinstall-2.log" 2>&1 || rc=$?
+  c="$(sudo sed -n 's/^changed=//p' /run/mu-wsl2/install-result)"
+  M="reinstalled; hello through the relay with the workstation's old pin: $(ws compute status office-pc --json | jget ok); install once more: $c changes (exit $rc)"
+  [ "$c" = 0 ] && [ "$rc" = 0 ]
+}
+host_cycle() {
+  run_row H6 "uninstall removes the job layer's units, files, user and masks; keeps the host key and the job folders" h_uninstall
+  run_row H7 "install again, credential, authorize: the workstation's old pin still holds; then install changes nothing" h_reinstall
+}
+
 collect() {
   sudo journalctl -u mu-sshd -u mu-tunnel --no-pager > "$WORK/logs/system-units.log" 2>&1 || true
+  sudo mu-wsl2-distro status --no-wsl --offline > "$WORK/logs/host-status.txt" 2>&1 || true
+  sudo systemd-analyze security mu-tunnel.service --no-pager > "$WORK/logs/mu-tunnel-security.txt" 2>&1 || true
   sudo journalctl _UID="$MU_UID" --no-pager > "$WORK/logs/mu-user.log" 2>&1 || true
   sudo cp /srv/mu/audit.log "$WORK/logs/audit.log" 2>/dev/null || true
   asmu systemctl --user show-environment 2>&1 | sed 's/=.*//' > "$WORK/logs/mu-manager-env-names.txt" || true
@@ -633,7 +735,7 @@ summary() {
 
 case "$MODE" in
   probe) setup && probe ;;
-  all) if setup; then probe; rows; [ "${NO_FAULTS:-0}" = 1 ] || faults; fi ;;
+  all) if setup; then probe; host_rows; rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; }; host_cycle; fi ;;
   *) echo "usage: e2e.sh probe|all" >&2; exit 2 ;;
 esac
 collect; summary

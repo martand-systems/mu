@@ -233,6 +233,12 @@ cp "$REPO/toolchain/apps.toml" "$ROOT/pins/toolchain/"
 out="$("$PY1" -I -S "$HERE/unit.py" pins "$ROOT/pins" 2>&1)"
 if printf '%s\n' "$out" | grep -q '^FAIL '; then ok "must-fail: with one sum changed in relay/Dockerfile, the pin check fails (as it must)"
 else bad "must-fail: a changed sum was not noticed" "$out"; fi
+cp "$REPO/relay/Dockerfile" "$ROOT/pins/relay/Dockerfile"
+sed 's/^CHISEL_GZ_SHA256="f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe6"/CHISEL_GZ_SHA256="f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcfe7"/' \
+  "$REPO/install/hosts/wsl2/mu-wsl2-distro.sh" > "$ROOT/pins/install/hosts/wsl2/mu-wsl2-distro.sh"
+out="$("$PY1" -I -S "$HERE/unit.py" pins "$ROOT/pins" 2>&1)"
+if printf '%s\n' "$out" | grep -q '^FAIL '; then ok "must-fail: with the sum changed in the distro script, the pin check fails (as it must)"
+else bad "must-fail: a changed sum in the distro script was not noticed" "$out"; fi
 
 # ---------------------------------------------------------------- mu compute add / list / remove
 section "mu compute add / list / remove (no network: a stub for /usr/bin/security)"

@@ -7,6 +7,9 @@
 #                           the Mac's OpenSSH; Linux also runs the other suites bin/mu and the installer have
 #   probe                   what §18 only read: systemd, cgroup v2, delegation, an oom-kill, mu-sshd with PAM
 #   e2e                     every row of §16 on real systemd through the relay, then each row with its fault
+# In probe and e2e the node is made by the host script itself (install/hosts/wsl2/mu-wsl2-distro.sh install --no-wsl,
+# run three times, the relay credential through `tunnel credential` on stdin); e2e then checks the script's status
+# (H rows, each status check shown to fail with its fault), and ends with its uninstall and a reinstall.
 name: job-layer
 on:
   push:
@@ -21,6 +24,7 @@ on:
       - "tools/test-jobs/**"
       - "tools/test-autoupdate/**"
       - "tools/test-wsl-disk/**"
+      - "tools/test-wsl2-host/**"
       - ".github/workflows/job-layer.yml"
   workflow_dispatch: {}
 permissions:

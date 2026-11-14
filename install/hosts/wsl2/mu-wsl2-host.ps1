@@ -25,7 +25,9 @@
     3. %UserProfile%\.wslconfig, merged (other keys are kept): [general] instanceIdleTimeout=-1 keeps the distro
        running with no client attached; [wsl2] memory, processors, swap, guiApplications=false.
     4. Inside the distro, as root: mu-wsl2-distro.sh (wsl.conf, the user without sudo, write-back timers, clean-stop
-       marker, linger, the GitHub deploy key, the clone).
+       marker, linger, the GitHub deploy key, the clone; the job layer's node: sshd on loopback, the gate, the relay
+       tunnel, security updates, interop off). It gets the drive letter of the distro's disk (--host-drive) and the
+       gate's source (mu-node-gate, next to this script).
     5. Windows power: never sleep or hibernate on AC power, Fast Startup off, automatic sign-in after updates off.
     6. The shutdown hook: the mu-wsl-shutdown service (LocalSystem), built here with the in-box C# compiler. On every
        orderly shutdown or restart it stops WSLService, which powers the distros off cleanly before Windows ends.
@@ -100,6 +102,8 @@ $script:ServiceName = 'mu-wsl-shutdown'
 $script:ServiceDisplayName = 'mu: stop WSL cleanly before shutdown'
 $script:DistroScriptName = 'mu-wsl2-distro.sh'
 $script:DistroScriptTarget = '/usr/local/sbin/mu-wsl2-distro'
+$script:GateName = 'mu-node-gate'
+$script:GateTarget = '/usr/local/lib/mu/mu-node-gate.in'
 $script:Changes = New-Object System.Collections.ArrayList
 $script:Checks = New-Object System.Collections.ArrayList
 $script:State = $null
@@ -427,6 +431,12 @@ static class MuWslShutdown
 # ============================================================================ pure helpers (tools/test-wsl2-host)
 
 # One argument quoted for a Windows command line (CommandLineToArgvW rules)
+# Get-HostDriveLetter PATH: the drive letter of a Windows path (C:\Mu\wsl\x, \\?\D:\x), upper case; '' for a UNC path
+function Get-HostDriveLetter([string]$Path) {
+  if ($Path -match '^(?:\\\\\?\\)?([A-Za-z]):') { return $Matches[1].ToUpperInvariant() }
+  return ''
+}
+
 function ConvertTo-WinArgument([string]$Arg) {
   if ($Arg.Length -gt 0 -and $Arg -notmatch '[\s"]') { return $Arg }
   $sb = New-Object System.Text.StringBuilder
@@ -1001,7 +1011,7 @@ function Get-DiskAclProblem([string]$Path, [string]$UserSid) {
 # a copy of both scripts in <MuRoot>\host, to run status and uninstall from later
 function Copy-HostScripts {
   $dst = Join-Path $MuRoot 'host'
-  foreach ($f in @($script:SelfPath, $script:DistroScriptPath)) {
+  foreach ($f in @($script:SelfPath, $script:DistroScriptPath, $script:GatePath)) {
     $target = Join-Path $dst (Split-Path $f -Leaf)
     if ((Test-Path $target) -and ((Get-FileHash $target).Hash -eq (Get-FileHash $f).Hash)) { continue }
     Copy-Item -Force -Path $f -Destination $target
@@ -1087,15 +1097,30 @@ function Set-WslConfig {
   return $changed
 }
 
-function Invoke-DistroSetup {
-  # copy the Linux script in through stdin (LF line endings), then run it as root
-  $t = $script:DistroScriptTarget
-  $bytes = $script:Utf8.GetBytes($script:DistroScriptText)
-  $copy = "umask 022; mkdir -p /usr/local/sbin && cat > $t.new && chmod 755 $t.new && if cmp -s $t.new $t; then rm -f $t.new; echo same; else mv -f $t.new $t; echo changed; fi"
+# Copy-IntoDistro TEXT TARGET MODE: writes TEXT (LF line endings) to TARGET in the distro as root, through stdin, only if
+# it differs
+function Copy-IntoDistro([string]$Text, [string]$Target, [string]$Mode) {
+  $bytes = $script:Utf8.GetBytes($Text)
+  $dir = $Target.Substring(0, $Target.LastIndexOf('/'))
+  $copy = "umask 022; mkdir -p $dir && cat > $Target.new && chmod $Mode $Target.new && if cmp -s $Target.new $Target; then rm -f $Target.new; echo same; else mv -f $Target.new $Target; echo changed; fi"
   $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', $copy) -InputBytes $bytes -Capture
-  if ($r.ExitCode -ne 0) { throw "could not copy the Linux script into $Distro (exit $($r.ExitCode)): $($r.Error) $($r.Output)" }
-  if ($r.Output.Trim() -eq 'changed') { Write-Changed "$t (in $Distro)" } else { Write-Same "$t (in $Distro)" }
+  if ($r.ExitCode -ne 0) { throw "could not copy $Target into $Distro (exit $($r.ExitCode)): $($r.Error) $($r.Output)" }
+  if ($r.Output.Trim() -eq 'changed') { Write-Changed "$Target (in $Distro)" } else { Write-Same "$Target (in $Distro)" }
+}
+
+function Invoke-DistroSetup {
+  # copy the Linux script and the gate's source in through stdin (LF line endings), then run the script as root
+  $t = $script:DistroScriptTarget
+  Copy-IntoDistro $script:DistroScriptText $t '755'
+  Copy-IntoDistro $script:GateText $script:GateTarget '644'
   $a = @('-d', $Distro, '-u', 'root', '--exec', $t, 'install', '--user', $User, '--repo', $Repo)
+  # the drive that holds the distro's disk: the distro records it for mu's disk check, which cannot ask Windows once
+  # interop is off (docs/design/job-layer.md 13.4)
+  $base = $Location
+  $reg = Get-WslDistro $Distro
+  if ($reg -and $reg.BasePath) { $base = $reg.BasePath }
+  $letter = Get-HostDriveLetter $base
+  if ($letter) { $a += @('--host-drive', $letter) } else { Write-Note "$base has no drive letter: mu's disk check will see only the distro's virtual disk" }
   if ($Branch) { $a += @('--branch', $Branch) }
   if (-not $NoClone) { $a += '--clone' }
   if ($InstallMu) { $a += '--install-mu' }
@@ -1228,6 +1253,9 @@ function Invoke-Install {
   $script:DistroScriptPath = Join-Path $PSScriptRoot $script:DistroScriptName
   if (-not (Test-Path $script:DistroScriptPath)) { throw "$($script:DistroScriptName) is missing next to this script ($PSScriptRoot): copy the whole install\hosts\wsl2 folder" }
   $script:DistroScriptText = [IO.File]::ReadAllText($script:DistroScriptPath) -replace "`r`n", "`n"
+  $script:GatePath = Join-Path $PSScriptRoot $script:GateName
+  if (-not (Test-Path $script:GatePath)) { throw "$($script:GateName) is missing next to this script ($PSScriptRoot): copy the whole install\hosts\wsl2 folder" }
+  $script:GateText = [IO.File]::ReadAllText($script:GatePath) -replace "`r`n", "`n"
   Write-Host "mu WSL2 host: install on $env:COMPUTERNAME for $($script:Me.Name)"
   Write-Host "  distro $Distro ($Location), user $User; WSL VM: $($script:Mem) GB of $($script:TotalGB) GB, $($script:Cpus) processors, $($script:Swap) GB swap"
   $console = (Get-CimInstance Win32_ComputerSystem).UserName
@@ -1551,7 +1579,7 @@ function Invoke-Uninstall {
   }
 
   Write-Step 'Folders'
-  foreach ($f in @('mu-wsl2-host.ps1', $script:DistroScriptName)) {
+  foreach ($f in @('mu-wsl2-host.ps1', $script:DistroScriptName, $script:GateName)) {
     $p = Join-Path (Join-Path $MuRoot 'host') $f
     if ((Test-Path $p) -and ($p -ne $script:SelfPath)) { Remove-Item -Force $p; Write-Changed "$p removed" }
   }
