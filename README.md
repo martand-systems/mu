@@ -9,17 +9,22 @@ in `mu.toml`.
 
 - **Roles:** `workstation` (Claude Code, projects, viewers), `compute` (solvers), `full` (both, works offline)
 - **Compute:** Linux. On Windows it runs in WSL2 through a host adapter (ADR-001). macOS has a native local build
-- **Remote compute:** through the relay at `relay.martand.systems`, deployed by Dokploy from `relay/`
-  ([`relay/README.md`](relay/README.md)). The relay is up. Jobs on a remote node are not possible yet: the job
-  layer is being built (see [Status](#status))
+- **Remote compute:** `mu submit` runs a job on a paired compute node through the relay at `relay.martand.systems`,
+  deployed by Dokploy from `relay/` ([`relay/README.md`](relay/README.md)). A node is paired with a Mac by one code
+  (`mu compute invite`). The office PC is paired and ran its first remote job on 2026-11-14
+  ([`docs/using-compute-jobs.md`](docs/using-compute-jobs.md))
 - **Builds:** on the device, from the locked recipe in `toolchain/`. No image registry
 - **Machines today:** an M1 MacBook (16 GB; `full`) and the office PC (Intel Core Ultra 7 265K, 20 cores, 31 GB,
-  NVIDIA RTX 5060, Windows 11 with WSL2; `compute`). Both run v2026.11.6 with auto-update on
+  NVIDIA RTX 5060, Windows 11 with WSL2; `compute`, 22 GB of RAM for jobs). Both run v2026.11.8 with auto-update on
 
 The plan and architecture are in [`docs/PLAN.md`](docs/PLAN.md). What was measured, spike by spike, is in
 [`docs/verification/`](docs/verification/).
 
 ## Install
+
+Step-by-step guides, with what each step prints and what to do when it doesn't: [`docs/install/`](docs/install/README.md)
+([Mac](docs/install/mac.md), [Windows 11 compute node](docs/install/windows-compute-node.md),
+[relay](docs/install/relay.md)). The short form:
 
 **macOS (Apple Silicon)**
 
@@ -34,7 +39,8 @@ libraries, flatpak, build tools for OpenVSP's Python API). It's the only step th
 asks for sudo when something is missing. Everything else installs per user in `~/.local/share/mu`.
 
 **Windows 11 compute node** (a WSL2 distro that runs with nobody signed in and is stopped cleanly before Windows
-shuts down): `install/hosts/wsl2/mu-wsl2-host.ps1` with `install`, `status`, `uninstall` and `test-stop`, see
+shuts down): `install/hosts/wsl2/mu-wsl2-host.ps1` with `install`, `status`, `uninstall`, `test-stop` and `pair`.
+Follow [`docs/install/windows-compute-node.md`](docs/install/windows-compute-node.md); the reference is
 [`install/hosts/wsl2/README.md`](install/hosts/wsl2/README.md). Add `-InstallMu` to install μ inside the distro too.
 
 That's it. The installer builds the full toolchain from the locked recipe, checks every tool (`mu doctor`) and runs the
@@ -70,10 +76,16 @@ checks that they are.
     mu autoupdate           automatic updates: status (on, off, run, set: see Updates)
     mu pin [V]              pin this project to a version (mu.toml) and relink it
     mu gc --yes             remove versions and layers nothing uses
+    mu compute status       the paired compute nodes: do they answer
+    mu submit -- CMD        run CMD on a compute node (then mu status, mu log, mu fetch, mu cancel)
     mu help                 everything
 
-A project pins its version in `mu.toml` (`[mu] version = "v2026.11.6"`). `mu` picks that version inside the project,
+A project pins its version in `mu.toml` (`[mu] version = "v2026.11.8"`). `mu` picks that version inside the project,
 so projects on different versions coexist.
+
+Long solver runs can go to a compute node: `mu submit --time 2h -- python sweep.py` sends a snapshot of the project
+(not its submodules or git-lfs content), runs it there under the project's pinned μ, and `mu fetch` brings back the
+declared outputs and a run record. See [`docs/using-compute-jobs.md`](docs/using-compute-jobs.md).
 
 ## Updates
 
@@ -138,8 +150,8 @@ macOS paths below. On Linux: `~/.local/share/mu/…` and `~/.cache/mu/`.
 
 ## Status
 
-As of 2026-11-14. The current release is **v2026.11.6**. (The tag `v2026.11.5` was pushed by mistake on the
-v2026.11.4 commit and is left in place; it is not a release.)
+As of 2026-11-14. The current release is **v2026.11.8** (pairing by one code). (The tag `v2026.11.5` was pushed by
+mistake on the v2026.11.4 commit and is left in place; it is not a release.)
 
 There are four spikes, S1 to S4, and no S5: they tested the plan's assumptions, and all four have run. What remains
 is building, in the phases P0 to P8 of [`docs/PLAN.md`](docs/PLAN.md) §13.
@@ -149,30 +161,35 @@ is building, in the phases P0 to P8 of [`docs/PLAN.md`](docs/PLAN.md) §13.
 | S1: reproducible macOS build | Done: fresh clean-environment builds pass doctor and benchmarks, and reproduce the legacy toolchain |
 | S2: linux-64 provisioning | Done: every tool runs headless on Ubuntu 24.04 (plain and WSL images) with the macOS results |
 | S3: WSL2 compute node | Done: the office PC's distro ran 2 h 01 min after a reboot with nobody signed in. The host scripts that add a clean stop before shutdown are installed there and `test-stop` passes. Still to do on the PC: the restart tests and the first Windows Update restart |
-| S4: relay | Passes; the PC end is the remaining check. Passed in CI behind replicas of Dokploy's Traefik, deployed on 2026-11-14, and passed against the real server with both ends on the laptop |
+| S4: relay | Passes, including the PC's end: the tunnel from the office PC's WSL2 distro through the office network carried the first remote jobs (2026-11-14). Still open on the real server: a redeploy and a Traefik restart with a session open, idle beyond 5 minutes, credential rotation |
 
 | Phase | State |
 |---|---|
 | P0 prerequisites, P1 macOS install, P3 Linux recipe | Done |
 | P2 Claude Code plugin and project format | Partly: `mu.toml` pins, `mu pin`, `mu link` and the `cad` skill exist. The rest of the plugin, `mu new`, `mu context` and `mu check` are not built |
-| P4 job layer | Stage 1 built and released in v2026.11.7: OpenSSH inside the relay tunnel (`mu compute …`, `mu submit / status / log / fetch / cancel`), proven in CI. Design: [`docs/design/job-layer.md`](docs/design/job-layer.md). Not yet run on the PC |
-| P5 Windows compute node | Mostly done ([`install/hosts/wsl2/`](install/hosts/wsl2/README.md)). The restart tests, and the job layer's pieces on the PC, are pending |
-| P6 relay | Deployed ([`relay/`](relay/README.md)). The tunnel clients and pairing come with P4 |
+| P4 job layer | Stage 1 released (v2026.11.7; pairing by one code in v2026.11.8) and **run on the office PC**: the first remote job (`fea-cantilever`) matched the Mac's result, and `oom`, `timeout` and `cancel` each worked there ([record](docs/verification/2026-11-14-first-remote-job.md)). Design: [`docs/design/job-layer.md`](docs/design/job-layer.md). Stage 2 (restart recovery proven on the PC, a fallback to local runs, submodule and LFS content) is not built |
+| P5 Windows compute node | Done on the office PC, which runs the job layer and is paired ([`install/hosts/wsl2/`](install/hosts/wsl2/README.md), [guide](docs/install/windows-compute-node.md)). Pending: the restart tests and the first Windows Update restart. A run of the scripts on a new PC from nothing has not happened |
+| P6 relay | Deployed ([`relay/`](relay/README.md)), with the pairing service on since 2026-11-14. The office PC is paired with the owner's Mac. Pairing a second Mac (stage P2 of `docs/design/pairing.md`) is not built |
 | P7 org profile and JATAYU migration | Partly: the `jatayu` repo runs on μ and reproduces its baseline on the laptop. Not yet on the office PC |
 | P8 hardening | Not started |
 
-**Next:** set up the job layer's node side on the office PC in one visit, following
-[`docs/design/first-job-checklist.md`](docs/design/first-job-checklist.md) (the pending restart tests can follow),
-then run the first remote job, `fea-cantilever` on `office-pc`. The list is in `docs/PLAN.md` §13.
+**Next:** a release that fixes the known issues below; the pending restart tests on the office PC
+([`docs/design/first-job-checklist.md`](docs/design/first-job-checklist.md) §5); then the job layer's second stage and
+the JATAYU frame model on the office PC (P7). The list is in `docs/PLAN.md` §13.
 
 ## Known issues
 
 Queued for the next release:
 
+- **`wsl -d mu-compute -u mu --cd ~ -- mu …` fails with `mu: command not found`.** That line starts a shell that
+  does not read `~/.profile`, so `~/.local/bin` is not on its PATH. `mu compute invite` prints the two PC lines in
+  that form, and so do some of μ's hints. Until it is fixed, write the full path, `/home/mu/.local/bin/mu`. The pair
+  line that worked on 2026-11-14:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu node host-script) pair`.
 - **The installer asks for sudo even when the user is not a sudoer.** This happens on Linux when a release needs an
   Ubuntu package that is not installed yet. v2026.11.6 added `ostree`, and on the office PC it had to be installed as
   root by hand. Until it is fixed: run `sudo ./install.sh --system` from an admin account first (on the WSL node,
-  as root: `wsl -d mu-compute -u root`).
+  as root: `wsl -d mu-compute -u root`; the steps are in the Windows guide, §11.2).
 - **`mu gc` prints a note about macOS Time Machine on Linux.** The note is harmless there.
 - **The install-time `mu autoupdate on` failed once on the office PC, and systemctl's error was not shown.** Running
   `mu autoupdate on` by hand afterwards worked. If an install ends with "auto-update could not be turned on", run it
