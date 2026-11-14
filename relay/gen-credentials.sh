@@ -13,10 +13,14 @@
 #   fingerprint                         the server key's fingerprint
 #   show                                fingerprint and clients, without passwords
 #   client NAME                         NAME's settings, including its password
-#   env                                 the two lines for Dokploy's Environment tab (secret)
+#   env                                 the lines for Dokploy's Environment tab (secret)
+#   admin-token [--rotate]              the pairing service's admin token (docs/design/pairing.md); --rotate replaces it
+#   revoke NAME / unrevoke NAME         RELAY_REVOKED: NAME may never connect, whatever the relay's volume holds
+#   login-bundle NAME                   NAME's settings plus the admin token, for `mu relay login --stdin` (to a pipe only)
 #
 # FILE (default $MU_RELAY_ENV, else ~/.config/mu/relay.env; mode 600) is the only state. It holds exactly what the
-# relay container reads: RELAY_KEY and RELAY_CLIENTS. It must never be inside a git checkout that gets pushed.
+# relay container reads: RELAY_KEY and RELAY_CLIENTS, and RELAY_ADMIN_TOKEN and RELAY_REVOKED once set. It must never be
+# inside a git checkout that gets pushed.
 # After any change: paste `env` into Dokploy (Environment tab, Save) and press Deploy. The relay restarts,
 # connected clients reconnect by themselves, and the fingerprint only changes with rotate-key.
 set -euo pipefail
@@ -30,7 +34,7 @@ URL="${MU_RELAY_URL:-https://relay.martand.systems}"
 PORT_MIN=7001; PORT_MAX=7999
 
 die() { echo "gen-credentials: $*" >&2; exit 1; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,19 +49,28 @@ done
 cmd="$1"; shift
 command -v openssl >/dev/null || die "openssl is needed"
 
-KEY=""; CLIENTS=""
+KEY=""; CLIENTS=""; ADMIN=""; REVOKED=""
 load() {
   [ -f "$ENV_FILE" ] || die "$ENV_FILE does not exist; run: $0 --env '$ENV_FILE' init"
   KEY="$(sed -n 's/^RELAY_KEY=//p' "$ENV_FILE" | tail -n 1)"
   CLIENTS="$(sed -n 's/^RELAY_CLIENTS=//p' "$ENV_FILE" | tail -n 1)"
+  ADMIN="$(sed -n 's/^RELAY_ADMIN_TOKEN=//p' "$ENV_FILE" | tail -n 1)"
+  REVOKED="$(sed -n 's/^RELAY_REVOKED=//p' "$ENV_FILE" | tail -n 1)"
   case "$KEY" in ck-?*) ;; *) die "$ENV_FILE has no RELAY_KEY" ;; esac
 }
 save() {
   mkdir -p "$(dirname "$ENV_FILE")"
   local tmp="$ENV_FILE.tmp.$$"
-  printf 'RELAY_KEY=%s\nRELAY_CLIENTS=%s\n' "$KEY" "$CLIENTS" > "$tmp"
+  {
+    printf 'RELAY_KEY=%s\nRELAY_CLIENTS=%s\n' "$KEY" "$CLIENTS"
+    [ -z "$ADMIN" ] || printf 'RELAY_ADMIN_TOKEN=%s\n' "$ADMIN"
+    [ -z "$REVOKED" ] || printf 'RELAY_REVOKED=%s\n' "$REVOKED"
+  } > "$tmp"
   chmod 600 "$tmp"; mv "$tmp" "$ENV_FILE"
 }
+# The pairing service's admin token: mra_ + 32 random bytes in unpadded base64url (43 characters).
+new_admin_token() { printf 'mra_%s' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"; }
+in_list() { case ",$2," in *",$1,"*) return 0 ;; esac; return 1; }
 
 # A chisel key is "ck-" + unpadded base64 of the P-256 private key (SEC 1 DER).
 new_key() {
@@ -163,9 +176,46 @@ case "$cmd" in
     load
     echo "url          $URL"
     echo "fingerprint  $(fingerprint "$KEY")"
+    echo "pairing      $([ -n "$ADMIN" ] && echo "on (admin token set)" || echo off)"
+    echo "revoked      ${REVOKED:-none}"
     ( IFS=','; for e in $CLIENTS; do
         printf '%-12s %-20s ports %s\n' "$(printf '%s' "$e" | cut -d: -f1)" "$(printf '%s' "$e" | cut -d: -f2)" "$(printf '%s' "$e" | cut -d: -f4)"
       done ) ;;
-  env) load; printf 'RELAY_KEY=%s\nRELAY_CLIENTS=%s\n' "$KEY" "$CLIENTS" ;;
+  env)
+    load; printf 'RELAY_KEY=%s\nRELAY_CLIENTS=%s\n' "$KEY" "$CLIENTS"
+    [ -z "$ADMIN" ] || printf 'RELAY_ADMIN_TOKEN=%s\n' "$ADMIN"
+    [ -z "$REVOKED" ] || printf 'RELAY_REVOKED=%s\n' "$REVOKED" ;;
+  admin-token)
+    load
+    case "${1:-}" in
+      '') [ -z "$ADMIN" ] || die "$ENV_FILE already has an admin token (admin-token --rotate replaces it)" ;;
+      --rotate) [ -n "$ADMIN" ] || die "$ENV_FILE has no admin token to rotate (admin-token makes one)" ;;
+      *) usage 2 ;;
+    esac
+    ADMIN="$(new_admin_token)"
+    case "$ADMIN" in mra_???????????????????????????????????????????) ;; *) die "could not make an admin token" ;; esac
+    save
+    echo "The admin token is in $ENV_FILE (never printed here). After the deploy: $0 login-bundle <this Mac's client> | mu relay login --stdin" >&2
+    changed ;;
+  revoke|unrevoke)
+    [ $# -eq 1 ] || usage 2
+    load; check_name "$1"
+    if [ "$cmd" = revoke ]; then
+      in_list "$1" "$REVOKED" && die "'$1' is already in RELAY_REVOKED"
+      REVOKED="${REVOKED:+$REVOKED,}$1"
+      echo "'$1' can no longer connect once this is deployed, whatever the relay's volume holds." >&2
+    else
+      in_list "$1" "$REVOKED" || die "'$1' is not in RELAY_REVOKED"
+      REVOKED="$(printf '%s' ",$REVOKED," | sed "s/,$1,/,/; s/^,//; s/,\$//")"
+    fi
+    save; changed ;;
+  login-bundle)
+    [ $# -eq 1 ] || usage 2
+    load; e="$(entry_of "$1")"; [ -n "$e" ] || die "no client '$1'"
+    [ -n "$ADMIN" ] || die "no admin token yet: $0 admin-token, then env and the Dokploy edit"
+    case "$e" in workstation:*) ;; *) die "'$1' is not a workstation client" ;; esac
+    [ ! -t 1 ] || die "login-bundle writes secrets: pipe it into 'mu relay login --stdin', never to a terminal"
+    print_client "$e" 2>/dev/null
+    printf 'RELAY_ADMIN_TOKEN=%s\n' "$ADMIN" ;;
   *) usage 2 ;;
 esac
