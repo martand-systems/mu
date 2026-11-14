@@ -46,7 +46,7 @@ relay with its admin token can pair a node ([relay.md](relay.md)).
 | 6 Deploy key | 2 min | a GitHub admin |
 | 7 Install μ | **about 1.5 h** (96 min on the office PC with empty caches, 19 min of it CPU: it waits for downloads) | none |
 | 8 Hand-over and check | 5 min | yes |
-| 9 Pairing | 15–25 min with the owner's Mac (most of it the first time `pair` installs the job layer) | yes |
+| 9 Pairing | a few minutes with the owner's Mac (the checklist's 15–25 min was for the office PC, where `pair` also installed the job layer and restarted the distro; here steps 5–7 have done that) | yes |
 | 10 First job | 5 min | no |
 
 **Where to type.** The owner hit both mistakes: Linux commands typed into PowerShell, and Windows commands typed into
