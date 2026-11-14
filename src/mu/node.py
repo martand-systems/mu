@@ -43,8 +43,6 @@ MU_WSL_HOST_DRIVE (the host-drive record), MU_NODE_FAULT or the root-owned /etc/
   delete-damaged       recovery deletes a job folder whose job.json is unreadable (instead of moving it aside)
 The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sched.py):
   stamp-before-checkout   a job's grant and start time are written before its checkout (no re-check after it)
-  grant-after-systemd-run the grant is written after systemd-run (the allocation misses a starting job)
-  die-after-grant         the runner exits once right after writing a grant, before systemd-run (Q16's crash)
   grant-in-memory-only    the allocation counts only jobs this runner process started (adopted grants forgotten)
   free-on-cancel-request  a running job's grant is freed when its cancel is asked, not when its unit has ended
   mem-max-is-capacity     a job's MemoryMax is the node's job memory, not its grant
@@ -1576,22 +1574,11 @@ def start_job(j, grant, S=None):
         stamp()
     os.makedirs(os.path.join(d, "tmp"), mode=0o700, exist_ok=True)   # removed with the result and before a re-run
     st["start_unconfirmed"] = True   # until systemd-run says it started the unit
-    if fault("grant-after-systemd-run"):
-        st0 = dict(st)
-        st0.pop("grant", None)
-        st0["state"] = "queued"
-        durable.write_record(os.path.join(d, "state.json"), st0)
-    else:
-        durable.write_record(os.path.join(d, "state.json"), st)
+    durable.write_record(os.path.join(d, "state.json"), st)
     STARTED_HERE.add(j["id"])
     event(d, "start attempt %d as %s: granted cores=%d cpus=%s mem=%s time=%s class=%s" % (
         attempt, unit, g["cores"], sched.fmt_cpus(g["cpus"]), sched.human_gb(g["mem_bytes"]),
         sched.human_dur(g["time_s"]), g.get("class")))
-    if fault("die-after-grant") and not os.path.exists(p("state", "died-after-grant")):
-        os.makedirs(p("state"), exist_ok=True)
-        durable.write_durable(p("state", "died-after-grant"), "%s\n" % j["id"])
-        journal("runner: test fault die-after-grant: exiting after the grant of %s" % j["id"])
-        os._exit(9)
     systemctl("reset-failed", unit, timeout=15)
     home = mu_home()
     props = ["-p", "Type=exec"]
@@ -1623,8 +1610,6 @@ def start_job(j, grant, S=None):
         journal("job %s started (attempt %d, %s)" % (j["id"], attempt, g.get("class")))
         return True
     journal("job %s: systemd-run failed: %s" % (j["id"], err.strip()[:300]))
-    if fault("grant-after-systemd-run"):
-        durable.write_record(os.path.join(d, "state.json"), st)
     if fault("trust-run-rc"):
         write_result(j, "failed", "runner", note="systemd-run failed: %s" % err.strip()[:400])
         return True
