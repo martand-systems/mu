@@ -2,8 +2,9 @@
 #   tools/test-jobs/e2e.sh sched        set-up, then every row, then every row with its fault (must fail)
 # on the same CI node: real systemd and cgroup v2, the relay replica, the workstation ws (key avi-mac, the node's
 # owner: /etc/mu/owners from the pairing) and a second workstation ws2 (key ci-other), two projects of ws and one of
-# ws2. node.json sched {cores: 4, mem_bytes: 2 GiB, check: true}: C = 4, M = 2 GiB, and the runner checks the
-# invariants after every pass (a violation goes to /srv/mu/state/invariant-violation; every row fails on one).
+# ws2. node.json sched {cores: NC, mem_bytes: 2 GiB, check: true}: C = NC (the runner's CPUs, at most 4: a private
+# repository's runner has 2), M = 2 GiB, and the runner checks the invariants after every pass (a violation goes to
+# /srv/mu/state/invariant-violation; every row fails on one). HC = NC / 2: "half the node".
 # Rows: Q01-Q14, Q18-Q20 (concurrency), Q22-Q28 (queue control), V1-V3 (a release installed and switched while jobs
 # run, gc only when idle, mu compute update). Not here (unit level only: tools/test-jobs/unit_sched.py): Q15-Q17, Q21.
 
@@ -12,6 +13,7 @@ SRC=/home/mu/.local/share/mu/toolchains/v2026.11.7/recipe/src
 W2H=/home/ws2/.local/share/mu
 P2=/home/ws/proj2; P3=/home/ws2/proj3
 G1=1073741824
+NC="$(nproc)"; [ "$NC" -le 4 ] || NC=4; HC=$((NC / 2))
 ws2() {   # the second workstation (key ci-other), in $W2CWD
   sudo -u ws2 -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_POLL_S=1 MU_JOBS_FAULT="$WSF" sh -c 'cd "$0" && exec "$@"' \
     "${W2CWD:-$P3}" "$W2H/bin/mu" "$@"
@@ -44,14 +46,15 @@ qend() {   # qend RC: the row's result, failed by any invariant violation of the
   [ -z "$v" ] || { M="$M · INVARIANT VIOLATED: $v"; rc=1; }
   return "$rc"
 }
-blocker() { submit --cores 4 --mem 256M --time 2m -- sleep "$1"; }   # holds all four cores
+blocker() { submit --cores "$NC" --mem 256M --time 2m -- sleep "$1"; }   # holds every core
 qorder_q() { ws queue --json 2>/dev/null | jq_ 'import json,sys
 d = json.loads(sys.stdin.read().strip().splitlines()[-1])
 print(" ".join(j["job_id"][-6:] for j in d.get("jobs", []) if j.get("state") in ("queued", "held")))'; }
 
 sched_setup() {
-  echo "== scheduler set-up: C = 4, M = 2 GiB, invariant checks; ws2 (ci-other); projects"
-  node_py 'node.update_node_info(sched={"cores": 4, "mem_bytes": 2 << 30, "check": True}, min_free_gb=1)'
+  echo "== scheduler set-up: C = $NC, M = 2 GiB, invariant checks; ws2 (ci-other); projects"
+  [ "$NC" -ge 2 ] || { row FAIL QS "scheduler set-up" "this runner has $NC CPU: concurrency needs 2"; return 1; }
+  node_py 'node.update_node_info(sched={"cores": '"$NC"', "mem_bytes": 2 << 30, "check": True}, min_free_gb=1)'
   asmu systemctl --user restart mu-node.service; sleep 2
   id ws2 >/dev/null 2>&1 || sudo useradd -m -s /bin/bash ws2
   sudo rm -rf /home/ws2/.local; sudo mkdir -p /home/ws2/.local/share
@@ -59,6 +62,8 @@ sched_setup() {
   sudo rm -rf "$W2H/compute/office-pc/id_ed25519" "$W2H/compute/office-pc/id_ed25519.pub" "$W2H/run" "$W2H/logs"
   sudo chown -R ws2:ws2 /home/ws2/.local
   sudo -u ws2 -H ssh-keygen -q -t ed25519 -N '' -C ci-other -f "$W2H/compute/office-pc/id_ed25519"
+  # explicit modes: the runner's default ACLs can leave a new key 0644, which ssh will not use (as in mu compute add)
+  sudo chmod 600 "$W2H/compute/office-pc/id_ed25519"; sudo chmod 644 "$W2H/compute/office-pc/id_ed25519.pub"
   sudo -u ws2 -H python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import jobs
 open(sys.argv[2], "w").write(jobs.ssh_config_text("office-pc", sys.argv[3]))' "$W2H/toolchains/v2026.11.7/recipe/src" \
     "$W2H/compute/office-pc/ssh_config" "$W2H"
@@ -84,20 +89,21 @@ t.join()
 PYM
   chmod 644 /tmp/mu-e2e-mask.py; asws cp /tmp/mu-e2e-mask.py "$WCWD/mask.py"
   sudo -u mu sh -c ": > $QLOG"
-  local h; h="$(ws compute status office-pc --json 2>&1)"
-  if [ "$(printf '%s' "$h" | jget hello.capacity.cores)" = 4 ] && [ "$(W2CWD=$P3 ws2 compute status office-pc --json 2>&1 | jget ok)" = true ]; then
-    row PASS QS "scheduler set-up: C 4, M 2 GiB; a second workstation key (ci-other) reaches the node" \
+  local h h2; h="$(ws compute status office-pc --json 2>&1)"; h2="$(W2CWD=$P3 ws2 compute status office-pc --json 2>&1)"
+  printf '%s\n%s\n' "$h" "$h2" > "$WORK/logs/sched-setup-hello.json"
+  if [ "$(printf '%s' "$h" | jget hello.capacity.cores)" = "$NC" ] && [ "$(printf '%s' "$h2" | jget hello.key)" = ci-other ]; then
+    row PASS QS "scheduler set-up: C $NC, M 2 GiB; a second workstation key (ci-other) reaches the node" \
       "capacity $(printf '%s' "$h" | jget hello.capacity); features $(printf '%s' "$h" | jget hello.features); owners $(printf '%s' "$h" | jget hello.owners)"
   else
-    row FAIL QS "scheduler set-up" "$h · ws2: $(W2CWD=$P3 ws2 compute status office-pc --json 2>&1 | tail -1)"; return 1
+    row FAIL QS "scheduler set-up" "capacity $(printf '%s' "$h" | jget hello.capacity) (want $NC cores); ws2's key: $(printf '%s' "$h2" | jget hello.key) $(printf '%s' "$h2" | jget message)"; return 1
   fi
 }
 
 # ---------------------------------------------------------------------------------------------- concurrency (§13)
 q01() {
   qpre; local a b sa ea sb eb
-  a="$(submit --cores 2 --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
-  b="$(submit --cores 2 --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
+  a="$(submit --cores "$HC" --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
+  b="$(submit --cores "$HC" --mem 512M --time 2m -- sh -c "$(qcmd 6)")"
   wait_state "$a" "succeeded failed" 90; wait_state "$b" "succeeded failed" 90
   sa="$(qt start "$a")"; ea="$(qt end "$a")"; sb="$(qt start "$b")"; eb="$(qt end "$b")"
   M="a $(jobstate "$a") $sa..$ea; b $(jobstate "$b") $sb..$eb; grants $(jobstate "$a" grant.cpus) / $(jobstate "$b" grant.cpus)"
@@ -105,32 +111,31 @@ q01() {
   qend $?
 }
 q02() {
-  qpre; local a b c w
-  a="$(submit --cores 1 --mem 1G --time 2m -- sleep 15)"; b="$(submit --cores 1 --mem 1G --time 2m -- sleep 15)"
-  c="$(submit --cores 1 --mem 1G --time 2m -- sleep 1)"
-  wait_state "$a" running 60; wait_state "$b" running 60; sleep 3
-  w="$(ws status "$c" --json | jget waiting_for.resources.mem_bytes)"
-  M="$(jobstate "$a") $(jobstate "$b"); the third: $(jobstate "$c"), waiting_for.resources.mem_bytes $w"
-  [ "$(jobstate "$a")" = running ] && [ "$(jobstate "$b")" = running ] && [ "$(jobstate "$c")" = queued ] && [ "$w" = "$G1" ]
+  qpre; local a b w f
+  a="$(submit --cores 1 --mem 1536M --time 2m -- sleep 15)"; wait_state "$a" running 60
+  b="$(submit --cores 1 --mem 1536M --time 2m -- sleep 1)"; sleep 3
+  w="$(ws status "$b" --json | jget waiting_for.resources.mem_bytes)"; f="$(ws status "$b" --json | jget waiting_for.resources.free_cores)"
+  M="a 1.5 GB job runs; a second one with M = 2 GiB: $(jobstate "$b"), waiting_for.resources.mem_bytes $w with $f core(s) free"
+  [ "$(jobstate "$a")" = running ] && [ "$(jobstate "$b")" = queued ] && [ "$w" = 1610612736 ] && [ "${f:-0}" -ge 1 ]
   qend $?
 }
 q03() {
   qpre; local a b c w s
-  a="$(submit --cores 2 --mem 256M --time 2m -- sh -c "$(qcmd 8)")"; b="$(submit --cores 2 --mem 256M --time 2m -- sh -c "$(qcmd 8)")"
-  c="$(submit --cores 2 --mem 256M --time 2m -- sh -c "$(qcmd 1)")"
+  a="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 8)")"; b="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 8)")"
+  c="$(submit --cores "$HC" --mem 256M --time 2m -- sh -c "$(qcmd 1)")"
   wait_state "$a" running 60; wait_state "$b" running 60; sleep 2
   w="$(ws status "$c" --json | jget waiting_for.resources.cores)"; s="$(jobstate "$c")"
   wait_state "$c" "succeeded failed" 90
   M="the third while two run: $s, waiting for $w cores; then $(jobstate "$c"), started $(qt start "$c") after a ended $(qt end "$a")"
-  [ "$s" = queued ] && [ "$w" = 2 ] && [ "$(jobstate "$c")" = succeeded ] && ! lt "$(qt start "$c")" "$(qt end "$a")"
+  [ "$s" = queued ] && [ "$w" = "$HC" ] && [ "$(jobstate "$c")" = succeeded ] && ! lt "$(qt start "$c")" "$(qt end "$a")"
   qend $?
 }
 q04() {
   qpre; local a h b c bc cr hs
-  a="$(submit --cores 2 --mem 256M --time 3m -- sleep 60)"; wait_state "$a" running 60
-  h="$(submit --cores 4 --mem 256M --time 2m -- sleep 1)"
-  b="$(submit --cores 2 --mem 256M --time 10s -- sleep 2)"
-  c="$(submit --cores 2 --mem 256M --time 1h -- sleep 2)"
+  a="$(submit --cores "$HC" --mem 256M --time 3m -- sleep 60)"; wait_state "$a" running 60
+  h="$(submit --cores "$NC" --mem 256M --time 2m -- sleep 1)"
+  b="$(submit --cores "$HC" --mem 256M --time 10s -- sleep 2)"
+  c="$(submit --cores "$HC" --mem 256M --time 1h -- sleep 2)"
   sleep 5
   bc="$(jobstate "$b" grant.class)"; cr="$(ws status "$c" --json | jget waiting_for.reservation.head)"
   hs="$(jobstate "$h" starts_by)"
@@ -140,10 +145,10 @@ q04() {
 }
 q05() {
   qpre; local a h sb i n=0 hst
-  a="$(submit --cores 2 --mem 256M --time 40s -- sleep 25)"; wait_state "$a" running 60
-  h="$(submit --cores 4 --mem 256M --time 1m -- sleep 1)"; sleep 2
+  a="$(submit --cores "$HC" --mem 256M --time 40s -- sleep 25)"; wait_state "$a" running 60
+  h="$(submit --cores "$NC" --mem 256M --time 1m -- sleep 1)"; sleep 2
   sb="$(jobstate "$h" starts_by)"
-  for i in $(seq 1 18); do submit --cores 2 --mem 256M --time 20s -- sleep 15 >/dev/null; n=$((n + 1)); sleep 1; done
+  for i in $(seq 1 18); do submit --cores "$HC" --mem 256M --time 20s -- sleep 15 >/dev/null; n=$((n + 1)); sleep 1; done
   wait_state "$h" "succeeded failed" 150
   hst="$(jobstate "$h" started_at)"
   M="head's first starts_by $sb; it started $hst ($(jobstate "$h")); $n short jobs submitted meanwhile"
@@ -154,7 +159,7 @@ print(int(f(sys.argv[1]) <= f(sys.argv[2]) + 1))' "$hst" "$sb")" = 1 ]
 }
 q06() {
   qpre; local w e q1 q2 q3 t0 dt ca es q3s
-  w="$(submit -- sh -c 'for i in 1 2 3 4; do (while :; do :; done) & done; sleep 60; kill $(jobs -p) 2>/dev/null; exit 0')"
+  w="$(submit -- sleep 90)"   # whole node; idle CPUs, so a quick job without its quota would take more than one
   wait_state "$w" running 60; sleep 2
   e="$(submit --cores 1 --mem 256M --time 1m -- true)"
   t0="$(date +%s)"
@@ -173,8 +178,8 @@ q06() {
 }
 q07() {
   qpre; local a b ma mb ga gb wa wb
-  a="$(submit --cores 2 --mem 256M --time 1m -- python3 mask.py)"
-  b="$(submit --cores 2 --mem 256M --time 1m -- python3 mask.py widen)"
+  a="$(submit --cores "$HC" --mem 256M --time 1m -- python3 mask.py)"
+  b="$(submit --cores "$HC" --mem 256M --time 1m -- python3 mask.py widen)"
   wait_state "$a" "succeeded failed" 90; wait_state "$b" "succeeded failed" 90
   ma="$(sudo cat "/srv/mu/jobs/$a/work/masks.txt" 2>/dev/null)"; mb="$(sudo cat "/srv/mu/jobs/$b/work/masks.txt" 2>/dev/null)"
   ga="$(jobstate "$a" grant.cpus)"; gb="$(jobstate "$b" grant.cpus)"
@@ -186,12 +191,12 @@ q07() {
 }
 q08() {
   qpre; local a e c
-  a="$(submit --cores 3 --mem 256M --time 1m -- sh -c 'env > env.txt')"; wait_state "$a" "succeeded failed" 60
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c 'env > env.txt')"; wait_state "$a" "succeeded failed" 60
   e="$(sudo cat "/srv/mu/jobs/$a/work/env.txt" 2>/dev/null)"; c="$(jobstate "$a" grant.cpus)"
   g() { printf '%s\n' "$e" | sed -n "s/^$1=//p"; }
   M="OMP $(g OMP_NUM_THREADS) OPENBLAS $(g OPENBLAS_NUM_THREADS) PYTHON_CPU_COUNT $(g PYTHON_CPU_COUNT) CCX $(g CCX_NPROC_EQUATION_SOLVER) MU_JOB_CPUS $(g MU_JOB_CPUS) (grant $c) TMPDIR $(g TMPDIR)"
-  [ "$(g OMP_NUM_THREADS)" = 3 ] && [ "$(g OPENBLAS_NUM_THREADS)" = 3 ] && [ "$(g PYTHON_CPU_COUNT)" = 3 ] && \
-    [ "$(g CCX_NPROC_EQUATION_SOLVER)" = 3 ] && [ "$(g MU_JOB_CPUS)" = "$c" ] && [ "$(g TMPDIR)" = "/srv/mu/jobs/$a/tmp" ]
+  [ "$(g OMP_NUM_THREADS)" = "$NC" ] && [ "$(g OPENBLAS_NUM_THREADS)" = "$NC" ] && [ "$(g PYTHON_CPU_COUNT)" = "$NC" ] && \
+    [ "$(g CCX_NPROC_EQUATION_SOLVER)" = "$NC" ] && [ "$(g MU_JOB_CPUS)" = "$c" ] && [ "$(g TMPDIR)" = "/srv/mu/jobs/$a/tmp" ]
   qend $?
 }
 q09() {
@@ -204,35 +209,33 @@ q09() {
   qend $?
 }
 q10() {
-  qpre; local a b c d x n ok=1 first
-  a="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 20)")"; b="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 20)")"
-  c="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 20)")"
-  for x in $a $b $c; do wait_state "$x" running 60; done; sleep 2
-  d="$(submit --cores 2 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 2
+  qpre; local x d n ok=1 first i ids=""
+  for i in $(seq 1 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 20)")"; done
+  for x in $ids; do wait_state "$x" running 60; done; sleep 2
+  d="$(submit --cores 1 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 2
   asmu systemctl --user kill -s KILL mu-node.service; sleep 4
-  for x in $a $b $c $d; do wait_state "$x" "succeeded failed interrupted" 120; done
-  M=""; for x in $a $b $c; do n="$(nodelog "$x" | grep -c '^== μ job')"
+  for x in $ids $d; do wait_state "$x" "succeeded failed interrupted" 120; done
+  M=""; for x in $ids; do n="$(nodelog "$x" | grep -c '^== μ job')"
     M="$M ${x: -6} $(jobstate "$x") attempt $(jobstate "$x" attempt) started $n;"
     { [ "$(jobstate "$x")" = succeeded ] && [ "$(jobstate "$x" attempt)" = 1 ] && [ "$n" = 1 ]; } || ok=0; done
-  first="$(for x in $a $b $c; do qt end "$x"; done | sort -n | head -1)"
-  M="$M the 2-core job started $(qt start "$d"), the first of the three ended $first"
+  first="$(for x in $ids; do qt end "$x"; done | sort -n | head -1)"
+  M="$M a 1-core job queued on the full node started $(qt start "$d"), the first running one ended $first"
   [ "$ok" = 1 ] && [ "$(jobstate "$d")" = succeeded ] && ! lt "$(qt start "$d")" "$first"
   qend $?
 }
 q11() {
-  qpre; local a b c d gp alive ce
-  a="$(submit --cores 1 --mem 256M --time 2m -- sleep 25)"
+  qpre; local a b d gp alive i ids=""
   b="$(submit --cores 1 --mem 256M --time 2m -- sh -c 'trap "" TERM; sleep 600 & echo $! > gc.pid; while :; do sleep 1; done')"
-  c="$(submit --cores 1 --mem 256M --time 2m -- sleep 25)"
-  for x in $a $b $c; do wait_state "$x" running 60; done
-  d="$(submit --cores 2 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 3
+  for i in $(seq 2 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sleep 25)"; done
+  for x in $b $ids; do wait_state "$x" running 60; done
+  d="$(submit --cores 1 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 3
   ws cancel "$b" --json >/dev/null; wait_state "$b" "cancelled failed" 40
   wait_state "$d" "succeeded failed" 60
   gp="$(sudo cat "/srv/mu/jobs/$b/work/gc.pid" 2>/dev/null)"; alive=""; [ -n "$gp" ] && sudo kill -0 "$gp" 2>/dev/null && alive=yes
-  ce="$(jobstate "$b" ended_at)"
-  M="b $(jobstate "$b") at $ce (grandchild alive: ${alive:-no}); a $(jobstate "$a"), c $(jobstate "$c") still; d $(jobstate "$d") at $(jobstate "$d" started_at)"
+  a="${ids%% *}"; a="${ids## }"; a="${a%% *}"
+  M="the job that ignores SIGTERM: $(jobstate "$b") at $(jobstate "$b" ended_at) (grandchild alive: ${alive:-no}); the others: $(for x in $ids; do jobstate "$x"; done | tr '\n' ' '); the queued job $(jobstate "$d") at $(jobstate "$d" started_at)"
   [ "$(jobstate "$b")" = cancelled ] && [ -z "$alive" ] && [ -n "$gp" ] && [ "$(jobstate "$d")" = succeeded ] && \
-    { [ "$(jobstate "$a")" = running ] || [ "$(jobstate "$a")" = succeeded ]; }
+    { [ -z "$a" ] || [ "$(jobstate "$a")" = running ] || [ "$(jobstate "$a")" = succeeded ]; }
   qend $?
 }
 q12() {
@@ -242,28 +245,27 @@ q12() {
   o2="$(ws submit --json --mem 1T -- true 2>&1)"; r2=$?
   s1="$(sudo grep -cE 'verb=submit|receive-pack' /srv/mu/audit.log)"
   o3="$(WSF=no-capacity-check ws submit --json --cores 64 -- true 2>&1)"; r3=$?
-  h="$(submit --cores 4 --mem 256M --time 1m --hold -- true)"
-  node_py 'node.update_node_info(sched=dict(node.node_info()["sched"], cores=2))'
+  h="$(submit --cores "$NC" --mem 256M --time 1m --hold -- true)"
+  node_py 'node.update_node_info(sched=dict(node.node_info()["sched"], cores='"$HC"'))'
   ws release "$h" --json >/dev/null; wait_state "$h" "failed succeeded" 30; hs="$(jobstate "$h"): $(jobstate "$h" note)"
-  node_py 'node.update_node_info(sched=dict(node.node_info()["sched"], cores=4))'
+  node_py 'node.update_node_info(sched=dict(node.node_info()["sched"], cores='"$NC"'))'
   M="--cores 64: exit $r1 $(printf '%s' "$o1" | jget error) ($(printf '%s' "$o1" | jget next)); --mem 1T: exit $r2 $(printf '%s' "$o2" | jget error); submits/pushes at the node $s0 -> $s1; past the client: exit $r3 $(printf '%s' "$o3" | jget error); capacity lowered after submit: $hs"
   [ "$r1" = 2 ] && [ "$(printf '%s' "$o1" | jget error)" = too-big ] && [ "$r2" = 2 ] && [ "$s0" = "$s1" ] && \
     [ "$r3" = 2 ] && [ "$(printf '%s' "$o3" | jget error)" = too-big ] && case "$hs" in "failed: too-big"*) true ;; *) false ;; esac
   qend $?
 }
 q13() {
-  qpre; local a b c z x ok=1 zs
+  qpre; local z x ok=1 zs i ids=""
   local cmd='[ ! -e "$TMPDIR/marker" ] || exit 3; touch "$TMPDIR/marker"; '"$(qcmd 15)"
-  a="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$cmd")"; b="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$cmd")"
-  c="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$cmd")"
-  for x in $a $b $c; do wait_state "$x" running 60; done; sleep 2
-  z="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 2
+  for i in $(seq 1 "$NC"); do ids="$ids $(submit --cores 1 --mem 256M --time 2m -- sh -c "$cmd")"; done
+  for x in $ids; do wait_state "$x" running 60; done; sleep 2
+  z="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; sleep 2
   asmu systemctl --user stop mu-node.service
-  for x in $a $b $c; do asmu systemctl --user stop "mu-job-$x.service"; done
+  for x in $ids; do asmu systemctl --user stop "mu-job-$x.service"; done
   asmu systemctl --user start mu-node.service
-  for x in $a $b $c $z; do wait_state "$x" "succeeded failed interrupted" 120; done
-  zs="$(qt start "$z")"; M="z (4 cores, queued before the stop) started $zs;"
-  for x in $a $b $c; do M="$M ${x: -6} $(jobstate "$x") attempt $(jobstate "$x" attempt) restarted $(qt start "$x");"
+  for x in $ids $z; do wait_state "$x" "succeeded failed interrupted" 120; done
+  zs="$(qt start "$z")"; M="z (the whole node, queued before the stop) started $zs;"
+  for x in $ids; do M="$M ${x: -6} $(jobstate "$x") attempt $(jobstate "$x" attempt) restarted $(qt start "$x");"
     { [ "$(jobstate "$x")" = succeeded ] && [ "$(jobstate "$x" attempt)" = 2 ] && lt "$(qt start "$x")" "$zs"; } || ok=0; done
   [ "$ok" = 1 ] && [ "$(jobstate "$z")" = succeeded ]
   qend $?
@@ -273,7 +275,7 @@ q14() {
   a="$(WSF=old-workstation submit --cores 1 --mem 256M --time 1m -- sh -c 'echo $MU_JOB_CORES > n.txt')"
   wait_state "$a" "succeeded failed" 60; n="$(sudo cat "/srv/mu/jobs/$a/work/n.txt" 2>/dev/null)"
   M="a spec without sched, --cores 1: granted $(jobstate "$a" grant.cores) cores ($(jobstate "$a" grant.cpus)), MU_JOB_CORES $n"
-  [ "$(jobstate "$a" grant.cores)" = 4 ] && [ "$n" = 1 ]
+  [ "$(jobstate "$a" grant.cores)" = "$NC" ] && [ "$n" = 1 ]
   qend $?
 }
 q18() {
@@ -295,14 +297,14 @@ q18() {
 }
 q19() {
   qpre; local a h t j sb sb2 t2
-  a="$(submit --cores 4 --mem 256M --time 1m -- sleep 25)"; wait_state "$a" running 60
-  h="$(submit --cores 2 --mem 1G --time 1m -- true)"; sleep 2
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- sleep 25)"; wait_state "$a" running 60
+  h="$(submit --cores "$HC" --mem 1G --time 1m -- true)"; sleep 2
   t="$(ws status "$h" 2>&1)"; sb="$(jobstate "$h" starts_by)"
   node_py 'node.update_node_info(min_free_gb=100000)'; sleep 2
   sb2="$(jobstate "$h" starts_by)"; t2="$(ws status "$h" 2>&1)"
   node_py 'node.update_node_info(min_free_gb=1)'
   M="text: $t · starts_by $sb · disk low: starts_by '${sb2}', text: $t2"
-  printf '%s' "$t" | grep -q "waiting for 2 cores / 1.0 GB" && [ -n "$sb" ] && [ -z "$sb2" ] && printf '%s' "$t2" | grep -q "disk low"
+  printf '%s' "$t" | grep -q "waiting for $HC cores / 1.0 GB" && [ -n "$sb" ] && [ -z "$sb2" ] && printf '%s' "$t2" | grep -q "disk low"
   qend $?
 }
 q20() {
@@ -326,8 +328,8 @@ while time.time() - t < 8: pass')"
 q22() {
   qpre; local r a b c d e o1 o2 o3 qo seq es ec
   r="$(blocker 35)"; wait_state "$r" running 60
-  a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
-  c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   o1="$(ws hold "$b" --json)"; o2="$(ws hold "$b" --json)"; o3="$(ws release "$b" --json)"
   qo="$(qorder_q)"
   ws hold "$c" --json >/dev/null
@@ -345,8 +347,8 @@ q22() {
 q23() {
   qpre; local r a b c d m1 m2 rn qo seq
   r="$(blocker 30)"; wait_state "$r" running 60
-  a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
-  c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   m1="$(ws move "$d" --before "$b" --json)"; m2="$(ws move "$d" --before "$b" --json)"
   qo="$(qorder_q)"
   rn="$(ws move "$a" --before "$r" --json 2>&1)"; local rr=$?
@@ -359,8 +361,8 @@ q23() {
 q24() {
   qpre; local r n1 n2 h mv seq
   r="$(blocker 25)"; wait_state "$r" running 60
-  n1="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; n2="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
-  h="$(submit --cores 4 --mem 256M --time 1m --priority high --others -- sh -c "$(qcmd 1)")"
+  n1="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; n2="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  h="$(submit --cores "$NC" --mem 256M --time 1m --priority high --others -- sh -c "$(qcmd 1)")"
   mv="$(ws move "$n2" --front --json)"
   wait_state "$n1" "succeeded failed" 120; seq="$(qorder)"
   M="the high job submitted last; move N2 --front: higher_bands_ahead $(printf '%s' "$mv" | jget higher_bands_ahead); start order $(short $seq) (want $(short $h $n2 $n1))"
@@ -370,8 +372,8 @@ q24() {
 q25() {
   qpre; local r a b c n0 n1 bs seq
   r="$(blocker 30)"; wait_state "$r" running 60
-  a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
-  c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
+  c="$(submit --cores "$NC" --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   ws hold "$b" --json >/dev/null; ws move "$c" --front --json >/dev/null
   n0="$(sudo grep -c 'order file unreadable' /srv/mu/audit.log)"
   sudo sh -c 'sz=$(stat -c %s /srv/mu/queue.json); head -c "$sz" /dev/zero > /srv/mu/queue.json'
@@ -385,8 +387,8 @@ q25() {
 q26() {
   qpre; local r o x h1 h2 mv n0 n1 hp oh rl ur w1 w2 ho
   r="$(blocker 40)"; wait_state "$r" running 60
-  o="$(submit --cores 4 --mem 256M --time 1m -- true)"
-  x="$(W2CWD=$P3 submit2 --cores 4 --mem 256M --time 1m -- true)"
+  o="$(submit --cores "$NC" --mem 256M --time 1m -- true)"
+  x="$(W2CWD=$P3 submit2 --cores "$NC" --mem 256M --time 1m -- true)"
   h1="$(W2CWD=$P3 ws2 hold "$o" --json 2>&1)"; local e1=$?
   h2="$(W2CWD=$P3 ws2 hold "$x" --json 2>&1)"; local e2=$?; W2CWD=$P3 ws2 release "$x" --json >/dev/null
   mv="$(W2CWD=$P3 ws2 move "$x" --front --json 2>&1)"; local e3=$?
@@ -409,9 +411,9 @@ q26() {
 q27() {
   qpre; local r b a c ql n qtext h1 h2 m1 m2 al
   r="$(blocker 30)"; wait_state "$r" running 60
-  b="$(WCWD=$P2 submit --cores 4 --mem 256M --time 1m -- true)"
-  a="$(submit --cores 4 --mem 256M --time 1m -- true)"
-  c="$(W2CWD=$P3 submit2 --cores 4 --mem 256M --time 1m -- true)"
+  b="$(WCWD=$P2 submit --cores "$NC" --mem 256M --time 1m -- true)"
+  a="$(submit --cores "$NC" --mem 256M --time 1m -- true)"
+  c="$(W2CWD=$P3 submit2 --cores "$NC" --mem 256M --time 1m -- true)"
   ql="$(ws queue --json)"; qtext="$(ws queue 2>&1)"
   n="$(printf '%s' "$ql" | jq_ 'import json,sys
 d = json.loads(sys.stdin.read().strip().splitlines()[-1])
@@ -515,7 +517,7 @@ v1() {
 v3() {
   qpre; local a out h d n
   release_repo v2026.11.10 v2026.11.11
-  a="$(submit --cores 4 --mem 256M --time 2m -- sh -c "$(qcmd 40)")"; wait_state "$a" running 60; sleep 2
+  a="$(submit --cores "$NC" --mem 256M --time 2m -- sh -c "$(qcmd 40)")"; wait_state "$a" running 60; sleep 2
   out="$(ws compute update office-pc --json --wait --timeout 120 2>&1)"
   d="$(printf '%s' "$out" | jget default)"; local as; as="$(jobstate "$a")"
   wait_state "$a" "succeeded failed interrupted" 120
@@ -528,7 +530,7 @@ f_v3_on() { asmu systemctl --user set-environment MU_DISPATCH_FAULT=busy-defers;
 f_v3_off() { asmu systemctl --user unset-environment MU_DISPATCH_FAULT; use_node v2026.11.7; }
 
 sched_rows() {
-  run_row Q01 "concurrent: two --cores 2 --mem 512M jobs run at the same time" q01
+  run_row Q01 "concurrent: two jobs of half the node (--cores $HC --mem 512M) run at the same time" q01
   run_row Q02 "memory admission: three 1 GB jobs with M = 2 GiB: two run, the third waits for memory" q02
   run_row Q03 "core packing: three 2-core jobs on 4 cores: two run, the third waits for cores and starts when one ends" q03
   run_row Q04 "backfill: a short job starts past the waiting head (backfilled); a 1 h one waits with a reservation" q04
