@@ -20,6 +20,8 @@ MU_POLL_S (seconds between status polls, default 5), MU_JOBS_FAULT (comma-separa
   dot-globs          fetch accepts outputs under .git/ and .mu/ and lets a wildcard match hidden names
   node-hint          a node's refusal sets `next`, and its extra fields pass through unfiltered
   no-size-guard      fetch writes a member to its end before it compares the size (no early stop)
+  no-index           submit writes no jobs.index line (docs/design/dashboard.md D22)
+  submit-waits       submit connects to the dashboard's port and waits for an answer (D19)
 """
 import argparse
 import base64
@@ -295,6 +297,85 @@ def host_key_parse(text):
 
 def key_fingerprint(blob):
     return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+
+
+# ------------------------------------------------------------------------------------------------ jobs.index (dashboard)
+INDEX_MAX_AGE = 366 * 86400
+
+
+def index_path():
+    return os.path.join(mu_home(), "jobs.index")
+
+
+def index_append(entry):
+    """One JSON line per accepted submit in $MU_HOME/jobs.index (0600): how the dashboard finds a job's project
+    (docs/design/dashboard.md §4.5). Kept a year; never read by any other command. Best effort: a failure here never
+    fails the submit."""
+    if fault("no-index"):
+        return
+    p = index_path()
+    line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+    try:
+        ensure_dir(mu_home())
+        fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, line.encode("utf-8"))
+            if os.fstat(fd).st_size > 2 << 20:      # prune: keep the last year
+                keep = [ln for ln in open(p, encoding="utf-8", errors="replace").read().splitlines(True)
+                        if _index_young(ln)]
+                durable.write_durable(p, "".join(keep), 0o600)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _index_young(line):
+    try:
+        t = proto.job_id_epoch(json.loads(line)["job_id"])
+    except (ValueError, KeyError, TypeError):
+        return False
+    return time.time() - t < INDEX_MAX_AGE
+
+
+def index_read():
+    """{job_id: entry}; the last line of a job wins. Lines that are not objects with a job id are skipped."""
+    out = {}
+    try:
+        with open(index_path(), encoding="utf-8", errors="replace") as f:
+            for line in f.read(8 << 20).splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and proto.JOB_ID.match(str(e.get("job_id") or "")):
+                    out[e["job_id"]] = e
+    except OSError:
+        pass
+    return out
+
+
+def dashboard_link(job_id):
+    """(url or None, running) from $MU_HOME/run/dashboard.json. Only reads that file and checks the pid: it never
+    connects to the dashboard (D19), and the URL never carries the token."""
+    try:
+        with open(os.path.join(mu_home(), "run", "dashboard.json"), encoding="utf-8") as f:
+            d = json.loads(f.read(4096))
+        port, pid = d.get("port"), d.get("pid")
+        if not isinstance(port, int) or not isinstance(pid, int):
+            return None, False
+        os.kill(pid, 0)
+    except (OSError, ValueError, AttributeError):
+        return None, False
+    if fault("submit-waits"):
+        try:
+            s = socket.create_connection(("127.0.0.1", port))
+            s.recv(1)
+        except OSError:
+            pass
+    return "http://127.0.0.1:%d/#job=%s" % (port, job_id), True
 
 
 # ------------------------------------------------------------------------------------------------ calls to the node
@@ -1268,6 +1349,7 @@ def prune_snap_refs(prj):
 
 
 def cmd_submit(a, command):
+    a.submit_started = proto.iso()
     prj = Project()
     job_id, rec = None, None
     if a.resume:
@@ -1321,6 +1403,7 @@ def cmd_submit(a, command):
     conn = Conn(conf)
     ans = hello(conn)                        # nothing of the project is made or sent before the node says yes
     check_node(ans, node_name, pin, job_id)
+    a.hello_key = ans.get("key") if isinstance(ans.get("key"), str) else None
     if not a.resume:
         if not a.allow_large:
             total, big, bigp = uncommitted_size(prj.root)
@@ -1379,17 +1462,23 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
     rec = prj.read_job_record(job_id) or {"schema": 1, "job_id": job_id, "node": node_name, "spec": spec}
     rec.update(state=res.get("state"), accepted=proto.iso(), duplicate=bool(res.get("duplicate")))
     prj.write_job_record(rec)
+    index_append({"job_id": job_id, "node": node_name, "key": getattr(a, "hello_key", None), "project_root": prj.root,
+                  "project": prj.name, "project_id": spec.get("project_id"), "name": spec.get("name"),
+                  "submit_started": getattr(a, "submit_started", None), "accepted": rec["accepted"], "fetched": None})
+    dash_url, dash_running = dashboard_link(job_id)
     try:
         prune_snap_refs(prj)
     except MuError:
         pass
     out = {"ok": True, "exit": 0, "job_id": job_id, "node": node_name, "state": res.get("state"),
            "position": res.get("position"), "duplicate": bool(res.get("duplicate")), "snapshot": spec["snapshot"],
-           "dirty": spec["dirty"], "warnings": warnings}
+           "dirty": spec["dirty"], "warnings": warnings, "dashboard": {"url": dash_url, "running": dash_running}}
     if a.wait:
         a.job_id, a.on, a.submitted = job_id, node_name, out
         if not a.json:
             print("%s accepted by %s (%s)" % (job_id, node_name, res.get("state")))
+            if dash_url:
+                print("  dashboard: %s  (mu dashboard open)" % dash_url)
         return cmd_status(a)
     if a.json:
         proto.emit_json(out)
@@ -1398,6 +1487,8 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
         print("%s %s on %s%s%s" % (job_id, res.get("state"), node_name, pos, " — already known: not sent twice" if
                                    res.get("duplicate") else ""))
         print("  mu status %s --wait --timeout 500 · mu log %s --tail 20 · mu fetch %s" % (job_id, job_id, job_id))
+        if dash_url:
+            print("  dashboard: %s  (mu dashboard open)" % dash_url)
     return 0
 
 

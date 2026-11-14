@@ -1,5 +1,5 @@
 """Entry point of μ's job-layer commands: compute, submit, status, log, fetch, cancel, relay (the workstation,
-src/mu/jobs.py and src/mu/invite.py) and node (the compute node, src/mu/node.py). docs/design/job-layer.md §3.
+src/mu/jobs.py and src/mu/invite.py), dashboard (src/mu/dashboard.py) and node (the compute node, src/mu/node.py). docs/design/job-layer.md §3.
 
 bin/mu runs it as  <default toolchain>/env/bin/python -I -S <default toolchain>/recipe/src/mu/cli.py <command> ...
 with MU_HOME and MU_INFRA_VERSION set. -I -S keep the start at about 40 ms: these commands need only the standard
@@ -34,7 +34,7 @@ def report(e, as_json):
 
 def main(argv):
     if not argv:
-        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|relay|node ... (mu help)\n")
+        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|relay|node|dashboard ... (mu help)\n")
         return 2
     cmd, args = argv[0], argv[1:]
     as_json = "--json" in args[:args.index("--")] if "--" in args else "--json" in args
@@ -45,6 +45,9 @@ def main(argv):
         if cmd == "node":
             from mu import node
             return node.main(args)
+        if cmd == "dashboard":
+            from mu import dashboard
+            return dashboard.main(args)
         from mu import jobs
         return jobs.main(cmd, args)
     except proto.MuError as e:

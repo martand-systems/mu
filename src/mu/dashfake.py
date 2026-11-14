@@ -603,27 +603,48 @@ class Scenario:
 
 # ------------------------------------------------------------------------------------------------ a fake Mac sampler
 class FakeMac:
-    """The Mac card's numbers for the fixtures (the real sampler reads psutil)."""
+    """This Mac's card from a deterministic function of the time (the fixtures, screenshots); the same interface and
+    shapes as dashboard.MacSampler (the real one reads psutil)."""
 
     def __init__(self, clock):
         self.clock = clock
+        self.lock = threading.Lock()
+        self.cpu, self.mem, self.last, self.t = [], [], None, None
 
-    def snapshot(self, series_s=600):
+    def sample(self):
         t = self.clock.wall()
-        series = [[round(t - 2 * k, 1), round(30 + 10 * _h("mac", k), 1)] for k in range(int(series_s // 2), -1, -1)]
-        mem = [[x[0], int(9.1 * GB)] for x in series]
-        return {"name": "This Mac", "sampler": "psutil", "t": t, "stale": False, "cpu_pct": 38.0,
-                "per_core": [40.0, 35.5, 60.1, 20.0, 12.0, 8.0, 5.0, 3.0],
-                "cores": {"logical": 8, "physical": 8, "perf": 4, "eff": 4}, "load": [2.1, 1.9, 1.7],
-                "mem": {"total": 16 * 1024 ** 3, "available": int(6.9 * GB), "used": int(9.1 * GB), "pressure": "ok"},
-                "battery": {"on_battery": False, "percent": 100.0},
-                "series": {"cpu_pct": series, "mem_used": mem}}
-
-    def wanted(self, on):
-        pass
+        k = int(t // 2)
+        cpu = round(30 + 10 * _h("mac", k), 1)
+        per = [round(min(100.0, cpu + 30 * (_h("mac", k, i) - 0.5)), 1) for i in range(8)]
+        total = 16 * 1024 ** 3
+        used = int(9.1 * GB + 0.2 * GB * _h("mem", k))
+        s = {"t": round(t, 3), "cpu_pct": cpu, "per_core": per, "load": [2.1, 1.9, 1.7],
+             "mem": {"total": total, "available": total - used, "used": used, "pressure": "ok"}}
+        with self.lock:
+            self.last, self.t = s, t
+            self.cpu.append((round(t, 1), cpu))
+            self.mem.append((round(t, 1), used))
+            del self.cpu[:-1810], self.mem[:-1810]
+        return s
 
     def battery(self):
-        return False
+        stub = os.environ.get("MU_DASH_BATTERY")
+        return {"on_battery": stub == "1", "percent": 100.0 if stub != "1" else 50.0}
+
+    def on_battery(self):
+        return os.environ.get("MU_DASH_BATTERY") == "1"
+
+    def card(self, series_s=600):
+        now = self.clock.wall()
+        with self.lock:
+            s, t = self.last or {}, self.t
+            cpu = [[a, b] for a, b in self.cpu if a >= now - series_s]
+            mem = [[a, b] for a, b in self.mem if a >= now - series_s]
+        return {"name": "This Mac", "host": "fixture-mac", "sampler": "fake", "t": t,
+                "stale": t is None or now - t > 15.0, "cpu_pct": s.get("cpu_pct"), "per_core": s.get("per_core", []),
+                "load": s.get("load"), "cores": {"logical": 8, "physical": 8, "perf": 4, "eff": 4},
+                "mem": dict(s.get("mem") or {"total": None, "available": None, "used": None, "pressure": None}),
+                "battery": self.battery(), "mu_version": "v2026.11.9", "series": {"cpu_pct": cpu, "mem_used": mem}}
 
 
 # ------------------------------------------------------------------------------------------------ fixtures
