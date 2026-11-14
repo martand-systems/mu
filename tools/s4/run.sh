@@ -748,6 +748,7 @@ test_pairing() {
   half="$(pref_invite half-pc 7007 /tmp/inv-half.json)"
   sid="$(api GET /mu/v1/clients | jget store_id)"
   old="$RELAY"
+  docker logs "$RELAY" > "$WORK/logs/relay-pairing.log" 2>&1  # P1-P8 as mu-relayd saw them (the redeploys below replace it)
   dc_main up -d --force-recreate --remove-orphans >> "$WORK/logs/compose.log" 2>&1; RELAY="$(dc_main ps -q mu-relay)"
   wait_code OK 60 probe curl -s -m 3 --cacert /certs/ca.crt "https://$HOST/health"
   a="$(api GET /mu/v1/clients | jget store_id)"

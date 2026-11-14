@@ -193,5 +193,24 @@ refused_e "one bad client among good ones" RELAY_KEY="$K" RELAY_CLIENTS="compute
 refused_e "every client revoked (chisel with no users lets anyone in)" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001,workstation:b:$P:7001" RELAY_REVOKED="a,b"
 refused_e "RELAY_REVOKED with a character outside the names" RELAY_KEY="$K" RELAY_CLIENTS="compute:a:$P:7001" RELAY_REVOKED='a;b'
 
+echo "-- the reference pairing client (tools/s4/client/pair_ref.py)"
+# A retry after a 502 (chisel restarting for an eviction) sends the same request body again, not the 502's empty
+# answer (S4 run 43571059503, P7: a retried contest arrived without its claim token and was refused as a wrong code).
+retry_bodies="$(python3 -I - "$ROOT/tools/s4/client/pair_ref.py" <<'PY' 2>&1
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pair_ref", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.time.sleep = lambda s: None
+r, sent = m.Relay("https://relay.invalid", None), []
+def fake(method, path, body=None, auth=None, timeout=35):
+    sent.append(body)
+    return (502, {}) if len(sent) < 3 else (200, {"ok": True})
+r._call = fake
+print(r.call("POST", "/mu/v1/invites/AAAA/contest", {"claim": "c"})[0], sent)
+PY
+)"
+is "a retry after a 502 sends the same request body" "$retry_bodies" "200 [{'claim': 'c'}, {'claim': 'c'}, {'claim': 'c'}]"
+
 echo
 if [ "$N_FAIL" -eq 0 ]; then echo "all ok"; else echo "$N_FAIL failed"; exit 1; fi
