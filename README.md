@@ -180,6 +180,10 @@ the JATAYU frame model on the office PC (P7). The list is in `docs/PLAN.md` §13
 **Roadmap:** what is built next and in what order (pairing fixes, then a local dashboard, then a simpler shell
 experience), with the owner's decisions: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+**Engineering capability** (a proposal, not yet placed in that order): what μ needs so that Claude Code's analyses
+(manufacturability, calculations, deeper FEA, loads, reports) reach a human engineer as a package that is quick to
+check and sign, with the research behind it: [`docs/ENGINEERING-ROADMAP.md`](docs/ENGINEERING-ROADMAP.md).
+
 ## Known issues
 
 Queued for the next release:

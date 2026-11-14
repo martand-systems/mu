@@ -9,6 +9,9 @@
   before each step starts. It is meant to stay valid however much else changes before the work begins: where a
   design document and this file disagree about **order or decisions**, this file wins; about **mechanism**, the
   design document wins.
+- **Engineering capability** (manufacturability, calculations, deeper FEA, loads, reports and review) has its own
+  proposal, [docs/ENGINEERING-ROADMAP.md](ENGINEERING-ROADMAP.md). It does not change the order below. Where it fits
+  is an open owner decision (its §13, decision 14).
 - **Context:** [docs/PLAN.md](PLAN.md) is the overall plan (§13 phases, §17 build or adopt). What is installed and
   measured is in [docs/verification/](verification/).
 

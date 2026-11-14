@@ -1153,6 +1153,8 @@ partly built, and P7 has its `local` half. The status column in §13 has the det
 - A LAN-direct path to a node in the same office (a Windows port proxy and a firewall rule limited to the local subnet)
 - Self-hosted GitHub Actions runner on the office PC, to re-run validations on pull requests
 - Remote ParaView (`pvserver`) through the relay
+- The engineering capability layer: analyses beyond CAD, FEA and CFD, and the evidence, reports and review records
+  around them. Proposed in [`docs/ENGINEERING-ROADMAP.md`](ENGINEERING-ROADMAP.md), which builds on §6.5 to §6.7 and §8
 
 **Build or adopt (reviewed 2026-11-14).** Most of μ's plumbing was written for μ. Off-the-shelf tools that could replace
 parts of it, and the owner's decision:
