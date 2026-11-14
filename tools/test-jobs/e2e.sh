@@ -678,7 +678,7 @@ h_uninstall() {
   fp0="$(sudo ssh-keygen -lf /etc/mu/ssh_host_ed25519_key.pub | awk '{ print $2 }')"
   sudo mu-wsl2-distro uninstall > "$WORK/out/host/uninstall.log" 2>&1 || { M="uninstall failed: $(tail -n 5 "$WORK/out/host/uninstall.log" | tr '\n' ' ')"; return 1; }
   for f in /etc/systemd/system/mu-sshd.service /etc/systemd/system/mu-tunnel.service /etc/mu/sshd_config /etc/mu/tunnel.env \
-           /etc/mu/authorized_keys/mu /usr/local/lib/mu/mu-node-gate /usr/local/lib/mu/mu-node-gate.in /usr/local/lib/mu/chisel \
+           /etc/mu/authorized_keys/mu /usr/local/lib/mu/mu-node-gate /usr/local/lib/mu/chisel \
            /etc/apt/apt.conf.d/52mu-unattended-upgrades /home/mu/.config/systemd/user/mu-node.service; do
     sudo test -e "$f" && left="$left $f"
   done

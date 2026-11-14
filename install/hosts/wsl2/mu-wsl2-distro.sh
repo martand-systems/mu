@@ -1246,8 +1246,8 @@ do_uninstall() {
   echo "  folders in $JOB_ROOT (job data; rm -rf $JOB_ROOT by hand)."
   echo "Kept: linger for $MU_USER (loginctl disable-linger $MU_USER); $STATE_DIR/stops.log; in ~$MU_USER/.ssh the key, the"
   echo "  managed github.com block in config (between the '# >>> mu-wsl2' and '# <<< mu-wsl2' lines) and GitHub's key in"
-  echo "  known_hosts (ssh-keygen -R github.com -f ~$MU_USER/.ssh/known_hosts); $SELF_PATH itself (mu-wsl2-host.ps1"
-  echo "  uninstall deletes it next; by hand: rm $SELF_PATH)."
+  echo "  known_hosts (ssh-keygen -R github.com -f ~$MU_USER/.ssh/known_hosts); $SELF_PATH itself and the gate's source"
+  echo "  $GATE_TEMPLATE (mu-wsl2-host.ps1 uninstall deletes both next; by hand: rm $SELF_PATH $GATE_TEMPLATE)."
   echo "Restart the distro to apply (from Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distro>})."
 }
 
@@ -1267,7 +1267,8 @@ uninstall_jobs() {
     fi
   done
   if systemd_running; then systemctl daemon-reload; fi
-  for f in "$TUNNEL_ENV" "$SSHD_CONFIG" "$KEYS_DIR/$MU_USER" "$GATE" "$GATE_TEMPLATE" "$CHISEL_BIN" "$UU_CONF" "$DELEGATE_CONF" \
+  # kept: $GATE_TEMPLATE, the gate's source, which belongs with $SELF_PATH (mu-wsl2-host.ps1 uninstall deletes both)
+  for f in "$TUNNEL_ENV" "$SSHD_CONFIG" "$KEYS_DIR/$MU_USER" "$GATE" "$CHISEL_BIN" "$UU_CONF" "$DELEGATE_CONF" \
            "$STATE_DIR/host-drive"; do
     if [ -e "$f" ]; then rm -f "$f"; changed "$f removed"; fi
   done
