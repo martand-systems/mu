@@ -1180,7 +1180,7 @@ What only the PC can settle:
 - interop off for root and for `mu`, and `/mnt/c` closed to `mu` but measurable, after a restart; **and whether `mu`
   can still reach WSL's interop socket (`/run/WSL/*_interop`, `$WSL_INTEROP`) once interop is off** —
   `windows-reach` tests starting a Windows program through binfmt only (to check at the visit:
-  `wsl -d mu-compute -u mu --cd ~ -- sh -c 'ls -l /run/WSL/; echo "$WSL_INTEROP"'`);
+  `wsl -d mu-compute -u mu --cd /home/mu -- sh -c 'ls -l /run/WSL/; echo "$WSL_INTEROP"'`);
 - `openssh-server` installing with port 22 never open, and the other root steps on real WSL;
 - the startup task once `mu` cannot enter `/mnt/c` (`task.last-run`);
 - the tunnel from WSL2 through the office network, and the whole path from a second network with PAM's real
@@ -1395,7 +1395,7 @@ answer, run as sshd runs it); on WSL also `host-drive`, `reach.root`, `reach.mu.
 | 11 | unattended upgrades, security pocket only | `/etc/apt/apt.conf.d/52mu-unattended-upgrades` with `#clear` of Ubuntu's lists, then the three security pockets; `apt-daily*.timer` unmasked and enabled if they were not | the runner had both timers disabled; `unattended-upgrade --dry-run` there lists only `noble-security`, `noble-apps-security`, `noble-infra-security` (`H5`) |
 | 12 | — | `python3` among the packages | `status` reads `mu node info --json` |
 | 13 | §19 step 3: `install`, then `test-stop` | `install -NoRestart`, then `test-stop` | install's own restart is `wsl --terminate`; `test-stop` is the clean stop, and it hands WSL to the startup task |
-| 14 | — | from PowerShell, commands as `mu` pass `--cd ~` | after §13.4, `mu` cannot enter the Windows folder PowerShell starts in |
+| 14 | — | from PowerShell, commands as `mu` pass `--cd /home/mu` and name `mu` as `/home/mu/.local/bin/mu` | after §13.4, `mu` cannot enter the Windows folder PowerShell starts in; `wsl … --` runs a non-login shell without `~/.local/bin` on PATH (first visit, 2026-11-14: `mu: command not found`) |
 | 15 | — | `apt-get` is retried for up to 10 minutes while another apt holds a lock | with the daily apt timers on, `apt-daily` may be running `apt-get update`; `DPkg::Lock::Timeout` does not cover the lists lock (CI run 43539220281: a reinstall stopped with exit 100) |
 
 ### 22.3 CI (run 43541460952)

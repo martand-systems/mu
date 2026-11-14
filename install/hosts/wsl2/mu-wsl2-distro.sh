@@ -1998,6 +1998,16 @@ cmd_windows_reach() {
   [ "$nfail" = 0 ]
 }
 
+# pair_mu_version: the default release of MU_USER, as pair sends it (unknown when unreadable or odd). Read as MU_USER:
+# ~/.local/share/mu/default is that user's file, and a symlink there must not make root read another file and send its
+# first line to the relay (security review of ff2c707, 10; tools/test-jobs/e2e.sh H8)
+pair_mu_version() {
+  local v
+  v="$(runuser -u "$MU_USER" -- head -n 1 "$(mu_home_of)/default" 2> /dev/null < /dev/null || true)"
+  case "$v" in ''|*[!A-Za-z0-9._-]*|?????????????????????????????????????????????????????????????????*) v=unknown ;; esac
+  printf '%s\n' "$v"
+}
+
 # pair claim|finish|run|abort|status: the node's side of pairing by one code (docs/design/pairing.md §9.3). The code
 # comes on stdin (a terminal: asked without echo); mu-pair.py calls this script back for the credential, the key and the
 # tunnel's state. Exit codes are mu-pair.py's: 0 paired, 2 typo or usage, 4 unreachable, 5 refused, 9 expired
@@ -2007,9 +2017,7 @@ cmd_pair() {
   [ -f "$PAIR_PY" ] || fail_with 1 "the pairing client $PAIR_PY is missing" "run mu-wsl2-distro install (from the release that has pairing)"
   [ -x "$py" ] || py="$(command -v python3 || true)"
   [ -n "$py" ] || fail_with 1 "python3 is missing" "apt-get install python3-minimal"
-  # read as mu: ~mu/.local/share/mu/default is mu's file (a symlink there must not make root read another file)
-  ver="$(runuser -u "$MU_USER" -- head -n 1 "$(mu_home_of)/default" 2> /dev/null < /dev/null || true)"
-  case "$ver" in ''|*[!A-Za-z0-9._-]*) ver=unknown ;; esac
+  ver="$(pair_mu_version)"
   set -- "$ARG1" --relay "$RELAY_URL_ARG" --mu-version "$ver"
   [ "$JSON" = 0 ] || set -- "$@" --json
   # a clean environment: nothing of the caller's reaches root's Python but the test hooks named here

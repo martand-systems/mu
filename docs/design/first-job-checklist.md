@@ -17,12 +17,14 @@ What CI has run of all this, and what it could not, is at the [end](#what-ci-alr
 
 ## 0. Preconditions
 
-- Branch `pairing` is merged and released (the release after v2026.11.7, dispatcher rev 9). The merge also redeploys
-  the relay (Dokploy watches `relay/**`): without `RELAY_ADMIN_TOKEN` it runs chisel exactly as before, so nothing
-  changes for anyone until step 1.
+- Pairing was released in v2026.11.8 (dispatcher rev 9); the fixes of its reviews follow in the next release
+  (dispatcher rev 10), which this checklist describes. A merge to main also redeploys the relay (Dokploy watches
+  `relay/**`): without `RELAY_ADMIN_TOKEN` it runs chisel exactly as before. The bootstrap of step 1 was done for
+  office-pc on 2026-11-14; if `curl -sS https://relay.martand.systems/mu/v1/` already contains `"pairing":true` and
+  `mu relay status` says `pairing on`, skip step 1.
 - That release changes no env or app layer, and it is tagged at least two days before the visit, so the PC's daily
   auto-update has installed it. (If it has not, the visit's first command installs it: a few minutes.)
-- The Mac runs that release: `mu update`, then `mu --version` says `dispatcher rev 9`.
+- The Mac runs that release: `mu update`, then `mu --version` says `dispatcher rev 10`.
 
 ## 1. Once: the bootstrap in Dokploy (Terminal on the Mac)
 
@@ -32,7 +34,7 @@ a transcript. Every line keeps them in files or pipes.
 ```sh
 cd ~/mu && git pull                                   # the clone with the released pairing code
 relay/gen-credentials.sh admin-token                  # adds RELAY_ADMIN_TOKEN to ~/.config/mu/relay.env (once)
-relay/gen-credentials.sh remove-client office-pc      # recommended: the PC never received the static one
+relay/gen-credentials.sh remove-client office-pc      # recommended (if it says no client 'office-pc', go on)
 relay/gen-credentials.sh env                          # three lines
 ```
 
@@ -44,7 +46,8 @@ Compose stay off: either would give the relay a new, empty volume). About 15 s l
 curl -sS https://relay.martand.systems/mu/v1/
 ```
 
-Expect `{"ok": true, "service": "mu-relay", "protocol": 1, "pairing": true, "store": "ok"}`. Then:
+Expect `{"ok":true,"pairing":true,"protocol":1,"service":"mu-relay","store":"ok"}` (what matters: it contains
+`"pairing":true`). Then:
 
 ```sh
 relay/gen-credentials.sh login-bundle avi-mac | mu relay login --stdin
@@ -65,7 +68,7 @@ the token (check the Environment tab, and the container log for `mu-relayd: …`
 
 | # | Do | Expect |
 |---|---|---|
-| 2.1 | `mu --version` | `μ v2026.11.N (dispatcher rev 9)` |
+| 2.1 | `mu --version` | `μ v2026.11.N (dispatcher rev 10)` |
 | 2.2 | `mu relay status` | `pairing on`, the client `avi-mac` |
 | 2.3 | `mu compute list` | `no compute node is paired` (exit 0) |
 | 2.4 | The first job's project, pinned to the release the PC will have (the same as the Mac's): below | one commit |
@@ -84,58 +87,41 @@ Bring: the Mac and its charger, a phone with a hotspot. No stick.
 
 ## 3. The visit: two commands at the PC, then the code
 
-**3.1 On the Mac** (the PC has 30 minutes to claim the code after it is made: make it at the office if the walk is
-longer):
+The two PC lines never change; the code is made on the Mac only when the PC asks for it (it is valid 30 minutes, and
+the PC asks only after `mu update` and the install, 10–20 minutes in).
 
-```sh
-mu compute invite office-pc
-```
+`wsl … -- CMD` runs a non-login shell, whose PATH does not have `~/.local/bin`: the lines name `mu` by its full path,
+`/home/mu/.local/bin/mu`. (v2026.11.8 printed `-- mu node host-script`, which fails with `mu: command not found`.)
 
-```
-invite 7K3M for compute node office-pc (relay port 7001), from avi-mac, valid until 14:52 (30 min)
-
-At the office PC, open Terminal (Admin) and type these two lines:
-
-  wsl -d mu-compute -u mu --cd ~ -- mu update
-  powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
-
-When it asks for the pairing code, type:
-
-  7K3M-Q9TD-4WXR-HN2C-PB8F-ZJ6R
-
-Waiting for the PC. Ctrl-C stops waiting, not the invite: mu compute invite --wait 7K3M
-```
-
-It keeps the Mac awake while it waits. **Through Claude Code** the command is
-`mu compute invite office-pc --no-wait --json`: the code is then **not** in Claude's output (`"code": null`) but in a
-dialog on the Mac's screen (it stays until OK, or 30 minutes); Claude shows the two PC lines and repeats
-`mu compute invite --wait 7K3M --json --timeout 540` while it exits 10 (`still-waiting`). Off macOS, or to have the
-code printed anyway: `--show-code stdout`.
-
-**3.2 At the PC**, open **Terminal (Admin)** (an elevated PowerShell: `pair` refuses to run without it) and type the
-two lines the Mac printed:
+**3.1 At the PC**, open **Terminal (Admin)** (an elevated PowerShell: `pair` refuses to run without it) and type:
 
 ```powershell
-wsl -d mu-compute -u mu --cd ~ -- mu update
+wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
 ```
 
-Expect `μ v2026.11.N is installed and is the default: nothing to do.` (or the install of it, a few minutes). Then:
+Expect `checking … for the latest release…`, then `μ v2026.11.N is the latest release. Nothing to do.` (or the
+install of it, a few minutes, ending `default is now μ v2026.11.N.`). Then:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
+powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
 ```
 
 What it does, in order, and what it prints:
 
-1. `mu WSL2 host: pair (the scripts copied to C:\Mu\stage\v2026.11.N)`: the scripts and the pairing client are copied
-   out of the release folder into a folder only administrators and SYSTEM can write, and run from there.
+1. `mu WSL2 host: pair (the scripts copied to C:\Mu\stage\v2026.11.N-<12 hex digits>)`: the scripts and the pairing
+   client are copied out of the release folder into a new folder only administrators and SYSTEM can write, and run
+   from there. (`C:\Mu` gets its owner check and its ACL first; a `C:\Mu\stage` that another user made is refused:
+   delete it and run the line again.)
 2. The first time only: `== What a process of the distro can reach of Windows now (before the change; saved in
    C:\Mu\logs\windows-reach-before.txt)` (job-layer §19's record, which the old checklist wrote by hand).
 3. `== Setting up the node (install -NoRestart)`: the install of [appendix B](#appendix-b-what-the-pair-lines-install-changes-on-this-pc),
-   `ok` for what was there and `changed` for the rest, ending `Done: N change(s) …`.
-4. `Pairing code (from the Mac): `: type the code (24 characters; dashes, spaces and case do not matter; the screen
-   shows asterisks). Then `code accepted: this PC becomes compute node office-pc on relay port 7001 for avi-mac (key
-   SHA256:…)`. A typo is caught before anything is sent (`the code has a typo …`) and asked again, three times in all.
+   `ok` for what was there and `changed` for the rest. Inside `pair` these lines are expected and need nothing done:
+   `info     the relay credential comes from the pairing code (next)` and, when a restart is needed,
+   `info     the restart comes after the code (pair does it)`.
+4. `Pairing code (from the Mac): `: **now** make the invite on the Mac (3.2). Type the code (24 characters; dashes,
+   spaces and case do not matter; the screen shows asterisks). Then `code accepted: this PC becomes compute node
+   office-pc on relay port 7001 for avi-mac (key SHA256:…)`. A typo is caught before anything is sent (`the code has
+   a typo …`) and asked again, three times in all; after the third: `three tries: run the same line again …`.
 5. `== Restarting the distro cleanly to apply the settings (about a minute)`, when install changed what only a restart
    applies (interop off, the drive options): as `test-stop` does, through the shutdown hook and the startup task. The
    code stays in the window's memory meanwhile; it is not asked again.
@@ -156,6 +142,36 @@ What it does, in order, and what it prints:
    paired with avi-mac | ready for jobs: yes
    ```
 
+**3.2 On the Mac, when the PC shows `Pairing code (from the Mac):`**:
+
+```sh
+mu compute invite office-pc
+```
+
+```
+invite 7K3M for compute node office-pc (relay port 7001), from avi-mac, valid until 14:52 (30 min)
+
+At the office PC, open Terminal (Admin) and type these two lines:
+
+  wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
+  powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
+
+When it asks for the pairing code, type:
+
+  7K3M-Q9TD-4WXR-HN2C-PB8F-ZJ6R
+
+Waiting for the PC. Ctrl-C stops waiting, not the invite: mu compute invite --wait 7K3M
+```
+
+It keeps the Mac awake while it waits. **Through Claude Code** (ask Claude now, when the PC asks for the code) the
+command is `mu compute invite office-pc --no-wait --json`: the code is then **not** in Claude's output
+(`"code": null`) but in a dialog on the Mac's screen. Keep the dialog open until the PC says `code accepted` (it stays
+until OK, or until the invite ends); the Mac must be with you at the PC, or someone must read the code to you. Claude
+repeats `mu compute invite --wait 7K3M --json --timeout 400` while it exits 10 (`still-waiting`). If the dialog cannot
+be shown (no one signed in at the Mac's screen, a locked screen), the invite is cancelled and the command says so
+(exit 1 `no-dialog`): run it in Terminal on the Mac. Off macOS, or to have the code printed anyway:
+`--show-code stdout`.
+
 On the Mac meanwhile:
 
 ```
@@ -175,21 +191,28 @@ anywhere, on the Mac: `mu compute status office-pc`, exit 0, `office-pc: up · �
 | What | PC | Mac | Then |
 |---|---|---|---|
 | A typo | `the code has a typo …`, asked again | — | type it again |
-| A wrong code that passes the check | `the relay does not accept this code …`, asked again | `a wrong code was tried … (1 of 20)` | type it again; after 20 the invite is locked |
-| Expired (30 min to claim) | `invite 7K3M expired …` (exit 9) | exit 9 | a new `mu compute invite office-pc`; the same PC line |
+| A wrong code that passes the check | `the relay does not accept this code …`, asked again | `a wrong code was tried … (1 of 20)` | type it again: three tries per run, then run the line again (install then has nothing to change); after 20 wrong codes in all the invite is locked: a new invite |
+| Expired (30 min to claim) | `invite 7K3M expired …` (exit 9), `next: on the Mac: mu compute invite <node> (a new code); then run this same line again here` | exit 9 | a new `mu compute invite office-pc`; the same PC line |
 | The Mac asleep, or Claude stopped: no confirm within about 2 minutes | `paired with avi-mac (not yet confirmed: …)`, then `ready for jobs: yes`, exit 0. **Nothing is undone** | — | later, on the Mac: `mu compute invite --wait 7K3M` (up to 24 h after the invite) verifies and finishes |
-| Someone else used the code first | `SOMEONE ELSE USED THIS CODE FIRST …` (exit 5) | `another machine used the code first; office-pc was not paired` (exit 5) | a new invite |
+| The Mac has the keys but could not reach the PC through the relay yet | `paired with avi-mac, but avi-mac could not reach this PC through the relay yet \| ready for jobs: …` (exit 4) | exit 4 with `node` in the JSON | `wsl -d mu-compute -u root -- mu-wsl2-distro tunnel status`; on the Mac `mu compute status office-pc` |
+| Someone else used the code first | `SOMEONE ELSE USED THIS CODE FIRST …` (exit 5): this PC told the relay, which removes the other machine's relay client | `another machine used the code (…); the PC's contest arrived` (exit 5) | a new invite; tell the lead |
 | The relay (or the network) changed what crossed | `the invite was changed on the way … nothing was set up` (exit 5) | `the PC's answer was changed on the way … nothing was paired` (exit 5) | tell the lead; do not retry that code |
 | The relay unreachable | `the relay does not answer (…): run the same line again in a minute` (exit 4) | `relay unreachable, trying again` | the same line again |
-| The second line says `the argument '' to -File does not exist` | the PC's release has no `pair` yet | — | the first line (`mu update`), then the second again |
+| The relay answering has no pairing service | `the relay answering here has no pairing service`, `next: tell the Mac's owner (curl … must say "pairing":true …)` (exit 5) | — | §1's curl on the Mac; then the same line again |
+| The PC's μ is older than v2026.11.8 (no `host-script`) | `mu node: unknown subcommand 'host-script'`, and PowerShell then most likely says `The argument 'pair' to the -File parameter does not exist.` | — | the first line (`mu update`), then the second again |
+| The PC's μ is new but its default release has no `pair` | `mu node host-script: … has no host script with the pair action`, `next: run: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update` (exit 3) | — | that line, then the second again |
+| `mu: command not found` | the line of v2026.11.8 (`-- mu …`) was typed | — | the lines above (`/home/mu/.local/bin/mu`) |
+| After `--replace` on a rebuilt PC, `-File C:\Mu\host\mu-wsl2-host.ps1 pair` says the file does not exist | the PC was rebuilt: `C:\Mu\host` is gone | — | the `(wsl … mu node host-script) pair` line above instead |
+| The restart did not happen (`… was not started again through the startup task`) | `run C:\Mu\host\mu-wsl2-host.ps1 test-stop, then this line again` | — | as it says; the line again also restarts by itself while interop is still on |
 | The line stopped half way (window closed, a restart) | — | — | the same second line, the same code: it resumes |
-| The office reaches the relay from several public addresses (a load-balanced uplink) | no difference: addresses decide nothing, the Mac only shows each event's address. A pairing becomes **contested** only when a second claim with the right code comes without this PC's session: another machine, or this PC's state lost between two runs | `another machine used the code first` | a new invite (the remedy for any contested invite) |
+| The same line again on a paired PC | `this PC is already paired (invite 7K3M): nothing to do`, the status, `already paired \| ready for jobs: yes` | — | nothing |
+| The office reaches the relay from several public addresses (a load-balanced uplink) | no difference: addresses decide nothing, the Mac only shows each event's address. A pairing becomes **contested** only when a second claim with the right code comes without this PC's session: another machine, or this PC's state lost between two runs | `another machine used the code` | a new invite (the remedy for any contested invite) |
 
 The `pair` line is safe to run again: install repeats nothing it did; a claim resumes with the session it saved; an
-answered pairing goes straight to the wait. Once the pairing has finished, the same code is refused (`already-paired`)
-and does not undo it. Pairing again needs a new invite, `mu compute invite office-pc --replace`; at the PC the Mac
-then prints the installed copy, `powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 pair`
-(after jobs have run, the release folder is not trusted for an administrator).
+answered pairing goes straight to the wait. Once the pairing has finished, the same code is refused (`already-paired`,
+"nothing to do") and does not undo it. Pairing again needs a new invite, `mu compute invite office-pc --replace`; at
+the PC the Mac then prints the installed copy, `powershell -NoProfile -ExecutionPolicy Bypass -File
+C:\Mu\host\mu-wsl2-host.ps1 pair` (after jobs have run, the release folder is not trusted for an administrator).
 
 That ends the visit.
 
@@ -256,18 +279,18 @@ above.
 
 | Point | Checked by | Pass |
 |---|---|---|
-| Auto-update carried a release to the PC | 3.2, first line | `nothing to do` (or a short install) |
-| `-File (wsl … mu node host-script)` in an elevated Windows PowerShell 5.1 | 3.2, second line | `pair` starts |
-| The staged copy, the hidden code into `wsl.exe`'s stdin, the restart in the middle | 3.2 steps 1, 4, 5 | `code accepted`, then `paired with avi-mac` after the restart |
-| Root's Python reaching the relay through the office network (the real Let's Encrypt chain) | 3.2 step 4 | `code accepted` |
-| cgroup v2 memory limits for user units under WSL | 3.2 step 7 `node.limits`, 4.3 `oom` | enforced; the 1 GB job ends `oom` |
-| What a job could reach of Windows before the change | 3.2 step 2 | recorded in `C:\Mu\logs\windows-reach-before.txt` (any answer) |
-| Interop off for root and for `mu`; `/mnt/c` closed to `mu` but measurable; the startup task still works | 3.2 step 7 `reach.*`, `disk.sure`, `task.last-run` | all PASS |
-| The sandboxed tunnel and its egress filter under WSL's kernel, through the office network | 3.2 steps 6 and 7 `tunnel`, `tunnel.egress` | `connected`; "a connection elsewhere is refused by the kernel" |
-| The Keychain writes on the real Mac (`mu relay login`, the invite's code) | 1, 3.1 | stored without a prompt |
-| The macOS dialog with the code (Claude Code's form) | 3.1 | the dialog shows the code |
-| Everything a job needs, in one line | 3.2 step 7 | `paired with avi-mac \| ready for jobs: yes` |
-| The whole path, two networks, the real handshake time | 3.2, 4.1 | exit 0 on both; the times noted |
+| Auto-update carried a release to the PC | 3.1, first line | `Nothing to do` (or a short install) |
+| `-File (wsl … /home/mu/.local/bin/mu node host-script)` in an elevated Windows PowerShell 5.1 | 3.1, second line | `pair` starts |
+| The staged copy (a new admin-only folder), the hidden code into `wsl.exe`'s stdin, the restart in the middle | 3.1 steps 1, 4, 5 | `code accepted`, then `paired with avi-mac` after the restart |
+| Root's Python reaching the relay through the office network (the real Let's Encrypt chain) | 3.1 step 4 | `code accepted` |
+| cgroup v2 memory limits for user units under WSL | 3.1 step 7 `node.limits`, 4.3 `oom` | enforced; the 1 GB job ends `oom` |
+| What a job could reach of Windows before the change | 3.1 step 2 | recorded in `C:\Mu\logs\windows-reach-before.txt` (any answer) |
+| Interop off for root and for `mu`; `/mnt/c` closed to `mu` but measurable; the startup task still works | 3.1 step 7 `reach.*`, `disk.sure`, `task.last-run` | all PASS |
+| The sandboxed tunnel and its egress filter under WSL's kernel, through the office network | 3.1 steps 6 and 7 `tunnel`, `tunnel.egress` | `connected`; "a connection elsewhere is refused by the kernel" |
+| The Keychain writes on the real Mac (`mu relay login`, the invite's keys) | 1, 3.2 | stored without a prompt |
+| The macOS dialog with the code (Claude Code's form) | 3.2 | the dialog shows the code |
+| Everything a job needs, in one line | 3.1 step 7 | `paired with avi-mac \| ready for jobs: yes` |
+| The whole path, two networks, the real handshake time | 3.1, 4.1 | exit 0 on both; the times noted |
 | The first real job, compared with the local reference | 4.2 | as stated there |
 | `oom`, `timeout`, `cancel` on the node | 4.3 | each state once |
 | A clean stop of the distro during a job | 5.3 | one re-run, a correct result, both attempts in the log |
@@ -293,23 +316,24 @@ authorises a key by hand). It needs a USB stick the owner keeps:
 
 The relay then needs a static `office-pc` client (`relay/gen-credentials.sh add-client compute office-pc 7001`, `env`,
 the Dokploy edit; step 1 removed it). On the PC, in **Terminal (Admin)**; the stick is `/Volumes/STICK` on the Mac and
-`E:` on the PC. Commands that run as `mu` pass `--cd ~`.
+`E:` on the PC. Commands that run as `mu` pass `--cd /home/mu` and name `mu` by its full path (`wsl … --` runs a
+non-login shell, whose PATH lacks `~/.local/bin`).
 
 ### At the PC: check, then install
 
 **A.1 The release reached the PC** (auto-update; PLAN §14 open point):
 
 ```powershell
-wsl -d mu-compute -u mu --cd ~ -- mu --version
+wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu --version
 ```
 
-Expect `μ v2026.11.N (dispatcher rev 9)`, the same N as the Mac. Otherwise
-`wsl -d mu-compute -u mu --cd ~ -- mu update` (a few minutes when the release changes no layer, §0) and repeat.
+Expect `μ v2026.11.N (dispatcher rev 10)`, the same N as the Mac. Otherwise
+`wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update` (a few minutes when the release changes no layer, §0) and repeat.
 
 **A.2 Memory limits for jobs work under this WSL** (§19; the one unknown that would stop everything):
 
 ```powershell
-wsl -d mu-compute -u mu --cd ~ -- mu node selftest
+wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node selftest
 ```
 
 Expect `PASS  memory limit for user units: MemoryMax=64M: 32 MB ran, 256 MB ended with oom-kill` (a note that
@@ -321,7 +345,7 @@ nodes refuse jobs without the limit.
 writable by `mu`, so later runs use the copy in `C:\Mu\host`):
 
 ```powershell
-$v = (wsl -d mu-compute -u mu --cd ~ --exec cat .local/share/mu/default).Trim()
+$v = (wsl -d mu-compute -u mu --cd /home/mu --exec cat .local/share/mu/default).Trim()
 $h = "$env:TEMP\mu-host-$v"
 New-Item -ItemType Directory -Force $h | Out-Null
 Copy-Item -Force "\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\$v\recipe\install\hosts\wsl2\*" $h
@@ -335,7 +359,7 @@ PLAN §11):
 
 ```powershell
 wsl -d mu-compute -u root --exec bash "/home/mu/.local/share/mu/toolchains/$v/recipe/install/hosts/wsl2/mu-wsl2-distro.sh" windows-reach
-wsl -d mu-compute -u mu --cd ~ -- sh -c 'ls -l /run/WSL/; echo "WSL_INTEROP=$WSL_INTEROP"'
+wsl -d mu-compute -u mu --cd /home/mu -- sh -c 'ls -l /run/WSL/; echo "WSL_INTEROP=$WSL_INTEROP"'
 ```
 
 Expected today (interop on, `C:` open): `FAIL reach.root` and `FAIL reach.mu.interop` (each shows what `whoami.exe`

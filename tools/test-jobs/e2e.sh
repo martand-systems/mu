@@ -780,8 +780,28 @@ host_rows() {
   run_row H3 "tunnel status: connected; the relay password in no output of the set-up" h_tunnel
   run_row H4 "keys, host-key: the workstation's key under its name, with restrict; the pinned host key is the node's" h_keys
   run_row H5 "unattended-upgrades takes the security pocket only (its own dry run)" h_updates
+  run_row H8 "pair reads the mu user's default release as that user: a symlink to a root-only file sends 'unknown', not its line" h_pairver
 }
 # the faults that status must notice, each put in and taken out again
+# H8 (security review of ff2c707, 10): a throwaway user stands in for mu; DISTRO is the script to source (the fault: a
+# copy that reads as root)
+h_pairver() {
+  local d="${DISTRO:-/usr/local/sbin/mu-wsl2-distro}" leak ok
+  id muvtest > /dev/null 2>&1 || sudo useradd --create-home --shell /bin/bash muvtest
+  sudo install -d -o muvtest -g muvtest /home/muvtest/.local /home/muvtest/.local/share /home/muvtest/.local/share/mu
+  printf 'leakme-1\n' | sudo tee /root/mu-ver-secret > /dev/null; sudo chmod 600 /root/mu-ver-secret
+  sudo ln -sfn /root/mu-ver-secret /home/muvtest/.local/share/mu/default
+  leak="$(sudo bash -c '. "$1"; MU_USER=muvtest; pair_mu_version' sh "$d" 2>&1)"
+  sudo rm -f /home/muvtest/.local/share/mu/default; printf 'v2026.11.99\n' | sudo -u muvtest tee /home/muvtest/.local/share/mu/default > /dev/null
+  ok="$(sudo bash -c '. "$1"; MU_USER=muvtest; pair_mu_version' sh "$d" 2>&1)"
+  M="through a symlink to a root-only file: '$leak'; a regular file: '$ok'"
+  [ "$leak" = unknown ] && [ "$ok" = v2026.11.99 ]
+}
+hf_pairver_on() {
+  sed 's/v="$(runuser -u "$MU_USER" -- head -n 1 /v="$(head -n 1 /' /usr/local/sbin/mu-wsl2-distro > "$WORK/distro-asroot"
+  DISTRO="$WORK/distro-asroot"
+}
+hf_pairver_off() { DISTRO=""; }
 hf_sshd_on() { sshd_edit 's/^PermitTTY no$/PermitTTY yes/'; }
 hf_sshd_off() { sshd_restore; }
 hf_gate_on() { sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.good"; echo '# changed' | sudo tee -a /usr/local/lib/mu/mu-node-gate > /dev/null; }
@@ -796,6 +816,7 @@ hf_tunnel_on() { sudo systemctl stop mu-tunnel.service; }
 hf_tunnel_off() { sudo systemctl start mu-tunnel.service; wait_up 90 > /dev/null; }
 host_faults() {
   must_fail H1 "PermitTTY yes in /etc/mu/sshd_config" hf_sshd_on hf_sshd_off h_status
+  must_fail H8 "the default release read as root" hf_pairver_on hf_pairver_off h_pairver
   must_fail H1 "a line added to the gate" hf_gate_on hf_gate_off h_status
   must_fail H1 "/etc/mu/test-fault present" hf_testfault_on hf_testfault_off h_status
   must_fail H1 "tunnel.env readable by everyone (0644)" hf_envmode_on hf_envmode_off h_status
@@ -995,8 +1016,8 @@ qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /d
 qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 check_ran() {
   local want got
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"

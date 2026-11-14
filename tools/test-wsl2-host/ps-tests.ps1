@@ -55,6 +55,16 @@ $Json = $false
 # pair: the stage folder's name, the relay URL check, the code's bytes (one LF; PowerShell 5.1 would pipe CR LF)
 eq 'stage version from a release path' 'v2026.11.9' (Get-StageVersion '\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\v2026.11.9\recipe\install\hosts\wsl2\mu-wsl2-host.ps1')
 eq 'stage version from elsewhere' 'local' (Get-StageVersion 'C:\Mu\host\mu-wsl2-host.ps1')
+# the stage folder (security review of ff2c707, 4). The ACL calls need Windows: this checks their order in the source.
+$fn = @{}
+foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $fn[$f.Name] = $f.Body.Extent.Text }
+$nsd = [string]$fn['New-StageDir']; $ips = [string]$fn['Invoke-PairStage']; $nsa = [string]$fn['New-StageAcl']
+$okStage = $nsd -and $ips -and $nsa -and ($nsd.IndexOf('Initialize-MuDirs') -ge 0) -and ($nsd.IndexOf('Initialize-MuDirs') -lt $nsd.IndexOf('CreateDirectory(')) -and
+  ($nsd -match '-notcontains \$owner\)\s*\{\s*throw') -and ($nsd -notmatch 'New-Item') -and ($ips -notmatch 'New-Item') -and
+  ($ips.IndexOf('New-StageDir') -ge 0) -and ($ips.IndexOf('New-StageDir') -lt $ips.IndexOf('Copy-Item')) -and
+  ($nsa -match 'SetAccessRuleProtection\(\$true, \$false\)') -and ($nsa -match 'SetOwner\(')
+if ($okStage) { ok 'pair stage: C:\Mu checked first; the folder created with its ACL and owner; a foreign stage folder refused; staged before any copy' }
+else { bad 'pair stage: C:\Mu checked first; the folder created with its ACL and owner; a foreign stage folder refused; staged before any copy' }
 # pair's last line: "paired" whenever the node finished the invite, whatever the exit code (usability review of ff2c707, 5)
 $MuRoot = 'C:\Mu'
 $v = Get-PairVerdict 0 $true 'avi-mac' 'yes'

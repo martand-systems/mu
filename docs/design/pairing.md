@@ -143,6 +143,11 @@ clients: avi-mac (workstation, static, ports 7001)
 
 ### 3.2 Pairing a compute node: the office visit
 
+*As fixed after the visit of 2026-11-14 (§17.2):* the PC lines name `mu` by its full path. `wsl … -- CMD` runs a
+non-login shell, whose PATH lacks `~/.local/bin`; v2026.11.8 printed `-- mu node host-script`, which failed at the
+visit with `mu: command not found`. And the owner types the two PC lines first and makes the invite only when the PC
+asks for the code (the invite is valid 30 minutes; `mu update` and the install come before the prompt).
+
 **On the Mac** (the owner, or Claude Code with §3.3):
 
 ```
@@ -151,8 +156,8 @@ invite 7K3M for compute node office-pc (relay port 7001), from avi-mac, valid un
 
 At the office PC, open Terminal (Admin) and type these two lines:
 
-  wsl -d mu-compute -u mu --cd ~ -- mu update
-  powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
+  wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
+  powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
 
 When it asks for the pairing code, type:
 
@@ -173,10 +178,11 @@ it. For a node this Mac has paired before (re-pairing, §3.5) the second PC line
 **At the PC**, in Terminal (Admin):
 
 ```
-PS C:\WINDOWS\system32> wsl -d mu-compute -u mu --cd ~ -- mu update
-μ v2026.11.NN is installed and is the default: nothing to do.
-PS C:\WINDOWS\system32> powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
-mu WSL2 host: pair (μ v2026.11.NN, the scripts copied to C:\Users\avi\AppData\Local\Temp\mu-host-v2026.11.NN)
+PS C:\WINDOWS\system32> wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
+checking https://github.com/martand-systems/mu for the latest release…
+μ v2026.11.NN is the latest release. Nothing to do.
+PS C:\WINDOWS\system32> powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
+mu WSL2 host: pair (the scripts copied to C:\Mu\stage\v2026.11.NN-3f9a1c0e7b2d)
 
 == What a process of the distro can reach of Windows now (before the change; saved in C:\Mu\logs\windows-reach-before.txt)
   FAIL reach.root ... windows-reach: 4 way(s) open
@@ -218,13 +224,14 @@ A command that waits for the owner's walk to the PC does not fit one tool call, 
 mu compute invite office-pc --no-wait --json
 ```
 ```json
-{"ok": true, "invite": "7K3M", "node": "office-pc", "kind": "node", "port": 7001, "code": "7K3M-Q9TD-4WXR-HN2C-PB8F-ZJ6R",
- "expires": "2026-11-20T14:52:00+01:00", "pc_commands": ["wsl -d mu-compute -u mu --cd ~ -- mu update",
- "powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair"],
- "wait_command": "mu compute invite --wait 7K3M --json --timeout 540"}
+{"ok": true, "invite": "7K3M", "node": "office-pc", "kind": "node", "port": 7001, "code": null, "code_shown": "dialog",
+ "expires": "2026-11-20T13:52:00Z", "pc_commands": ["wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update",
+ "powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair"],
+ "wait_command": "mu compute invite --wait 7K3M --json --timeout 400"}
 ```
 
-then repeats `mu compute invite --wait 7K3M --json --timeout 540` while it exits 10 (`still-waiting`, with `state` and
+then repeats `mu compute invite --wait 7K3M --json --timeout 400` (one call fits the Bash tool's 600 s: the hello
+through the relay is bounded by `--timeout` too) while it exits 10 (`still-waiting`, with `state` and
 the last event). The final object is `{"ok": true, "node": "office-pc", "state": "finished", "host_key_fingerprint":
 …, "hello": {…}}`. Claude shows the owner the code and the two PC lines, and nothing else secret is ever in its output.
 
@@ -247,17 +254,19 @@ an IP literal, an integer), with control characters stripped.
 | Wrong secret with a valid checksum, or an id the relay does not hold (the two get the same answer, review finding 10) | event `a wrong code was tried for invite 7K3M (1 of 20)` | `the relay does not accept this code: check it on the Mac's screen` — asked again | 5 `wrong-code` |
 | 20 wrong codes | `invite 7K3M is locked: 20 wrong codes were tried. Make a new one: mu compute invite office-pc` | `invite 7K3M is locked (too many wrong codes): ask for a new code on the Mac` | 5 `invite-locked` |
 | Expired (30 min unclaimed; 30 min claimed but not answered; 15 min answered but not confirmed) | `invite 7K3M expired at 14:52 before the PC claimed it` (or `… answered it`) and the next command | `invite 7K3M expired at 14:52: make a new one on the Mac (mu compute invite office-pc)` | 9 `invite-expired` |
-| Already used (claimed by another machine, or finished) | the invite is `contested`; with the PC's contest (§12.1): `invite 7K3M: another machine used the code first; office-pc was not paired (or was un-paired): make a new invite` | `SOMEONE ELSE USED THIS CODE FIRST. The relay client it made has been removed and avi-mac has been told. Make a new invite on the Mac.` (the PC posts its contest) | 5 `invite-used` |
+| Already used (claimed by another machine, or finished) | the invite is `contested`; with the PC's contest (§12.1): `invite 7K3M: another machine used the code first; office-pc was not paired (or was un-paired): make a new invite` | `SOMEONE ELSE USED THIS CODE FIRST. This PC told the relay, which removes the relay client the other machine got. Tell the Mac's owner, and make a new invite on the Mac.` (the PC posts its contest; the Mac sees it only while its invite is not finished, D10) | 5 `invite-used` |
 | The relay changed the offer (MAC fails at the PC) | event `the PC refused the invite: it was changed on the way` and exit 5 | `the invite was changed on the way (the relay or the network): nothing was set up from it. Tell the Mac's owner; do not retry this code` (the PC posts `abort`) | 5 `pair-integrity` |
 | The relay changed the answer (MAC fails at the Mac) | `the PC's answer was changed on the way (the relay or the network): nothing was paired, the relay client office-pc was removed` | `avi-mac refused this PC's answer (it arrived changed): nothing was paired` | 5 `pair-integrity` |
 | Relay unreachable | at creation: `the relay https://relay.martand.systems does not answer (…): nothing was created`; while waiting: `relay unreachable, trying again` every 5–30 s until the deadline | `the relay does not answer (…): run the same line again in a minute` (no time: the PC cannot know the invite's deadline before a successful claim, review finding 9) | 4 `relay-unreachable` |
-| Relay without pairing (old image, or no `RELAY_ADMIN_TOKEN`) | `the relay has no pairing service (GET /mu/v1/ answered 404, or 503 not-configured): see docs/design/pairing.md §11` | `the relay has no pairing service: use the manual path (first-job-checklist.md)` | 5 `pairing-unsupported` |
+| Relay without pairing (old image, or no `RELAY_ADMIN_TOKEN`) | `the relay has no pairing service (GET /mu/v1/ answered 404, or 503 not-configured)`, next `docs/design/first-job-checklist.md §1 (the Dokploy edit); curl -sS <relay>/mu/v1/ must say "pairing":true` | `the relay answering here has no pairing service`, next `tell the Mac's owner (curl … must say "pairing":true; checklist §1), then run this same line again` | 5 `pairing-unsupported` |
 | Admin token refused | `the relay refused this computer's admin token: mu relay login again (relay/gen-credentials.sh login-bundle …)` | — | 5 `relay-admin` |
 | Node already paired on this Mac | `office-pc is already paired: to pair it again (new host key or new key here): mu compute invite office-pc --replace` | — | 2 `exists` |
 | A relay client of that name exists and `--replace` was not given | `the relay already has a client office-pc (dynamic, created 2026-11-20 by invite 7K3M): --replace, or another name` | — | 2 `client-exists` |
 | Port taken by another compute client | `relay port 7002 belongs to compute client lab-pc: leave --port out, or pick a free one` | — | 2 `port-taken` |
-| The PC runs an older release | — | first line fails: `mu: unknown command 'host-script'` (and PowerShell: `the argument '' to -File does not exist`). Next: run `mu update` (the first line) | — |
-| Paired, but the Mac cannot reach the node | `paired office-pc, but it does not answer through the relay yet: node-offline (…). Next: mu compute status office-pc` | `avi-mac has the keys but could not reach this PC through the relay: node-offline` + `tunnel status` | 4 |
+| The PC runs a release older than v2026.11.8 | — | `mu node: unknown subcommand 'host-script'`; Windows PowerShell 5.1 drops the empty `(wsl …)` argument and most likely says `The argument 'pair' to the -File parameter does not exist.` (not run on Windows). Next: the first line (`mu update`) | — |
+| The PC's `mu` is new, its default release has no `pair` | — | `mu node host-script: the default μ … has no host script with the pair action`, next `run: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update` | 3 |
+| The line of v2026.11.8 (`-- mu …`) | — | `mu: command not found` (a non-login shell): the lines with `/home/mu/.local/bin/mu` | — |
+| Paired, but the Mac cannot reach the node | `paired office-pc, but it does not answer through the relay yet: node-offline (…). Next: mu compute status office-pc` | `avi-mac has the keys but could not reach this PC through the relay: node-offline` + `wsl -d mu-compute -u root -- mu-wsl2-distro tunnel status`; the last line `paired with avi-mac, but avi-mac could not reach this PC through the relay yet \| ready for jobs: …` (the node's `pair status` lists the invite as done) | 4 |
 | The Mac does not confirm within about 2 minutes of the PC's answer (asleep, offline, Claude stopped) | `mu compute invite --wait 7K3M` later (up to 24 h after creation) verifies, says hello and finishes | `paired with avi-mac (not yet confirmed: avi-mac confirms when it next runs mu compute invite --wait 7K3M)` and `ready for jobs: yes`. Nothing is undone (review finding 3) | 0 |
 | `--wait` timeout passed, still waiting | `still waiting (state claimed, last event 14:26)`, next `mu compute invite --wait 7K3M` | — | 10 `still-waiting` |
 
@@ -1049,7 +1058,7 @@ Everything after it is driven from Windows (`wsl.exe -u root --exec …`), which
 starting Windows programs). Root's Python reaches the relay over the network with the distro's resolver, not through
 interop, and the tunnel's egress filter applies to `mu-tunnel.service` only. `mu node host-script` runs before `install`
 (interop still on) and needs nothing from Windows anyway. What does change after the restart: commands as `mu` from
-PowerShell need `--cd ~` (all lines here have it), and μ's disk check reads the drive record instead of `reg.exe`
+PowerShell need `--cd /home/mu` and `mu` by its full path, `/home/mu/.local/bin/mu` (all lines here have both: `wsl … --` runs a non-login shell), and μ's disk check reads the drive record instead of `reg.exe`
 (job-layer §13.4). Doing the restart **before** the Mac's key is authorised also means no workstation key ever works on
 the node while interop is on.
 
