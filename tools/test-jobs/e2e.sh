@@ -35,7 +35,9 @@ must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row
   printf '\n-- %s with fault %s\n' "$1" "$2"
   eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
-  else row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M"; fi
+  else case "$M" in   # a row that could not even start shows nothing about the fault
+    "invite failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
+    *) row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M" ;; esac; fi
   eval "$4"
 }
 jget() { python3 -c 'import json,sys
@@ -159,6 +161,7 @@ invite_new() {   # invite_new NODE [OPTS]: sets INV (the id) and CODE; the invit
   local j
   j="$(ws compute invite "$@" --no-wait --json --show-code stdout 2> "$WORK/logs/invite-$1.err")"
   INV="$(printf '%s' "$j" | jget invite)"; CODE="$(printf '%s' "$j" | jget code)"; CODES="$CODES $CODE"
+  INVERR="$(printf '%s' "$j" | jget error)"
   printf '%s' "$j" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); d.pop("code", None); print(json.dumps(d))' > "$WORK/out/invite-$1-$INV.json"
   [ -n "$INV" ] && [ -n "$CODE" ]
 }
@@ -887,7 +890,7 @@ q_paired() {
 }
 q_typo() {
   local t out rc
-  invite_new q2-pc || { M="invite failed"; return 1; }
+  invite_new q2-pc || { M="invite failed ($INVERR)"; return 1; }
   t="$(printf '%s' "$CODE" | python3 -c 'import sys; c=sys.stdin.read().strip(); i=6; print(c[:i] + ("X" if c[i] != "X" else "Y") + c[i+1:])')"
   out="$(printf '%s\n' "$t" | noderun claim --json 2>/dev/null)"; rc=$?
   M="exit $rc $(printf '%s' "$out" | jget error); the relay: state $(inv_field "$INV" state), wrong claims $(inv_field "$INV" wrong_claims)"
@@ -896,7 +899,7 @@ q_typo() {
 }
 q_wrong() {
   local w out rc
-  invite_new q3-pc || { M="invite failed"; return 1; }
+  invite_new q3-pc || { M="invite failed ($INVERR)"; return 1; }
   w="$(printf '%s' "$CODE" | python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import pair
 i, s = pair.parse_code(sys.stdin.read()); print(pair.format_code(i, ("1" if s[0] != "1" else "2") + s[1:]))' "$ROOT/src")"
   snap_node
@@ -907,7 +910,7 @@ i, s = pair.parse_code(sys.stdin.read()); print(pair.format_code(i, ("1" if s[0]
 }
 q_expired() {
   local out rc mac mrc
-  invite_new q4-pc --ttl 1m || { M="invite failed"; return 1; }
+  invite_new q4-pc --ttl 1m || { M="invite failed ($INVERR)"; return 1; }
   snap_node; sleep 65
   out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
   mac="$(mac_wait "$INV" 10)"; mrc=$?
@@ -917,10 +920,11 @@ q_expired() {
 # q_tampered WHAT: the relay changes the offer (WHAT: its fault); the PC must refuse, set nothing up, abort the invite
 q_tampered() {
   local out rc
-  invite_new "q-$1" || { M="invite failed"; return 1; }
+  invite_new "q-$1" || { M="invite failed ($INVERR)"; return 1; }
   snap_node; rfault "$1"
   out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
   rfault
+  ws compute invite --cancel "$INV" --json > /dev/null 2>&1 || true   # the relay aborted it; the Mac's side waits until told
   M="relay fault $1: the PC exit $rc $(printf '%s' "$out" | jget error); node unchanged: $(node_unchanged && echo yes || echo no); invite $(inv_field "$INV" state), relay client q-$1: $(adm GET "/mu/v1/clients/q-$1" | jget error)"
   [ "$rc" = 5 ] && [ "$(printf '%s' "$out" | jget error)" = pair-integrity ] && node_unchanged && [ "$(inv_field "$INV" state)" = aborted ] \
     && [ "$(adm GET "/mu/v1/clients/q-$1" | jget error)" = no-such-client ]
@@ -936,7 +940,7 @@ q_hooks_gated() {   # security review of ff2c707, 6: an environment fault (WSLEN
 }
 q_answer_key() {
   local out mac mrc pcrc pid
-  invite_new q9-pc || { M="invite failed"; return 1; }
+  invite_new q9-pc || { M="invite failed ($INVERR)"; return 1; }
   snap_node; rfault tamper-answer
   ( printf '%s\n' "$CODE" | PCW=40 noderun run --json > "$WORK/out/pc-$INV.json" 2> "$WORK/logs/pc-$INV.log"; echo $? > "$WORK/out/pc-$INV.rc" ) &
   pid=$!
