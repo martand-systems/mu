@@ -55,7 +55,7 @@ must_fail() {
 for py in $PYS; do
   printf '\n== %s (%s)\n' "$py" "$("$py" -c 'import sys; print(sys.version.split()[0])')"
   if "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
-    py_sections "$py" code vectors fields reflection offer http flow
+    py_sections "$py" code vectors fields reflection offer http flow review
   else
     echo "  skip  Python older than 3.11 (the job commands refuse it): the protocol sections only"
     py_sections "$py" code vectors fields reflection offer http
@@ -80,6 +80,19 @@ for py in $FPYS; do
   must_fail no-rollback "$py" flow
   must_fail code-in-json "$py" flow
   must_fail code-in-argv "$py" flow
+  # the reviews of ff2c707 (docs/design/pairing.md §17)
+  must_fail keep-code "$py" review
+  must_fail trust-finished "$py" review
+  must_fail remove-any-port "$py" review
+  must_fail static-comes-back "$py" review
+  must_fail no-dialog-check "$py" review
+  # the root gate of the test hooks has no fault (a fault would pass through it): a copy of src/ without the gate
+  rm -rf "$ROOT/ungated"; mkdir -p "$ROOT/ungated"; cp -R "$REPO/src/mu" "$ROOT/ungated/mu"
+  "$py" -I -S -c 'import sys; p = sys.argv[1]; s = open(p).read(); t = s.replace("    if not as_root():\n        return True\n", "    return True\n", 1)
+assert t != s; open(p, "w").write(t)' "$ROOT/ungated/mu/pair.py"
+  out="$(MU_TEST_SRC="$ROOT/ungated" "$py" -I -S "$HERE/unit.py" review 2>&1)"
+  if printf '%s\n' "$out" | grep -q '^FAIL security 6'; then ok "must-fail: review with pair.py's root gate taken out (security 6 failed, as it must)"
+  else bad "must-fail: review with the root gate taken out: security 6 did not fail" "$(printf '%s\n' "$out" | grep 'security 6')"; fi
 done
 
 printf '\n== the dispatcher (bin/mu under /bin/bash %s) and mu node host-script\n' "$(/bin/bash -c 'echo $BASH_VERSION')"

@@ -248,6 +248,22 @@ def t_classify():
         except proto.MuError as e:
             got = (e.code, e.error)
         check("ssh exit 255 with status %s and %r -> exit %d (%s)" % (st and st[1], err[:40], code, name), got == (code, name), got)
+    # the remedies name the way the node was paired (usability review of ff2c707, 13)
+    def hint_of(c, st, err):
+        try:
+            jobs.classify_255(c, err, st, False)
+        except proto.MuError as e:
+            return e.hint
+        return ""
+    inv = dict(conf, paired_via="invite 7K3M")
+    check("relay-credential, a node paired by invite: the owner logs in again (login-bundle)",
+          "login-bundle avi-mac | mu relay login --stdin" in hint_of(inv, ("refused", "relay-credential", "1", ""), ""))
+    check("relay-credential, a node paired by hand: mu compute add", "mu compute add" in hint_of(
+        conf, ("refused", "relay-credential", "1", ""), ""))
+    check("host-key, a node paired by invite: mu compute invite office-pc --replace", "mu compute invite office-pc "
+          "--replace" in hint_of(inv, ("ok", "connected", "1", ""), "Host key verification failed."))
+    check("host-key, a node paired by hand: mu compute add", "mu compute add office-pc --host-key" in hint_of(
+        conf, ("ok", "connected", "1", ""), "Host key verification failed."))
     for rc, body, code, err in ((65, '{"ok":false,"error":"protocol-mismatch","hint":"x"}', 5, "protocol-mismatch"),
                                 (66, '{"ok":false,"error":"no-such-job"}', 9, "no-such-job"),
                                 (69, '{"ok":false,"error":"disk-low"}', 6, "disk-low"),

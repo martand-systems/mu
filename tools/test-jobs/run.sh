@@ -206,7 +206,7 @@ eq "mu status outside a project: exit 2" "$rc" 2
 has "  says it is not a project" "$out" "not a μ project"
 out="$(cd "$ROOT/cwd" && mu status 20261114-101500-k3f9qa --json 2>&1)"; rc=$?
 eq "mu status <job> with no node paired: exit 9" "$rc" 9
-has "  --json carries the exit code and what to do next" "$out" '"next": "mu compute add'
+has "  --json carries the exit code and what to do next" "$out" '"next": "pair one: mu compute invite'
 out="$(cd "$ROOT/cwd" && mu submit --on local -- true 2>&1)"; rc=$?
 eq "mu submit --on local: exit 2 (stage 2)" "$rc" 2
 out="$(cd "$ROOT/cwd" && mu log not-an-id 2>&1)"; rc=$?

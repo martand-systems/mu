@@ -9,8 +9,10 @@ Secrets (the admin token, the relay password, the backup, an invite's code) are 
 run record, and never in --json output; the code reaches stdout only at a terminal or with --show-code stdout.
 
 Test hooks: MU_SECURITY (instead of /usr/bin/security), MU_OSASCRIPT (instead of osascript), MU_PAIR_HELLO_S (seconds the
-hello through the relay is tried, default 180), MU_PAIR_FAULT (pair.py's faults, and here: no-rollback, code-in-json,
-skip-answer-mac, trust-relay-fields), MU_PAIR_TEST_HTTP (pair.py).
+hello through the relay is tried, default 180), MU_DIALOG_CHECK_S (how long a failing osascript is waited for, default
+1), MU_PAIR_FAULT (pair.py's faults, announced on stderr; here also: no-rollback, code-in-json, skip-answer-mac,
+trust-relay-fields, keep-code, remove-any-port, static-comes-back, trust-finished, no-dialog-check), MU_PAIR_TEST_HTTP
+(pair.py).
 """
 import base64
 import json
@@ -133,20 +135,34 @@ def admin_token(conf):
     return t
 
 
-def store_code(conf, iid, code, d):
+def store_keys(conf, iid, code, k, d):
+    """What --wait needs later: the two MAC keys, never the code (security review of ff2c707, finding 5). Any process
+    of this user can read an item that /usr/bin/security wrote without a prompt; K_ic and K_ci cannot claim the invite
+    (that needs K_claim), so once the dialog is shown the code exists only there."""
+    value = code if fault("keep-code") else "k1:%s:%s" % (k["ic"].hex(), k["ci"].hex())
     if conf.get("secret_store") == "file":
-        durable.write_durable(os.path.join(d, "code"), code + "\n", 0o600)
+        durable.write_durable(os.path.join(d, "keys"), value + "\n", 0o600)
     else:
-        kc_set(INVITE_SERVICE, "%s/%s" % (host_of(conf), iid), code)
+        kc_set(INVITE_SERVICE, "%s/%s" % (host_of(conf), iid), value)
 
 
-def read_code(conf, iid, d):
+def read_keys(conf, iid, d):
+    """{"ic", "ci"} of invite IID, or None. (An item of v2026.11.8 holds the code itself: its keys are derived.)"""
     if conf.get("secret_store") == "file":
-        return read_file(os.path.join(d, "code"))
-    return kc_get(INVITE_SERVICE, "%s/%s" % (host_of(conf), iid))
+        v = read_file(os.path.join(d, "keys")) or read_file(os.path.join(d, "code"))
+    else:
+        v = kc_get(INVITE_SERVICE, "%s/%s" % (host_of(conf), iid))
+    m = re.match(r"^k1:([0-9a-f]{64}):([0-9a-f]{64})$", v or "")
+    if m:
+        return {"ic": bytes.fromhex(m.group(1)), "ci": bytes.fromhex(m.group(2))}
+    parsed = pair.parse_code(v or "")
+    if parsed and parsed[0] == iid:
+        return pair.keys(parsed[1], iid)
+    return None
 
 
 def drop_code(conf, iid, d):
+    unlink(os.path.join(d, "keys"))
     unlink(os.path.join(d, "code"))
     if conf.get("secret_store") != "file":
         kc_del(INVITE_SERVICE, "%s/%s" % (host_of(conf), iid))
@@ -204,7 +220,8 @@ class Admin:
                           "--stdin" % self.conf.get("workstation", "<this computer>"))
         if st == 404 and e in ("not-found", "relay-error") and path.startswith("/mu/v1/") and path.count("/") <= 3:
             raise MuError(proto.EXIT_REFUSED, "pairing-unsupported", "the relay has no pairing service (%s answered "
-                          "404)" % path, "see docs/design/pairing.md §11 (the Dokploy edit)")
+                          "404)" % path, "docs/design/first-job-checklist.md §1 (the Dokploy edit); curl -sS %s/mu/v1/ "
+                          "must say \"pairing\":true" % self.conf["url"])
         if e in ("store-unwritable", "store-damaged"):
             raise MuError(proto.EXIT_REFUSED, "pairing-unsupported", "the relay's pairing service is not usable (%s)"
                           % e, "mu relay status; relay/README.md (the pairing service, its volume)")
@@ -224,7 +241,8 @@ def service_info(url):
                       "check this computer's network and retry")
     if st != 200 or ans.get("service") != "mu-relay":
         raise MuError(proto.EXIT_REFUSED, "pairing-unsupported", "the relay has no pairing service (GET /mu/v1/ "
-                      "answered %d)" % st, "see docs/design/pairing.md §11 (the Dokploy edit)")
+                      "answered %d)" % st, "docs/design/first-job-checklist.md §1 (the Dokploy edit); curl -sS %s/mu/v1/ must "
+                      "say \"pairing\":true" % url)
     return ans
 
 
@@ -490,10 +508,6 @@ def hhmm(t):
     return time.strftime("%H:%M", time.localtime(t))
 
 
-def iso_local(t):
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(t))
-
-
 def pc_lines(conf, node):
     nconf = jobs.read_conf(os.path.join(jobs.node_dir(node), "node.conf")) or {}
     second = PC_PAIR_INSTALLED if nconf.get("host_script") == "installed" else PC_PAIR
@@ -503,7 +517,7 @@ def pc_lines(conf, node):
 
 
 def wait_command(iid):
-    return "mu compute invite --wait %s --json --timeout 540" % iid
+    return "mu compute invite --wait %s --json --timeout 400" % iid
 
 
 def show_code_mode(a):
@@ -524,17 +538,27 @@ def show_code_mode(a):
 
 
 def show_dialog(node, code, until):
-    """osascript reads the script from stdin, so the code is in no argument list. The dialog stays until OK or 30 min."""
-    script = ('display dialog "Pairing code for compute node %s (type it at the PC when it asks):\\n\\n%s\\n\\nvalid '
-              'until %s" with title "mu compute invite" buttons {"OK"} default button 1 giving up after 1800\n'
-              % (node, code, hhmm(until)))
+    """osascript reads the script from stdin, so the code is in no argument list. The dialog stays until OK or the
+    invite's end. An osascript that fails within a second (no GUI session: ssh, a locked screen) is an error: the code
+    would go nowhere (usability review, 3). -> None, or the MuError to raise after the invite is cancelled."""
+    script = ('display dialog "Pairing code for compute node %s. Keep this open until the PC says \\"code '
+              'accepted\\":\\n\\n%s\\n\\nvalid until %s" with title "mu compute invite" buttons {"OK"} default button 1 '
+              'giving up after %d\n' % (node, code, hhmm(until), max(60, int(until - time.time()))))
+    hint = "run it in Terminal on the Mac, or --show-code stdout"
     try:
         p = subprocess.Popen([os.environ.get("MU_OSASCRIPT") or "osascript"], stdin=subprocess.PIPE,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         p.stdin.write(script.encode("utf-8"))
         p.stdin.close()
     except OSError as e:
-        raise MuError(1, "no-dialog", "could not show the code in a dialog (%s)" % e, "--show-code stdout")
+        return MuError(1, "no-dialog", "the dialog with the code could not be shown (%s)" % e, hint)
+    if fault("no-dialog-check"):
+        return None
+    time.sleep(float(os.environ.get("MU_DIALOG_CHECK_S") or 1.0))
+    rc = p.poll()
+    if rc not in (None, 0):
+        return MuError(1, "no-dialog", "the dialog with the code could not be shown (osascript exit %d)" % rc, hint)
+    return None
 
 
 def keygen(path, comment):
@@ -592,8 +616,8 @@ def create_errors(e):
 def cmd_invite(a):
     if a.wait or a.cancel:
         iid = (a.wait or a.cancel).upper()
-        if not INVITE_ID.match(iid):
-            raise MuError(proto.EXIT_USAGE, "bad-invite", "'%s' is not an invite id (4 symbols)" % iid,
+        if not INVITE_ID.match(iid):   # never echoed: it may be a whole code typed in the wrong place
+            raise MuError(proto.EXIT_USAGE, "bad-invite", "not an invite id (4 symbols)",
                           "the id is the first group of the code, e.g. 7K3M")
         return cancel_invite(a, iid) if a.cancel else wait_invite(a, iid)
     node = a.node
@@ -604,6 +628,11 @@ def cmd_invite(a):
         raise MuError(proto.EXIT_USAGE, "bad-node-name", "node name '%s': use [a-z0-9][a-z0-9-]{0,31}, not local or auto"
                       % node, "e.g. office-pc")
     conf = load_conf()
+    pending = [i for i, r in pending_invites() if r.get("node") == node]
+    if pending and not a.again:
+        raise MuError(proto.EXIT_USAGE, "invite-pending", "invite %s for %s is still waiting" % (pending[0], node),
+                      "mu compute invite --wait %s, or --cancel %s (or --again for a second code)" % (
+                          pending[0], pending[0]), invite=pending[0])
     if os.path.exists(jobs.node_dir(node)) and not a.replace:
         raise MuError(proto.EXIT_USAGE, "exists", "%s is already paired" % node, "to pair it again (new host key or new "
                       "key here): mu compute invite %s --replace" % node)
@@ -660,26 +689,33 @@ def cmd_invite(a):
                "expires": now + ttl, "relay": conf["url"], "offer": offer,
                "offer_digest": pair.digest("offer", offer, pair.NODE_OFFER), "state": inv.get("state", "created")}
         durable.write_durable(os.path.join(d, "invite.json"), json.dumps(rec, sort_keys=True) + "\n", 0o600)
-        store_code(conf, iid, code, d)
+        store_keys(conf, iid, code, k, d)
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
     lines = pc_lines(conf, node)
     shown = mode == "stdout" or fault("code-in-json")
     if mode == "dialog":
-        show_dialog(node, code, now + ttl)
+        err = show_dialog(node, code, now + ttl)
+        if err:
+            abort_quietly(adm, iid, "cancelled")
+            finish_cleanup(conf, iid, d)
+            raise err
     if a.no_wait:
         if a.json:
             proto.emit_json({"ok": True, "invite": iid, "node": node, "kind": "node", "port": port,
                              "code": code if shown else None, "code_shown": "stdout" if shown else "dialog",
-                             "expires": iso_local(now + ttl), "pc_commands": lines, "wait_command": wait_command(iid)})
+                             "expires": proto.iso(now + ttl), "pc_commands": lines, "wait_command": wait_command(iid)})
         else:
             intro(conf, node, iid, port, now + ttl, lines, code if shown else None)
             print("Then: mu compute invite --wait %s" % iid)
         return 0
-    if a.json:
-        out.line("invite %s for %s (port %d), valid until %s; the code is in the dialog%s" % (
-            iid, node, port, hhmm(now + ttl), "" if not shown else " and below"))
+    if a.json:   # the progress (stderr) carries what the owner needs at the PC (usability review, 1)
+        out.line("invite %s for compute node %s (relay port %d), valid until %s" % (iid, node, port, hhmm(now + ttl)))
+        out.line("At the office PC, in Terminal (Admin):")
+        for line in lines:
+            out.line("  " + line)
+        out.line(("Pairing code: %s" % code) if shown else "Pairing code: in the dialog on this Mac's screen")
     else:
         intro(conf, node, iid, port, now + ttl, lines, code if shown else None)
     return wait_invite(a, iid, out)
@@ -701,6 +737,7 @@ EVENT_WORDS = {
     "claimed": "claimed by the PC{from}; the code matched",
     "claim-resumed": "the PC resumed its claim{from}",
     "claim-refused": "another machine used the code{from}: the invite is contested",
+    "claim-refused+contest": "another machine used the code{from}; the PC's contest arrived",
     "answered": "the PC's answer arrived",
     "accepted": "this computer accepted the PC's answer",
     "finished": "finished",
@@ -743,9 +780,38 @@ def load_invite(iid):
     except (OSError, ValueError):
         pass
     if not isinstance(rec, dict):
+        node = installed_by(iid)
+        if node:   # finished and cleaned up already (a run killed after its finish): the answer is the same
+            raise Finished(node)
         raise MuError(proto.EXIT_NO_SUCH, "no-such-invite", "this computer has no invite %s in progress" % iid,
                       "mu compute invite <node> makes a new one")
     return d, rec
+
+
+class Finished(Exception):
+    def __init__(self, node):
+        Exception.__init__(self, node)
+        self.node = node
+
+
+def pending_invites():
+    """[(id, invite.json)] of this computer's invites still in progress (not expired by their own clock)."""
+    out = []
+    try:
+        names = sorted(os.listdir(invites_dir()))
+    except OSError:
+        return out
+    for n in names:
+        if not INVITE_ID.match(n):
+            continue
+        try:
+            with open(os.path.join(invites_dir(), n, "invite.json"), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and (pair.int_or_none(rec.get("expires")) or 0) > time.time():
+            out.append((n, rec))
+    return out
 
 
 def finish_cleanup(conf, iid, d):
@@ -755,7 +821,11 @@ def finish_cleanup(conf, iid, d):
 
 def cancel_invite(a, iid):
     conf = load_conf()
-    d, rec = load_invite(iid)
+    try:
+        d, rec = load_invite(iid)
+    except Finished as f:
+        raise MuError(proto.EXIT_USAGE, "finished", "invite %s already paired %s: nothing to cancel" % (iid, f.node),
+                      "mu compute remove %s, to undo the pairing" % f.node)
     try:
         Admin(conf).call("POST", "/mu/v1/invites/%s/abort" % iid, {"reason": "cancelled"})
     except MuError as e:
@@ -779,17 +849,23 @@ def abort_quietly(adm, iid, reason):
 def wait_invite(a, iid, out=None):
     out = out or Out(a.json)
     conf = load_conf()
-    d, rec = load_invite(iid)
-    code = read_code(conf, iid, d)
-    parsed = pair.parse_code(code or "")
-    if not parsed or parsed[0] != iid:
-        raise MuError(1, "code-missing", "the code of invite %s is no longer stored on this computer" % iid,
+    try:
+        d, rec = load_invite(iid)
+    except Finished as f:
+        if a.json:
+            proto.emit_json({"ok": True, "node": f.node, "state": "finished", "invite": iid})
+        else:
+            print("paired %s (invite %s finished earlier)" % (f.node, iid))
+        return 0
+    k = read_keys(conf, iid, d)
+    if not k:
+        raise MuError(1, "code-missing", "the keys of invite %s are no longer stored on this computer" % iid,
                       "mu compute invite --cancel %s, then a new invite" % iid)
-    k = pair.keys(parsed[1], iid)
     adm = Admin(conf, retry_s=5)
     node = rec["node"]
     timeout = a.timeout if a.timeout is not None else None
     t_end = time.time() + timeout if timeout is not None else None
+    a._t_end = t_end
     since, seen, wrong, backoff = 0, 0, 0, 5
     caf = caffeinate()
     inv = {}
@@ -818,14 +894,20 @@ def wait_invite(a, iid, out=None):
                 raise
             since = pair.int_or_none(inv.get("version")) or since
             events = inv.get("events") if isinstance(inv.get("events"), list) else []
-            for ev in events[seen:]:
-                if isinstance(ev, dict):
-                    if ev.get("event") == "wrong-claim":
-                        wrong += 1
-                    t = event_text(ev, wrong, iid)
-                    if t and ev.get("event") not in ("finished", "accepted"):
-                        at = pair.int_or_none(ev.get("at")) or time.time()
-                        out.line("  %s  %s" % (time.strftime("%H:%M:%S", time.localtime(at)), t))
+            new = [ev for ev in events[seen:] if isinstance(ev, dict)]
+            names = [ev.get("event") for ev in new]
+            both = "claim-refused" in names and "contest" in names   # one event for the owner, one line
+            for ev in new:
+                if ev.get("event") == "wrong-claim":
+                    wrong += 1
+                if both and ev.get("event") == "contest":
+                    continue
+                if both and ev.get("event") == "claim-refused":
+                    ev = dict(ev, event="claim-refused+contest")
+                t = event_text(ev, wrong, iid)
+                if t and ev.get("event") not in ("finished", "accepted"):
+                    at = pair.int_or_none(ev.get("at")) or time.time()
+                    out.line("  %s  %s" % (time.strftime("%H:%M:%S", time.localtime(at)), t))
             seen = max(seen, len(events))
             state = inv.get("state")
             if inv.get("contested") or inv.get("contest"):
@@ -862,7 +944,8 @@ def still_waiting(a, iid, rec, state, last=None):
     if a.json:
         proto.emit_json({"ok": False, "exit": EXIT_STILL_WAITING, "error": "still-waiting", "message": msg,
                          "next": wait_command(iid), "invite": iid, "node": rec.get("node"),
-                         "state": pair.clean(str(state), 20)})
+                         "state": pair.clean(str(state), 20),
+                         "pc_commands": pc_lines(load_conf(), rec["node"]) if rec.get("node") else []})
     else:
         sys.stderr.write("mu: %s\n    next: mu compute invite --wait %s\n" % (msg, iid))
     return EXIT_STILL_WAITING
@@ -881,9 +964,30 @@ def contested(a, conf, adm, iid, d, rec, inv, k):
                   "make a new invite: mu compute invite %s" % node, contest_verified=verified)
 
 
+def installed_by(iid):
+    """The node this computer installed from invite IID (its node.conf says paired_via "invite IID"), or None."""
+    root = jobs.compute_root()
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return None
+    for n in names:
+        if n.startswith(".") or not proto.NODE_NAME.match(n):
+            continue
+        if (jobs.read_conf(os.path.join(root, n, "node.conf")) or {}).get("paired_via") == "invite " + iid:
+            return n
+    return None
+
+
 def already_finished(a, conf, iid, d, rec, inv):
+    """The relay says finished. That is this computer's own finish (a run stopped after it) only if this computer
+    installed the node from this invite; the relay's word alone is not a pairing (security review, finding 7)."""
     finish_cleanup(conf, iid, d)
     node = rec["node"]
+    if installed_by(iid) != node and not fault("trust-finished"):
+        raise MuError(proto.EXIT_REFUSED, "not-installed", "the relay says invite %s finished, but this computer "
+                      "installed nothing from it: %s is not paired here" % (iid, node),
+                      "make a new invite: mu compute invite %s --replace" % node, invite=iid, node=node)
     if a.json:
         proto.emit_json({"ok": True, "node": node, "state": "finished", "invite": iid})
     else:
@@ -943,7 +1047,7 @@ def complete(a, conf, adm, iid, d, rec, inv, k, out):
         installed = True
         out.line("  %s  %s pinned; this computer's relay client %s may now reach port %s" % (
             time.strftime("%H:%M:%S"), node, conf["workstation"], rec["port"]))
-        outcome, hello_ans, err, t = try_hello(node)
+        outcome, hello_ans, err, t = try_hello(node, getattr(a, "_t_end", None))
         confirm = {"id": iid, "offer_digest": rec["offer_digest"], "answer_digest": ansd, "outcome": outcome}
         adm.call("POST", "/mu/v1/invites/%s/finish" % iid, {
             "confirm": confirm, "confirm_mac": pair.mac(k["ic"], pair.msg_bytes("confirm", confirm, pair.CONFIRM))})
@@ -1011,10 +1115,14 @@ def install_node(conf, rec, d, host_key, iid):
     return tmpd
 
 
-def try_hello(node):
-    """hello through the relay on a fresh connection every 5 s (the PC's tunnel connects after its answer).
+def try_hello(node, t_end=None):
+    """hello through the relay on a fresh connection every 5 s (the PC's tunnel connects after its answer), for 180 s,
+    or until --timeout's end (at least 30 s): one call fits Claude Code's 600 s Bash limit (usability review, 2).
     -> (outcome, hello answer, last error, seconds of the good call)."""
-    end = time.time() + float(os.environ.get("MU_PAIR_HELLO_S") or 180)
+    now = time.time()
+    end = now + float(os.environ.get("MU_PAIR_HELLO_S") or 180)
+    if t_end is not None:
+        end = min(end, max(t_end, now + 30))
     reason, err = "timeout", ""
     while True:
         conf = jobs.load_node(node)
@@ -1052,7 +1160,21 @@ def remove_relay_client(name, node_conf):
             raise
         if c.get("role") != "compute":
             return "kept", "the relay's client %s is not a compute client" % name
+        rp = str(node_conf.get("relay_port") or jobs.DEFAULT_PORT)
+        want = int(rp) if rp.isdigit() else None
+        if not fault("remove-any-port") and (not want or c.get("ports") != [want]):
+            return "kept", "the relay's client %s has port(s) %s, this node uses %s: not this node's client" % (
+                name, "+".join(str(p) for p in c.get("ports") or []) or "none", want or "no port")
+        overrides = bool(c.get("overrides_static"))
         removed = remove_client(conf, name, adm)
+        if removed == "dynamic" and overrides and not fault("static-comes-back"):
+            # the dynamic client replaced a static one of its name (--replace): the static entry is back now; it goes
+            # too (a tombstone), or the PC could still connect with the old password (security review, finding 3)
+            try:
+                removed = "dynamic and static (" + remove_client(conf, name, adm) + ")"
+            except MuError as e:
+                return "partly", ("the dynamic client %s was deleted, but the static one of that name is back and "
+                                  "could not be removed (%s): mu relay remove %s" % (name, e.message, name))
         return "removed", removed
     except MuError as e:
         return "failed", e.message
@@ -1106,6 +1228,7 @@ def invite_parser():
     p.add_argument("--new-key", action="store_true", default=False, help="with --replace: a new key on this computer")
     p.add_argument("--ttl", metavar="DUR", help="how long the PC has to claim it (default 30m; 1m to 60m)")
     p.add_argument("--no-wait", action="store_true", help="print the invite and return (then --wait ID)")
+    p.add_argument("--again", action="store_true", help="make a second invite while one for this node waits")
     p.add_argument("--wait", metavar="ID", help="continue waiting for invite ID")
     p.add_argument("--cancel", metavar="ID", help="cancel invite ID")
     p.add_argument("--timeout", type=float, metavar="S", help="stop waiting after S seconds (exit 10; the invite stays)")

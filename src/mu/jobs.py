@@ -113,7 +113,7 @@ def load_node(name):
     conf = read_conf(os.path.join(node_dir(name), "node.conf"))
     if conf is None:
         raise MuError(proto.EXIT_NO_SUCH, "no-such-node", "no compute node '%s' is paired with this computer" % name,
-                      "mu compute list; pair one with: mu compute add %s --host-key ... --relay ..." % name)
+                      "mu compute list; pair one: mu compute invite %s (docs/design/first-job-checklist.md)" % name)
     conf["_dir"] = node_dir(name)
     return conf
 
@@ -129,8 +129,7 @@ def pick_node(on):
         return load_node(nodes[0])
     if not nodes:
         raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired with this computer",
-                      "mu compute add <node> --host-key '...' --relay URL --relay-fingerprint FP --relay-user NAME "
-                      "--relay-password-stdin")
+                      "pair one: mu compute invite <node> (docs/design/first-job-checklist.md)")
     raise MuError(proto.EXIT_USAGE, "which-node", "%d nodes are paired (%s): say which one" % (len(nodes), ", ".join(nodes)),
                   "--on <node>")
 
@@ -548,10 +547,25 @@ RELAY_REASONS = {
 }
 
 
+def by_invite(conf):
+    """Was this node paired by one code (mu compute invite)? Its remedies differ from a node paired by hand."""
+    return str((conf or {}).get("paired_via", "")).startswith("invite ")
+
+
+def pair_again(conf):
+    n = (conf or {}).get("name") or "<node>"
+    if by_invite(conf):
+        return "mu compute invite %s --replace" % n
+    return "mu compute remove %s; mu compute add %s --host-key ..." % (n, n)
+
+
 def classify_255(conf, err, st, muxed):
     n, u, p, url = conf["name"], conf.get("relay_user"), conf.get("relay_port"), conf.get("relay_url")
     if st and st[0] in ("refused", "unreachable") and st[1] in RELAY_REASONS:
         msg, hint = RELAY_REASONS[st[1]]
+        if st[1] == "relay-credential" and by_invite(conf):   # the password came from mu relay login
+            hint = ("the owner logs in again in Terminal (not through Claude Code): relay/gen-credentials.sh "
+                    "login-bundle {u} | mu relay login --stdin")
         code = proto.EXIT_REFUSED if st[0] == "refused" else proto.EXIT_UNREACHABLE
         raise MuError(code, st[1], msg.format(n=n, u=u, p=p, url=url) + " [%s]" % st[1],
                       hint.format(n=n, u=u, p=p, url=url), reason=st[1], node=n)
@@ -563,8 +577,8 @@ def classify_255(conf, err, st, muxed):
         raise MuError(proto.EXIT_REFUSED, "host-key", "%s's host key differs from the key pinned at pairing. Never "
                       "retried; nothing was sent [host-key]" % n,
                       "tell the user. If the node was reinstalled on purpose, compare the key the PC shows (%s "
-                      "mu-wsl2-distro host-key) and pair again: mu compute remove %s; mu compute add %s --host-key ..."
-                      % (PC_ROOT, n, n), reason="host-key", node=n)
+                      "mu-wsl2-distro host-key) and pair again: %s" % (PC_ROOT, pair_again(conf)),
+                      reason="host-key", node=n)
     if "Permission denied (publickey" in err:
         ws = conf.get("workstation") or u
         pub, fp = "<public key: mu compute list --json>", "?"
@@ -641,6 +655,9 @@ def node_error(rc, text, name, job_id=None):
     msg, hint = NODE_REFUSALS.get(err, ("{n} refused the request (%s)" % err, "the node's μ may differ from this "
                                          "one: mu compute status {n}; mu update on the older side"))
     j = job_id or "<job-id>"
+    if err == "key-revoked":
+        hint = "tell the user; pairing again: " + pair_again(
+            read_conf(os.path.join(node_dir(name), "node.conf")) or {"name": name}).replace("{", "{{").replace("}", "}}")
     extra = {k: proto.clean_obj(ans[k]) for k in NODE_EXTRA_KEYS if k in ans}
     if said:
         extra["node_message"] = said
@@ -898,7 +915,7 @@ def cmd_compute_list(a):
     if a.json:
         proto.emit_json({"ok": True, "nodes": rows})
     elif not rows:
-        print("no compute node is paired: mu compute add <node> ...")
+        print("no compute node is paired: pair one with mu compute invite <node> (docs/design/first-job-checklist.md)")
     else:
         for r in rows:
             ls = r["last_status"] or {}
@@ -923,8 +940,7 @@ def cmd_compute_status(a):
     names = [a.node] if a.node else paired_nodes()
     if not names:
         raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired",
-                      "mu compute add <node> --host-key '...' --relay URL --relay-fingerprint FP --relay-user NAME "
-                      "--relay-password-stdin (docs/design/first-job-checklist.md)")
+                      "pair one: mu compute invite <node> (docs/design/first-job-checklist.md)")
     results, worst = [], 0
     for n in names:
         conf = load_node(n)
