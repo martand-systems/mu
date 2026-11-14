@@ -7,8 +7,9 @@
 - **Name:** μ, written `mu` wherever only ASCII works (CLI, repo, files). Icon: the μ glyph.
 
 **Where things stand (2026-11-14):** the four spikes have run and there are no more (§16). The toolchain is installed
-on the laptop and the office PC (release v2026.11.6, auto-update on), the office PC runs as an always-on WSL2 node,
-and the relay is deployed. No job has run on the office PC yet: the job layer is being built (§6.4a). The phase
+on the laptop and the office PC (auto-update on), the office PC runs as an always-on WSL2 node, and the relay is
+deployed. The first job layer is built and released in v2026.11.7 (§6.4a, `docs/design/job-layer.md`); the laptop
+runs it. No job has run on the office PC yet: its node side is set up in one visit (`docs/design/first-job-checklist.md`). The phase
 table and the path to the first remote job are in §13. Where this plan describes something not built or not measured
 yet, it says so; measurements are in `docs/verification/`.
 
@@ -992,9 +993,10 @@ G-code). That is a JATAYU data issue, reported to the project, not a toolchain d
 
 **Path to the first remote job** (the shortest list of what is left before a job runs on `office-pc`):
 
-1. **Finish the job layer's first stage (P4).** In progress on branch `job-layer`; tested in CI, where the GitHub
-   runner stands in for the distro. Needs nothing from the owner.
-2. **Merge it and release it.** Both machines take the release (auto-update, or `mu update`).
+1. **Finish the job layer's first stage (P4).** Done 2026-11-14: built, reviewed (33 findings fixed) and tested in
+   CI, where the GitHub runner stands in for the distro (job-layer run 43547849592, linux-install run 43549192012).
+2. **Merge it and release it.** Done: v2026.11.7. The laptop runs it; the office PC takes it by auto-update (or
+   `mu update` at the visit).
 3. **One visit to the office PC:**
    - run the host script once more: it adds `sshd` with its gate, the tunnel service and `/srv/mu` (P5, P6);
    - give the PC its relay credential, and authorise the laptop's public key; compare the fingerprints;
@@ -1014,7 +1016,7 @@ the JATAYU model), then P7.
 | **P1 macOS full install** | `mu` repo, locks, `apps.toml`, wrappers, CLI (`run`, `test`, `doctor`, `context`), the rebuilt benchmarks, the installer, install to `~/Library/Mu` | A fresh install on the laptop passes all benchmarks offline. `mu` is on `PATH` from any folder | **Done** (S1, installer v2 record; v2026.11.6 runs on the laptop). `mu context` is not built; it moves to P2 |
 | **P2 Claude Code plugin and project format** | Plugin (skills, commands, hooks), `mu new`, `mu.toml`, org submodule, run records, `mu check` | Claude Code in a fresh `mu new` project designs and analyses a test part end to end using only mu commands, with run records produced | **Partly.** Built: the `mu.toml` pin, `mu pin`, `mu link`, the `cad` skill, `claude/CLAUDE-toolchain.md`. Not built: the plugin manifest, the other skills, commands, hooks, `mu new`, `mu context`, `mu check`. Run records start with the job layer. The acceptance test has not been run |
 | **P3 Linux compute recipe** | linux-64 locks and the Linux path of the installer, tested in fresh Ubuntu containers; `mu release` checklist; first tag | A fresh linux-64 build passes the benchmarks and matches the macOS results | **Done** (S2): one installer for macOS and Linux, 6/6 in CI on both Ubuntu images and on the office PC. The `mu release` checklist is not built (§9) |
-| **P4 Job layer** (was "Agent and job protocol") | First stage of §6.4a: `compute add/list/status/remove`, `submit/status/log/fetch/cancel`, upload as a git snapshot, the runner and its queue, run records. Second stage: `auto` fallback, restart recovery on the PC | Works end to end in CI against a node on the GitHub runner, through the relay and Traefik pair from S4 | **In progress** on branch `job-layer` |
+| **P4 Job layer** (was "Agent and job protocol") | First stage of §6.4a: `compute add/list/status/remove`, `submit/status/log/fetch/cancel`, upload as a git snapshot, the runner and its queue, run records. Second stage: `auto` fallback, restart recovery on the PC | Works end to end in CI against a node on the GitHub runner, through the relay and Traefik pair from S4 | **Built** (stage 1), released in v2026.11.7. Proven in CI only; the first job on the PC is pending (checklist) |
 | **P5 Windows compute node** (was "installer") | The WSL2 host scripts: distro, startup task, `.wslconfig`, clean stop before shutdown; then the job layer's pieces on the node | One run on the office PC (plus one reboot) leaves a node that passes the benchmarks and survives a reboot with nobody logged in | **Mostly done.** The host scripts are on `main` and installed on the PC: every status check passes, benchmarks 6/6, 2 h 01 min after a reboot with nobody signed in (S3). Pending: the restart tests and the first Windows Update restart; `sshd`, the gate, the tunnel service and the authorised key (one run of the host script, with P4). Remote management commands are not built |
 | **P6 Relay (Stage A)** | `relay/Dockerfile` (chisel) and `relay/compose.yaml`, built by Dokploy, Dokploy project `mu` with the `relay` service and domain on 195.201.236.190 (`relay.martand.systems`, HTTPS); chisel client on the node and in the mu CLI; pairing | The laptop runs jobs on `office-pc` **from home**. With the PC off, jobs fall back to `local` without errors | **Relay deployed** (2026-11-14) and checked from the laptop (§7.5). Pending with P4: the tunnel clients and pairing. The LAN-direct path is deferred (§6.3). The acceptance test has not been run |
 | **P7 Org profile and JATAYU migration** | `mu-org-profile`, `jatayu` repo, steps M1–M6 | JATAYU frame results reproduce the baseline on both nodes within tolerance. The old folder is archived | **Partly** (§12). The `jatayu` repo exists and pins v2026.11.4; the results reproduce on `local` (M5). On `office-pc`: not done. `mu-org-profile` and M6: not verified here |

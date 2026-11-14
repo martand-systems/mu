@@ -155,14 +155,15 @@ is building, in the phases P0 to P8 of [`docs/PLAN.md`](docs/PLAN.md) §13.
 |---|---|
 | P0 prerequisites, P1 macOS install, P3 Linux recipe | Done |
 | P2 Claude Code plugin and project format | Partly: `mu.toml` pins, `mu pin`, `mu link` and the `cad` skill exist. The rest of the plugin, `mu new`, `mu context` and `mu check` are not built |
-| P4 job layer | In progress on branch `job-layer`: OpenSSH inside the relay tunnel (`mu compute …`, `mu submit / status / log / fetch / cancel`), tested in CI. Design: `docs/design/job-layer.md`, which arrives with it |
+| P4 job layer | Stage 1 built and released in v2026.11.7: OpenSSH inside the relay tunnel (`mu compute …`, `mu submit / status / log / fetch / cancel`), proven in CI. Design: [`docs/design/job-layer.md`](docs/design/job-layer.md). Not yet run on the PC |
 | P5 Windows compute node | Mostly done ([`install/hosts/wsl2/`](install/hosts/wsl2/README.md)). The restart tests, and the job layer's pieces on the PC, are pending |
 | P6 relay | Deployed ([`relay/`](relay/README.md)). The tunnel clients and pairing come with P4 |
 | P7 org profile and JATAYU migration | Partly: the `jatayu` repo runs on μ and reproduces its baseline on the laptop. Not yet on the office PC |
 | P8 hardening | Not started |
 
-**Next:** finish the job layer, set up its node side on the office PC in one visit (with the pending restart
-tests), then run the first remote job, `fea-cantilever` on `office-pc`. The list is in `docs/PLAN.md` §13.
+**Next:** set up the job layer's node side on the office PC in one visit, following
+[`docs/design/first-job-checklist.md`](docs/design/first-job-checklist.md) (the pending restart tests can follow),
+then run the first remote job, `fea-cantilever` on `office-pc`. The list is in `docs/PLAN.md` §13.
 
 ## Known issues
 
