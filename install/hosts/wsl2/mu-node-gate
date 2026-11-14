@@ -13,6 +13,8 @@
 #
 # A refused request prints one JSON line and exits 64. The key's name comes from sshd (ExposeAuthInfo yes writes the
 # key that logged in to $SSH_USER_AUTH) and the root-owned key file, never from anything a client or a job can set.
+# A key that is no longer in that file (revoked) gets nothing, even over a connection opened before the revoke: sshd
+# checks the file only when a connection logs in, and a multiplexed connection opens new sessions without that.
 set -fu                                   # -f: the unquoted split below must never glob
 PATH=/usr/local/bin:/usr/bin:/bin; export PATH
 LC_ALL=C; export LC_ALL
@@ -29,7 +31,9 @@ c="${SSH_ORIGINAL_COMMAND-}"
 name=unknown
 if [ -r "${SSH_USER_AUTH-}" ]; then
   read -r _m kt kb _r < "$SSH_USER_AUTH" || true
-  name="$(awk -v t="${kt-}" -v b="${kb-}" '{ for (i = 1; i < NF; i++) if ($i == t && $(i+1) == b) { print $(i+2); exit } }' "$KEYS" 2>/dev/null)"
+  name="$(awk -v t="${kt-}" -v b="${kb-}" '{ for (i = 1; i < NF; i++) if ($i == t && $(i+1) == b) { print $(i+2) "."; exit } }' "$KEYS" 2>/dev/null)"
+  [ -n "$name" ] || deny key-revoked "this key is not authorised on the node (revoked): pair again"   # mu-gate: revoke check
+  name="${name%.}"
   case "$name" in ''|*[!a-z0-9-]*) name=unknown ;; esac
 fi
 case "$c" in

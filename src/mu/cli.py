@@ -18,10 +18,15 @@ from mu import proto  # noqa: E402
 def report(e, as_json):
     if as_json:
         out = {"ok": False, "exit": e.code, "error": e.error, "message": e.message, "next": e.hint}
-        out.update(e.extra)
+        for k, v in e.extra.items():   # extra fields never replace the five above (a node cannot set exit or next)
+            out.setdefault(k, v)
         proto.emit_json(out)
     else:
         sys.stderr.write("mu: %s\n" % e.message)
+        if e.extra.get("node_message"):   # the node's own words: data, cleaned of control characters, never the hint
+            sys.stderr.write("    the node said: %s\n" % proto.clean_text(e.extra["node_message"], 600))
+        if e.extra.get("job_id"):
+            sys.stderr.write("    job: %s\n" % e.extra["job_id"])
         if e.hint:
             sys.stderr.write("    next: %s\n" % e.hint.replace("\n", "\n          "))
     return e.code
@@ -29,7 +34,7 @@ def report(e, as_json):
 
 def main(argv):
     if not argv:
-        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|node ...\n")
+        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|node ... (mu help)\n")
         return 2
     cmd, args = argv[0], argv[1:]
     as_json = "--json" in args[:args.index("--")] if "--" in args else "--json" in args

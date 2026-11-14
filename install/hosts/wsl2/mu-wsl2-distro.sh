@@ -20,6 +20,8 @@
 #                                         start the tunnel, wait --wait SECONDS (30) for it. Exit 0 connected, 1 not, 2
 #                                         input refused. (tunnel-credential is the same)
 #   mu-wsl2-distro tunnel status          is the tunnel connected; exit 0 yes, 1 no (with the reason), 3 not set up
+#   mu-wsl2-distro tunnel refresh         the relay's addresses again (DNS): the tunnel may connect to them and nowhere
+#                                         else (its egress filter); mu-tunnel-refresh.timer runs it hourly
 #   mu-wsl2-distro windows-reach          can a process of the distro start Windows programs or open the Windows drive
 #                                         (changes nothing); exit 0 closed, 1 open
 #
@@ -40,6 +42,7 @@
 #   --node-name NAME     install: the node's name for its runner (default: the relay user of the tunnel credential)
 #   --no-wsl             not a WSL distro (the CI runner): leave out the Windows steps and checks (interop, drives)
 #   --wait SECONDS       tunnel credential: how long to wait for the tunnel to connect (default 30)
+#   --from-host          install: run by mu-wsl2-host.ps1, which says how to restart (this script then does not)
 #
 # What install does, each step only when needed:
 #   /etc/wsl.conf        [boot] systemd=true, [user] default=NAME, [interop] appendWindowsPath=false (other keys kept;
@@ -65,7 +68,8 @@
 #                        the gate /usr/local/lib/mu/mu-node-gate; /srv/mu (NAME, 0700); cgroup delegation only if the
 #                        user manager lacks memory or pids; the chisel client (SHA-256 pinned), the system user mu-tunnel
 #                        and the sandboxed mu-tunnel.service (it starts once `tunnel credential` gave it the relay
-#                        settings); unattended security updates; [interop] enabled=false and [automount] options
+#                        settings) whose egress filter lets it reach only loopback and the relay's addresses, kept
+#                        current by mu-tunnel-refresh.timer; unattended security updates; [interop] enabled=false and [automount] options
 #                        uid=0,gid=0,umask=077 in wsl.conf, and the host drive record; mu node enable as NAME
 # Exit codes: 0 done (install: see /run/mu-wsl2/install-result for changed=N restart=0|1), 1 failed, 2 usage.
 # Test hooks (tools/test-wsl2-host/run.sh sources this file): nothing runs when it is sourced.
@@ -74,7 +78,7 @@ set -euo pipefail
 MU_USER="mu"
 REPO="git@github.com:martand-systems/mu.git"
 BRANCH=""; CLONE=0; INSTALL_MU=0; HEARTBEAT=""; JSON=0; OFFLINE=0; GAP=90
-NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""
+NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""; FROM_HOST=0
 # [automount] options: Windows drives mounted for root only (§13.4); mu can still ask their free space (statfs)
 AUTOMOUNT_OPTIONS='"uid=0,gid=0,umask=077"'
 STATE_DIR="/var/lib/mu-wsl2"
@@ -453,6 +457,39 @@ tunnel_classify() {
     END { if (s == "") { s = "starting"; r = "no-connection-yet" } print s "\t" r "\t" l }'
 }
 
+# egress_ips < `getent ahosts HOST` output: the distinct IPv4 and IPv6 addresses, one per line, in order; nothing else
+egress_ips() {
+  LC_ALL=C awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || ($1 ~ /^[0-9a-fA-F:]+$/ && $1 ~ /:/) { if (!seen[$1]++) print $1 }'
+}
+
+# egress_dropin_text IP...: the drop-in for mu-tunnel.service: no address but loopback and these
+egress_dropin_text() {
+  local ip allow="127.0.0.1/32 ::1/128"
+  for ip in "$@"; do case "$ip" in *:*) allow="$allow $ip/128" ;; *) allow="$allow $ip/32" ;; esac; done
+  printf '# mu (mu-wsl2-distro tunnel refresh): the tunnel reaches loopback (mu-sshd) and the relay, nothing else.\n'
+  printf '# chisel'"'"'s client dials whatever the relay names for a reverse remote (docs/design/job-layer.md §13.3)\n'
+  printf '[Service]\nBindReadOnlyPaths=%s:/etc/hosts\nIPAddressDeny=any\nIPAddressAllow=%s\n' "$TUNNEL_HOSTS" "$allow"
+}
+
+# tunnel_hosts_text HOST IP...: the hosts file the tunnel sees as /etc/hosts
+tunnel_hosts_text() {
+  local h="$1" ip; shift
+  printf '# mu-tunnel.service sees this as /etc/hosts (mu-wsl2-distro tunnel refresh writes it)\n127.0.0.1 localhost\n::1 localhost\n'
+  for ip in "$@"; do printf '%s %s\n' "$ip" "$h"; done
+}
+
+# ready_line < the CHECKS file: "yes" or "no<TAB>names" — the checks a job needs, all pass (keys too: at least one
+# workstation authorised)
+ready_line() {
+  LC_ALL=C awk -F'\t' '
+    $2 ~ /^(keys|tunnel|tunnel\.credential|tunnel\.egress|sshd\.service|sshd\.config|gate|jobroot|node\.runner|node\.limits|node\.disk|node\.hello|test-fault)$/ {
+      seen[$2] = 1; if ($1 != "pass") bad = bad (bad == "" ? "" : " ") $2 }
+    END {
+      n = split("keys tunnel tunnel.egress node.runner node.limits node.disk node.hello", need, " ")
+      for (i = 1; i <= n; i++) if (!(need[i] in seen)) bad = bad (bad == "" ? "" : " ") need[i] "(not checked)"
+      if (bad == "") print "yes"; else print "no\t" bad }'
+}
+
 # delegation_missing ROOT_CONTROLLERS USER_CONTROLLERS: the controllers among memory and pids that the kernel offers
 # (the root cgroup has them) but the user's service manager was not given; empty if none
 delegation_missing() {
@@ -669,6 +706,13 @@ CHISEL_GZ_SHA256="f3f180f1d93aa72cce4e6386f98cc06569a0146fbd65eb4423cf83e6434bcf
 CHISEL_BIN_SHA256="811362311f13ac4bdc42fe4e7650aca618a68e3a40f930de88536d18b14d2b52"   # what it unpacks to
 TUNNEL_ENV=$ETC_MU/tunnel.env
 TUNNEL_UNIT=/etc/systemd/system/mu-tunnel.service
+# the tunnel's egress filter (review finding 2): chisel's client dials whatever host:port the relay names for a
+# reverse remote, so the unit may reach loopback and the relay's own addresses only; the relay's name resolves
+# from a hosts file of its own (no DNS server needs to be reachable). Kept current by mu-tunnel-refresh.timer
+TUNNEL_HOSTS=$ETC_MU/tunnel.hosts
+TUNNEL_EGRESS=/etc/systemd/system/mu-tunnel.service.d/50-mu-egress.conf
+REFRESH_SERVICE=/etc/systemd/system/mu-tunnel-refresh.service
+REFRESH_TIMER=/etc/systemd/system/mu-tunnel-refresh.timer
 TUNNEL_USER=mu-tunnel
 JOB_ROOT=/srv/mu
 UU_CONF=/etc/apt/apt.conf.d/52mu-unattended-upgrades
@@ -926,9 +970,11 @@ mu_job_layer() {
 mu_recipe_of() { local h; h="$(mu_home_of)"; printf '%s/toolchains/%s/recipe' "$h" "$(head -n 1 "$h/default" 2> /dev/null || true)"; }
 as_mu_sd() {   # as_mu_sd CMD...: as MU_USER with a clean environment and its user manager's bus (systemctl --user)
   local uid home; uid="$(id -u "$MU_USER")"; home="$(user_home "$MU_USER")"
-  runuser -u "$MU_USER" -- env -i HOME="$home" USER="$MU_USER" LOGNAME="$MU_USER" SHELL=/bin/bash LANG=C.UTF-8 \
+  # setsid: no controlling terminal (a process of mu cannot push input into root's terminal; TIOCSTI is off in
+  # WSL's kernel anyway); stdin from /dev/null
+  runuser -u "$MU_USER" -- setsid -w env -i HOME="$home" USER="$MU_USER" LOGNAME="$MU_USER" SHELL=/bin/bash LANG=C.UTF-8 \
     PATH="$home/.local/bin:/usr/local/bin:/usr/bin:/bin" XDG_RUNTIME_DIR="/run/user/$uid" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@" < /dev/null
 }
 user_manager_up() {   # MU_USER's systemd user manager runs (linger starts it at boot); starts it if it can
   local uid; uid="$(id -u "$MU_USER" 2> /dev/null)" || return 1
@@ -1109,6 +1155,39 @@ EOF
 }
 
 chisel_ok() { [ -x "$CHISEL_BIN" ] && [ "$(sha256sum "$CHISEL_BIN" 2> /dev/null | cut -d' ' -f1)" = "$CHISEL_BIN_SHA256" ]; }
+relay_host() { local u; u="$(tunnel_val RELAY_URL)"; u="${u#*://}"; u="${u%%/*}"; printf '%s' "${u%%:*}"; }
+# egress_refresh: the tunnel's hosts file and egress drop-in from the relay's addresses now (getent, outside the
+# sandbox). A name that does not resolve leaves both as they are (return 1). Changes: daemon-reload, TUNNEL_RESTART=1
+egress_refresh() {
+  local host ips chg=0
+  [ -f "$TUNNEL_ENV" ] || return 0
+  host="$(relay_host)"; [ -n "$host" ] || { warn "no relay host in $TUNNEL_ENV"; return 1; }
+  if host_fault no-egress-filter; then   # test hook (e2e): the tunnel as before the review, without the filter
+    if [ -f "$TUNNEL_EGRESS" ]; then rm -f "$TUNNEL_EGRESS"; if systemd_running; then systemctl daemon-reload; fi; TUNNEL_RESTART=1; fi
+    warn "test fault no-egress-filter: mu-tunnel.service has no egress filter"; return 0
+  fi
+  ips="$(getent ahosts "$host" 2> /dev/null | egress_ips || true)"
+  if [ -z "$ips" ]; then warn "the relay's name $host does not resolve now: the tunnel's egress filter is left as it was"; return 1; fi
+  # shellcheck disable=SC2086
+  if tunnel_hosts_text "$host" $ips | put_file "$TUNNEL_HOSTS" 0644; then chg=1; fi
+  # shellcheck disable=SC2086
+  if egress_dropin_text $ips | put_file "$TUNNEL_EGRESS" 0644; then chg=1; fi
+  if [ "$chg" = 1 ]; then
+    changed "mu-tunnel.service egress: loopback and $host ($(printf '%s' "$ips" | tr '\n' ' ' | sed 's/ $//')) only"
+    if systemd_running; then systemctl daemon-reload; fi; TUNNEL_RESTART=1
+  else same "mu-tunnel.service egress: loopback and $host ($(printf '%s' "$ips" | tr '\n' ' ' | sed 's/ $//')) only"; fi
+}
+refresh_units() {
+  local chg=0
+  if printf '[Unit]\nDescription=mu: the relay'"'"'s addresses for the tunnel'"'"'s egress filter (mu-wsl2-distro tunnel refresh)\nConditionPathExists=%s\n\n[Service]\nType=oneshot\nExecStart=%s tunnel refresh\n' \
+       "$TUNNEL_ENV" "$SELF_PATH" | put_file "$REFRESH_SERVICE" 0644; then chg=1; fi
+  if printf '[Unit]\nDescription=mu: refresh the tunnel'"'"'s egress filter hourly\n\n[Timer]\nOnBootSec=3min\nOnUnitActiveSec=1h\nRandomizedDelaySec=5min\n\n[Install]\nWantedBy=timers.target\n' \
+       | put_file "$REFRESH_TIMER" 0644; then chg=1; fi
+  if [ "$chg" = 1 ]; then changed "mu-tunnel-refresh.timer installed (hourly: the relay's addresses for the egress filter)"; if systemd_running; then systemctl daemon-reload; fi
+  else same "mu-tunnel-refresh.timer"; fi
+  if ! systemctl is-enabled --quiet mu-tunnel-refresh.timer 2> /dev/null; then systemctl enable --quiet mu-tunnel-refresh.timer; changed "mu-tunnel-refresh.timer enabled"; fi
+  if systemd_running && ! systemctl is-active --quiet mu-tunnel-refresh.timer; then systemctl start mu-tunnel-refresh.timer; fi
+}
 ensure_tunnel() {
   local tmp gz cache from
   if [ "$(uname -m)" != x86_64 ]; then warn "the tunnel's chisel client is pinned for x86_64 only (this is $(uname -m)): tunnel not installed"; return 0; fi
@@ -1119,7 +1198,10 @@ ensure_tunnel() {
     cache="$(user_home "$MU_USER")/.cache/mu/downloads/chisel_${CHISEL_VERSION}_linux_amd64.gz"
     if host_fault chisel-no-download || ! curl -fsSL --max-time 180 -o "$gz" "$CHISEL_URL" 2> /dev/null \
          || [ "$(sha256sum "$gz" | cut -d' ' -f1)" != "$CHISEL_GZ_SHA256" ]; then
-      if [ -f "$cache" ] && [ "$(sha256sum "$cache" | cut -d' ' -f1)" = "$CHISEL_GZ_SHA256" ]; then cp "$cache" "$gz"; from="μ's download cache"
+      # the cache is mu's (a job could replace it): a regular file, not a link, at most 50 MB, read with a time limit; the
+      # sum of what was copied decides (a swap after the check cannot pass the sums below)
+      if [ -f "$cache" ] && [ ! -L "$cache" ] && [ "$(stat -c %s "$cache" 2> /dev/null || echo 0)" -le 52428800 ] \
+         && timeout 60 cp --no-dereference "$cache" "$gz" 2> /dev/null && [ "$(sha256sum "$gz" | cut -d' ' -f1)" = "$CHISEL_GZ_SHA256" ]; then from="μ's download cache"
       else rm -rf "$tmp"; die "could not download $CHISEL_URL with the pinned SHA-256, and $cache is not there either: check the network, then run install again"; fi
     else from="github.com"; fi
     gunzip -c "$gz" > "$tmp/chisel"
@@ -1135,11 +1217,13 @@ ensure_tunnel() {
   fi
   if tunnel_unit_text | put_file "$TUNNEL_UNIT" 0644; then changed "mu-tunnel.service installed"; TUNNEL_RESTART=1; if systemd_running; then systemctl daemon-reload; fi
   else same "mu-tunnel.service"; fi
+  refresh_units
   if [ ! -f "$TUNNEL_ENV" ]; then
     warn "no relay credential yet: the tunnel starts once it has one. Run: mu-wsl2-distro tunnel credential (it reads the lines of relay/gen-credentials.sh client <node> from stdin, never from an argument)"
     return 0
   fi
   fix_owner_mode "$TUNNEL_ENV" "root:$TUNNEL_USER" 640
+  egress_refresh || true
   tunnel_enable_start
 }
 tunnel_enable_start() {
@@ -1220,7 +1304,7 @@ do_install() {
   echo
   if [ "$CHANGED" = 0 ]; then echo "mu-wsl2-distro: nothing to change, already set up."
   else echo "mu-wsl2-distro: $CHANGED change(s)."; fi
-  if [ "$RESTART" = 1 ]; then echo "Restart the distro to apply them all (from Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distro>})."; fi
+  if [ "$RESTART" = 1 ] && [ "$FROM_HOST" = 0 ]; then echo "Restart the distro to apply them (from Windows, cleanly: C:\\Mu\\host\\mu-wsl2-host.ps1 test-stop)."; fi
   # what is left for the job layer, in order
   if [ ! -f "$TUNNEL_ENV" ]; then echo "Next: the relay credential, on stdin: mu-wsl2-distro tunnel credential"
   elif [ ! -s "$KEYS_DIR/$MU_USER" ]; then echo "Next: authorise a workstation: mu-wsl2-distro authorize <name> '<public key printed by mu compute add>' (the host key for it: mu-wsl2-distro host-key)"; fi
@@ -1257,7 +1341,7 @@ do_uninstall() {
   echo "  managed github.com block in config (between the '# >>> mu-wsl2' and '# <<< mu-wsl2' lines) and GitHub's key in"
   echo "  known_hosts (ssh-keygen -R github.com -f ~$MU_USER/.ssh/known_hosts); $SELF_PATH itself and the gate's source"
   echo "  $GATE_TEMPLATE (mu-wsl2-host.ps1 uninstall deletes both next; by hand: rm $SELF_PATH $GATE_TEMPLATE)."
-  echo "Restart the distro to apply (from Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distro>})."
+  echo "Restart the distro to apply (from Windows, cleanly: C:\\Mu\\host\\mu-wsl2-host.ps1 test-stop)."
 }
 
 # uninstall_jobs: undoes the job layer's steps, except the node's host key (its identity) and the job folders (data)
@@ -1269,6 +1353,10 @@ uninstall_jobs() {
     as_mu_sd "$(mu_bin_of)" node disable > /dev/null 2>&1 || true
     changed "job runner mu-node.service stopped and removed for $MU_USER (job folders kept)"
   fi
+  if [ -f "$REFRESH_TIMER" ]; then
+    systemctl disable --quiet --now mu-tunnel-refresh.timer 2> /dev/null || systemctl disable --quiet mu-tunnel-refresh.timer 2> /dev/null || true
+    rm -f "$REFRESH_TIMER" "$REFRESH_SERVICE"; changed "mu-tunnel-refresh.timer stopped and removed"
+  fi
   for u in mu-tunnel mu-sshd; do
     if [ -f "/etc/systemd/system/$u.service" ]; then
       systemctl disable --quiet --now "$u.service" 2> /dev/null || systemctl disable --quiet "$u.service" 2> /dev/null || true
@@ -1277,11 +1365,12 @@ uninstall_jobs() {
   done
   if systemd_running; then systemctl daemon-reload; fi
   # kept: $GATE_TEMPLATE, the gate's source, which belongs with $SELF_PATH (mu-wsl2-host.ps1 uninstall deletes both)
-  for f in "$TUNNEL_ENV" "$SSHD_CONFIG" "$KEYS_DIR/$MU_USER" "$GATE" "$CHISEL_BIN" "$UU_CONF" "$DELEGATE_CONF" \
-           "$STATE_DIR/host-drive"; do
+  for f in "$TUNNEL_ENV" "$TUNNEL_HOSTS" "$TUNNEL_EGRESS" "$SSHD_CONFIG" "$KEYS_DIR/$MU_USER" "$GATE" "$CHISEL_BIN" "$UU_CONF" \
+           "$DELEGATE_CONF" "$STATE_DIR/host-drive"; do
     if [ -e "$f" ]; then rm -f "$f"; changed "$f removed"; fi
   done
-  rmdir "$KEYS_DIR" "$LIB_MU" 2> /dev/null || true
+  rmdir "$KEYS_DIR" "$LIB_MU" "$(dirname "$TUNNEL_EGRESS")" 2> /dev/null || true
+  if systemd_running; then systemctl daemon-reload; fi
   if id -u "$TUNNEL_USER" > /dev/null 2>&1; then userdel "$TUNNEL_USER" 2> /dev/null || true; changed "system user $TUNNEL_USER removed"; fi
   if [ -s "$STATE_DIR/installed-packages" ]; then
     p="$(tr '\n' ' ' < "$STATE_DIR/installed-packages")"
@@ -1436,15 +1525,19 @@ do_status() {
   init_started="$(date -u -d "$(ps -o lstart= -p 1 2>/dev/null)" +%FT%TZ 2>/dev/null || true)"
   [ -z "$init_started" ] || check info started "distro started $init_started"
 
-  local nfail; nfail="$(awk -F'\t' '$1 == "fail"' "$CHECKS" | wc -l | tr -d ' ')"
+  local nfail ready why; nfail="$(awk -F'\t' '$1 == "fail"' "$CHECKS" | wc -l | tr -d ' ')"
+  ready="$(ready_line < "$CHECKS")"; why="$(printf '%s' "$ready" | cut -s -f2)"; ready="$(printf '%s' "$ready" | cut -f1)"
   if [ "$JSON" = 1 ]; then
-    printf '{"ok":%s,"distro":%s,"user":%s,"cpus":%s,"mem_mib":%s,"swap_mib":%s,"systemd":%s,"started":%s,"checks":' \
-      "$([ "$nfail" = 0 ] && echo true || echo false)" "$(json_str "${WSL_DISTRO_NAME:-}")" "$(json_str "$MU_USER")" \
+    printf '{"ok":%s,"ready":%s,"not_ready":%s,"distro":%s,"user":%s,"cpus":%s,"mem_mib":%s,"swap_mib":%s,"systemd":%s,"started":%s,"checks":' \
+      "$([ "$nfail" = 0 ] && echo true || echo false)" "$([ "$ready" = yes ] && echo true || echo false)" "$(json_str "$why")" \
+      "$(json_str "${WSL_DISTRO_NAME:-}")" "$(json_str "$MU_USER")" \
       "${cpus:-0}" "${mem:-0}" "${swap:-0}" "$(systemd_running && echo true || echo false)" "$(json_str "$init_started")"
     checks_json; printf '}\n'
   else
     checks_text
     if [ "$nfail" = 0 ]; then echo "mu-wsl2-distro status: all checks pass"; else echo "mu-wsl2-distro status: $nfail check(s) failed"; fi
+    if [ "$ready" = yes ]; then echo "ready for jobs: yes (a workstation is authorised, the tunnel is connected and filtered, the runner is active, the memory limit is enforced)"
+    else echo "ready for jobs: no ($why)"; fi
   fi
   [ "$nfail" = 0 ]
 }
@@ -1541,6 +1634,7 @@ status_jobs() {
     st="$(tunnel_journal | tunnel_classify)"; state="$(printf '%s' "$st" | cut -f1)"; reason="$(printf '%s' "$st" | cut -f2)"; line="$(printf '%s' "$st" | cut -f3)"
     if systemctl is-active --quiet mu-tunnel.service 2> /dev/null && [ "$state" = connected ]; then check pass tunnel "connected: $line"
     else check fail tunnel "mu-tunnel.service $(systemctl is-active mu-tunnel.service 2> /dev/null || true), $state ($reason)${line:+: $line} (mu-wsl2-distro tunnel status)"; fi
+    status_egress
   else check fail tunnel.credential "no relay credential yet: mu-wsl2-distro tunnel credential (reads it from stdin)"; fi
   # security updates
   if pkg_installed unattended-upgrades && [ -f "$UU_CONF" ]; then
@@ -1573,6 +1667,35 @@ status_jobs() {
   if [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] && [ "$(printf '%s' "$out" | json_get ok)" = true ]; then
     check pass node.hello "the gate answers hello with one JSON line, through $MU_USER's login shell as sshd runs it (node $(printf '%s' "$out" | json_get node))"
   else check fail node.hello "the gate's answer to hello is not one JSON line: '$(printf '%s' "$out" | head -c 160 | tr '\n' ' ')' (~$MU_USER/.bashrc must print nothing; μ with the job layer)"; fi
+}
+
+# egress_probe DENY ALLOW [TARGET]: in a unit of mu-tunnel with these IPAddressDeny/IPAddressAllow values, a TCP
+# connection to TARGET (default 192.0.2.1:9, TEST-NET-1: no real host). Prints what bash said and rc=N
+egress_probe() {
+  local t="${3:-192.0.2.1/9}"
+  timeout 40 systemd-run --quiet --wait --pipe --collect -p User="$TUNNEL_USER" -p IPAddressDeny="$1" -p IPAddressAllow="$2" \
+    -p RuntimeMaxSec=30 /bin/bash -c 'timeout 5 bash -c "exec 3<>/dev/tcp/$0" 2>&1; echo "rc=$?"' "$t" 2>&1 < /dev/null || true
+}
+status_egress() {   # the tunnel's egress filter, in effect (review finding 2)
+  local deny allow probe host now rec
+  deny="$(systemctl show mu-tunnel.service -p IPAddressDeny --value 2> /dev/null || true)"
+  allow="$(systemctl show mu-tunnel.service -p IPAddressAllow --value 2> /dev/null || true)"
+  if [ ! -f "$TUNNEL_EGRESS" ] || [ -z "$deny" ]; then
+    check fail tunnel.egress "mu-tunnel.service has no egress filter: the relay could use the tunnel to reach other addresses (run: mu-wsl2-distro tunnel refresh)"
+  elif ! systemd_running; then check info tunnel.egress "filter written ($allow); not checked without systemd"
+  else
+    probe="$(egress_probe "$deny" "$allow" | tr '\n' ' ')"
+    case "$probe" in
+      *"Operation not permitted"*) check pass tunnel.egress "only loopback and the relay ($allow); a connection elsewhere is refused by the kernel" ;;
+      *) check fail tunnel.egress "the filter is set ($allow), but a connection to 192.0.2.1 was not refused by it: '$(printf '%s' "$probe" | cut -c1-120)' (the kernel may lack cgroup BPF: docs/design/job-layer.md §19)" ;;
+    esac
+    host="$(relay_host)"
+    now="$(getent ahosts "$host" 2> /dev/null | egress_ips | sort | tr '\n' ' ' || true)"
+    rec="$(awk -v h="$host" '$2 == h { print $1 }' "$TUNNEL_HOSTS" 2> /dev/null | sort | tr '\n' ' ')"
+    if [ -n "$now" ] && [ "$now" != "$rec" ]; then check warn tunnel.egress.dns "$host is now ${now% }; the filter has ${rec% } (mu-tunnel-refresh.timer updates it within the hour; now: mu-wsl2-distro tunnel refresh)"; fi
+  fi
+  if systemctl is-enabled --quiet mu-tunnel-refresh.timer 2> /dev/null; then check pass tunnel.refresh "mu-tunnel-refresh.timer enabled (hourly)"
+  else check fail tunnel.refresh "mu-tunnel-refresh.timer is not enabled (run install)"; fi
 }
 
 # ---------------------------------------------------------------- status: what a process of the distro can reach of Windows
@@ -1660,8 +1783,16 @@ cmd_revoke() {
   if authkeys_del "$name" < "$f" > "$tmp"; then
     chmod 644 "$tmp"; [ "$(id -u)" != 0 ] || chown root:root "$tmp"; fsync_path "$tmp"; mv -f "$tmp" "$f"; fsync_path "$KEYS_DIR"; chg=true
   else rm -f "$tmp"; fi
-  if [ "$JSON" = 1 ]; then printf '{"ok":true,"name":%s,"changed":%s}\n' "$(json_str "$name")" "$chg"
-  elif [ "$chg" = true ]; then echo "revoked $name: its key can no longer log in (a session already open ends when it closes)"
+  # sshd reads the key file only when a connection logs in: a connection opened before (a ControlMaster can be kept
+  # open for as long as its owner likes) would go on opening sessions. The gate refuses a key that is not in the file;
+  # and every open connection of the user ends here (the other workstations reconnect by themselves)
+  local ended=0
+  if [ "$chg" = true ] && [ "$(id -u)" = 0 ] && ! host_fault revoke-keeps-sessions && id -u "$MU_USER" > /dev/null 2>&1; then
+    ended="$(pgrep -u "$MU_USER" -x 'sshd|sshd-session' 2> /dev/null | wc -l | tr -d ' ')"
+    pkill -TERM -u "$MU_USER" -x 'sshd|sshd-session' 2> /dev/null || true
+  fi
+  if [ "$JSON" = 1 ]; then printf '{"ok":true,"name":%s,"changed":%s,"connections_ended":%s}\n' "$(json_str "$name")" "$chg" "${ended:-0}"
+  elif [ "$chg" = true ]; then echo "revoked $name: its key can no longer log in, and no open connection can start anything ($ended open connection(s) of $MU_USER ended; other workstations reconnect by themselves)"
   else echo "$name was not authorised: nothing changed"; fi
 }
 
@@ -1698,8 +1829,8 @@ cmd_host_key() {
   echo "$pub"
   echo "fingerprint $fp"
   echo
-  echo "On the workstation, with its own relay user and password (relay/gen-credentials.sh client <workstation>):"
-  echo "  mu compute add ${node:-<node>} --host-key '$pub' --relay ${url:-<relay URL>} --relay-fingerprint ${rfp:-<relay fingerprint>} --relay-port ${port:-<port>} --relay-user <workstation> --relay-password-stdin"
+  echo "On the workstation, in the mu clone (its own relay user; the password goes through the pipe, never on screen):"
+  echo "  relay/gen-credentials.sh client <workstation> 2>/dev/null | sed -n 's/^RELAY_PASSWORD=//p' | mu compute add ${node:-<node>} --host-key '$pub' --relay ${url:-<relay URL>} --relay-fingerprint ${rfp:-<relay fingerprint>} --relay-port ${port:-<port>} --relay-user <workstation> --relay-password-stdin"
   echo "It prints the host key's fingerprint: it must be $fp."
 }
 
@@ -1738,6 +1869,24 @@ cmd_tunnel_status() {
   return "$code"
 }
 
+# credential_prompt: at a terminal, the relay settings field by field. URL, fingerprint, user and port are public and
+# shown; the password is not, and is asked twice. Prints the lines tunnel_env_from reads
+credential_prompt() {
+  local url fp user port pw pw2
+  printf 'The relay settings of this node (relay/gen-credentials.sh client <node> on the Mac shows them).\n' >&2
+  printf '  RELAY_URL (e.g. https://relay.martand.systems): ' >&2; IFS= read -r url || return 1
+  printf '  RELAY_FINGERPRINT (44 characters, ends with =): ' >&2; IFS= read -r fp || return 1
+  printf '  RELAY_USER (this node, e.g. office-pc): ' >&2; IFS= read -r user || return 1
+  printf '  RELAY_PORTS (e.g. 7001): ' >&2; IFS= read -r port || return 1
+  trap 'stty echo 2> /dev/null || true' EXIT INT TERM
+  stty -echo 2> /dev/null || true
+  printf '  RELAY_PASSWORD (not shown): ' >&2; IFS= read -r pw || { stty echo 2> /dev/null; return 1; }
+  printf '\n  the password again: ' >&2; IFS= read -r pw2 || { stty echo 2> /dev/null; return 1; }
+  stty echo 2> /dev/null || true; echo >&2
+  if [ "$pw" != "$pw2" ]; then echo "the two passwords differ" >&2; return 1; fi
+  printf 'RELAY_URL=%s\nRELAY_FINGERPRINT=%s\nRELAY_ROLE=compute\nRELAY_USER=%s\nRELAY_PASSWORD=%s\nRELAY_PORTS=%s\n' "$url" "$fp" "$user" "$pw" "$port"
+}
+
 # tunnel credential: reads the relay settings from stdin (never an argument; not echoed from a terminal), writes
 # /etc/mu/tunnel.env (root:mu-tunnel 0640), (re)starts the tunnel and waits up to --wait seconds for it to connect.
 # Exit 0 connected, 1 written but not connected (the reason and what to do), 2 input refused (nothing written)
@@ -1746,14 +1895,7 @@ cmd_tunnel_credential() {
   need_root tunnel credential
   tunnel_installed || fail_with 1 "the tunnel is not installed yet" "run mu-wsl2-distro install first"
   if [ -t 0 ]; then
-    printf 'Paste the lines that relay/gen-credentials.sh client <node> printed on the Mac, then press Enter on an empty line.\n(What you paste is not shown.)\n' >&2
-    trap 'stty echo 2> /dev/null || true' EXIT INT TERM; stty -echo 2> /dev/null || true
-    while IFS= read -r l; do
-      if [ -z "$(printf '%s' "$l" | tr -d ' \r')" ]; then [ -z "$input" ] || break; continue; fi
-      input="$input$l
-"
-    done
-    stty echo 2> /dev/null || true; echo >&2
+    input="$(credential_prompt)" || fail_with 2 "the relay settings were not entered; nothing was written" "run it again, or feed the lines of relay/gen-credentials.sh client <node> on stdin"
   else input="$(head -c 65536)"; fi
   envtext="$(printf '%s\n' "$input" | tunnel_env_from)" || fail_with 2 "the relay settings were refused (above); nothing was written" "give the six lines of relay/gen-credentials.sh client <node> (RELAY_URL to RELAY_PORTS) on stdin"
   install -d -m 755 -o root -g root "$ETC_MU"
@@ -1761,6 +1903,7 @@ cmd_tunnel_credential() {
   printf '%s\n' "$envtext" > "$tmp"; chown "root:$TUNNEL_USER" "$tmp"; chmod 640 "$tmp"
   if [ -f "$TUNNEL_ENV" ] && cmp -s "$tmp" "$TUNNEL_ENV"; then rm -f "$tmp"; fix_owner_mode "$TUNNEL_ENV" "root:$TUNNEL_USER" 640 > /dev/null
   else fsync_path "$tmp"; mv -f "$tmp" "$TUNNEL_ENV"; fsync_path "$ETC_MU"; chg=true; TUNNEL_RESTART=1; fi
+  egress_refresh > /dev/null || true
   tunnel_enable_start > /dev/null
   # the runner, if enabled, takes the relay user as the node's name (install ran before there was a credential)
   if [ -z "$NODE_NAME" ] && mu_job_layer && user_manager_up; then ensure_node_enabled > /dev/null 2>&1 || true; fi
@@ -1783,6 +1926,23 @@ cmd_tunnel_credential() {
     [ "$state" = connected ] || echo "  next: $(tunnel_hint "$reason")"
   fi
   [ "$state" = connected ]
+}
+
+# tunnel refresh: the relay's addresses again (mu-tunnel-refresh.timer, hourly); restarts the tunnel when they changed.
+# Exit 0 done, 1 the name does not resolve (nothing changed), 3 no credential yet
+cmd_tunnel_refresh() {
+  need_root tunnel refresh
+  [ -f "$TUNNEL_ENV" ] || fail_with 3 "the tunnel has no relay credential" "mu-wsl2-distro tunnel credential"
+  local rc=0 out restarted=false t; t="$(mktemp)"
+  egress_refresh > "$t" 2>&1 || rc=$?   # (not in a $(...): TUNNEL_RESTART must reach this shell)
+  out="$(cat "$t")"; rm -f "$t"
+  if [ "$TUNNEL_RESTART" = 1 ] && systemd_running && systemctl is-active --quiet mu-tunnel.service; then
+    systemctl restart mu-tunnel.service; restarted=true
+  fi
+  if [ "$JSON" = 1 ]; then printf '{"ok":%s,"restarted":%s,"relay":%s,"allow":%s}\n' "$([ "$rc" = 0 ] && echo true || echo false)" "$restarted" \
+      "$(json_str "$(relay_host)")" "$(json_str "$(sed -n 's/^IPAddressAllow=//p' "$TUNNEL_EGRESS" 2> /dev/null)")"
+  else printf '%s\n' "$out"; [ "$restarted" = false ] || echo "  changed  mu-tunnel.service restarted (new egress filter)"; fi
+  return "$rc"
 }
 
 # windows-reach: what a process of this distro can reach of Windows now (interop, the drive). Changes nothing.
@@ -1808,7 +1968,7 @@ main() {
     authorize) [ $# -ge 2 ] || { echo "usage: mu-wsl2-distro authorize NAME 'ssh-ed25519 AAAA… NAME' (or - to read the key from stdin)" >&2; exit 2; }
                ARG1="$1"; ARG2="$2"; shift 2 ;;
     revoke) [ $# -ge 1 ] || { echo "usage: mu-wsl2-distro revoke NAME" >&2; exit 2; }; ARG1="$1"; shift ;;
-    tunnel) case "${1:-}" in status|credential) ARG1="$1"; shift ;; *) echo "usage: mu-wsl2-distro tunnel status|credential" >&2; exit 2 ;; esac ;;
+    tunnel) case "${1:-}" in status|credential|refresh) ARG1="$1"; shift ;; *) echo "usage: mu-wsl2-distro tunnel status|credential|refresh" >&2; exit 2 ;; esac ;;
     tunnel-credential) action=tunnel; ARG1=credential ;;
     heartbeat) HEARTBEAT="${1:-}"; [ $# -gt 0 ] && shift ;;
     stop-marker)
@@ -1832,6 +1992,7 @@ main() {
       --host-drive) HOST_DRIVE="${2:-}"; shift 2 ;;
       --node-name) NODE_NAME="${2:-}"; shift 2 ;;
       --wait) WAIT="${2:-}"; shift 2 ;;
+      --from-host) FROM_HOST=1; shift ;;
       *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
   done
@@ -1850,7 +2011,7 @@ main() {
     revoke) cmd_revoke "$ARG1" ;;
     keys) cmd_keys ;;
     host-key) cmd_host_key ;;
-    tunnel) if [ "$ARG1" = status ]; then cmd_tunnel_status; else cmd_tunnel_credential; fi ;;
+    tunnel) case "$ARG1" in status) cmd_tunnel_status ;; refresh) cmd_tunnel_refresh ;; *) cmd_tunnel_credential ;; esac ;;
     windows-reach) cmd_windows_reach ;;
     heartbeat)
       [ "$(id -u)" = 0 ] || die "run as root"

@@ -159,6 +159,15 @@ eq "the key's name is the key file's comment for the key that logged in" "$(SSH_
 printf 'publickey ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOTHEROTHEROTHEROTHEROTHEROTHEROTHEROTHER\n' > "$ROOT/auth2"
 eq "a name outside [a-z0-9-] becomes unknown" "$(SSH_USER_AUTH="$ROOT/auth2" SSH_ORIGINAL_COMMAND=hello sh "$ROOT/gate")" \
   '{"ok":true,"args":"node serve --key=unknown hello"}'
+# a key that is no longer in the key file (revoked) gets nothing, also over a connection opened before the revoke
+printf 'publickey ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIREVOKEDREVOKEDREVOKEDREVOKEDREVOKEDREVOK\n' > "$ROOT/auth3"
+has "a key not in the key file (revoked) is refused: key-revoked" "$(SSH_USER_AUTH="$ROOT/auth3" SSH_ORIGINAL_COMMAND=hello sh "$ROOT/gate")" \
+  '"error":"key-revoked"'
+mkgate "$ROOT/gate-norevoke" '/mu-gate: revoke check/d'
+case "$(SSH_USER_AUTH="$ROOT/auth3" SSH_ORIGINAL_COMMAND=hello sh "$ROOT/gate-norevoke")" in
+  *'"ok":true'*) ok "must-fail: with the revoke check removed, the revoked key's request gets through (as it must)" ;;
+  *) bad "must-fail: the gate without its revoke check still refused the revoked key" ;;
+esac
 sed -e 's|@MU_BIN@|x|' "$REPO/install/hosts/wsl2/mu-node-gate" > "$ROOT/gate-half"
 has "a gate whose paths were not written in refuses everything" "$(SSH_ORIGINAL_COMMAND=hello sh "$ROOT/gate-half")" '"error":"not-installed"'
 
@@ -209,7 +218,7 @@ echo "  info  5 starts of a job command: $((t1 - t0)) s"
 # ---------------------------------------------------------------- python units
 for p in $PYS; do
   section "unit checks, $p"
-  for s in durable ids proxy classify sshconfig controlpath unpack snapshot-alone snapshot-content snapshot-report; do
+  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report; do
     py_section "$p" "$s"
   done
   py_section "$p" atomic "$([ "${QUICK:-0}" = 1 ] && echo 30 || echo 120)"
@@ -222,6 +231,22 @@ must_fail "fetch stays inside" no-member-check "$PY1" unpack
 must_fail "fetch integrity" no-fetch-hash "$PY1" unpack
 must_fail "snapshot leaves the project alone" user-index "$PY1" snapshot-alone
 must_fail "snapshot content (.mu/ left out)" no-mu-exclude "$PY1" snapshot-content
+# the review's findings (docs/design/job-layer.md §23), each check with the fault that undoes its fix
+must_fail "the workstation's glob is never wider than the node's" dot-globs "$PY1" globs
+must_fail "fetch never writes into .git or .mu" dot-globs "$PY1" unpack
+must_fail "fetch stops a member longer than the result says" no-size-guard "$PY1" unpack
+must_fail "a node's refusal cannot set next, exit or crash the client" node-hint "$PY1" classify
+must_fail "mu fetch takes the declared outputs from this clone, not the node" trust-node-globs "$PY1" untrusted-node
+must_fail "mu fetch: a node's refusal through the real CLI" node-hint "$PY1" untrusted-node
+must_fail "runner: a failed systemctl show is not the end of a job" bus-error-is-end "$PY1" runner
+must_fail "runner: a failed systemd-run is checked with systemd" trust-run-rc "$PY1" runner
+must_fail "runner: an unreadable state.json is rebuilt" no-unit-check-torn "$PY1" runner
+must_fail "runner: a re-run keeps the log" log-truncate-on-rerun "$PY1" runner
+must_fail "runner: one job's error does not stop the pass" runner-pass-aborts "$PY1" runner
+must_fail "runner: no start below the free-disk minimum" no-start-disk-check "$PY1" runner
+must_fail "runner: the log cap" no-log-cap "$PY1" runner
+must_fail "runner: a damaged job folder is kept" delete-damaged "$PY1" runner
+must_fail "runner: results are written once" overwrite-result "$PY1" runner
 
 section "chisel pins agree (apps.toml, relay/Dockerfile, the distro script)"
 py_section "$PY1" pins "$REPO"

@@ -260,7 +260,7 @@ for B in $BASHES; do
   e "authorize: the same key as another name is exit 3" "(exit 3)" "set +e; $K (main authorize laptop '$WSPUB' > /dev/null 2>&1); echo \"(exit \$?)\""
   e "keys: names and fingerprints" "$(printf '  %-20s %s\n  %-20s %s' avi-mac "$WSFP" build-box "$OTHERFP")" "$K main keys"
   e "revoke: removes the name" "revoked build-box" "$K main revoke build-box | cut -d: -f1; grep -c build-box '$TD/keys/mu' > /dev/null || true"
-  e "revoke: again: nothing to do, exit 0" '{"ok":true,"name":"build-box","changed":false}' "$K main revoke build-box --json"
+  e "revoke: again: nothing to do, exit 0" '{"ok":true,"name":"build-box","changed":false,"connections_ended":0}' "$K main revoke build-box --json"
   e "keys --json after revoke" '{"ok":true,"keys":[{"name":"avi-mac","fingerprint":"'"$WSFP"'","key":"'"$WSPUB2"'"}]}' "$K main keys --json"
   mf "authorize refuses a key cut short" no-keygen-check "(exit 2)" "set +e; $K (main authorize laptop2 '$CUTPUB' > /dev/null 2>&1); echo \"(exit \$?)\""
 
@@ -289,6 +289,19 @@ for B in $BASHES; do
   e "tunnel log: connected, then lost" "$(printf 'unreachable\trelay-unreachable')" "printf '%s\n' 'client: Connected (Latency 1ms)' 'client: Disconnected' 'client: Connection error: dial tcp 1.2.3.4:443: connect: connection refused' | tunnel_classify | cut -f1,2"
   e "tunnel log: lost, then connected again" "connected" "printf '%s\n' 'client: Disconnected' 'client: Retrying in 1s...' 'client: Connected (Latency 1ms)' | tunnel_classify | cut -f1"
   e "tunnel log: nothing yet" "$(printf 'starting\tno-connection-yet\t')" "tunnel_classify < '$TD/empty'"
+
+  # the tunnel's egress filter (review finding 2): the relay's addresses, the drop-in, the hosts file
+  e "egress: getent ahosts lines give each address once (v4 and v6), nothing else" "$(printf '195.201.236.190\n2a01:4f8:1c1c::1')" \
+    "printf '%s\n' '195.201.236.190 STREAM relay.martand.systems' '195.201.236.190 DGRAM' '195.201.236.190 RAW' '2a01:4f8:1c1c::1 STREAM' 'garbage line' '1.2.3 STREAM' | egress_ips"
+  e "egress: the drop-in allows loopback and the relay only" "$(printf '[Service]\nBindReadOnlyPaths=/etc/mu/tunnel.hosts:/etc/hosts\nIPAddressDeny=any\nIPAddressAllow=127.0.0.1/32 ::1/128 195.201.236.190/32 2a01:4f8:1c1c::1/128')" \
+    "egress_dropin_text 195.201.236.190 2a01:4f8:1c1c::1 | grep -v '^#'"
+  e "egress: the tunnel's hosts file names the relay" "$(printf '127.0.0.1 localhost\n::1 localhost\n195.201.236.190 relay.martand.systems')" \
+    "tunnel_hosts_text relay.martand.systems 195.201.236.190 | grep -v '^#'"
+  # ready for jobs: the checks a job needs (status's last line)
+  printf 'pass\tkeys\tavi-mac SHA256:x\npass\ttunnel\tconnected\npass\ttunnel.egress\tx\npass\tnode.runner\tx\npass\tnode.limits\tx\npass\tnode.disk\tx\npass\tnode.hello\tx\ninfo\twsl\tx\n' > "$TD/checks.ready"
+  e "ready for jobs: yes when keys, tunnel, egress, runner, limits, disk and hello pass" "yes" "ready_line < '$TD/checks.ready'"
+  e "ready for jobs: no workstation yet (WARN keys) is not ready" "$(printf 'no\tkeys')" "sed 's/^pass\tkeys/warn\tkeys/' '$TD/checks.ready' | ready_line"
+  e "ready for jobs: a check that did not run is not ready" "$(printf 'no\tnode.hello(not checked)')" "grep -v node.hello '$TD/checks.ready' | ready_line"
 
   # listeners, delegation, the drive record, the security pocket
   e "listeners: mu-sshd on 127.0.0.1:2222 only is fine" "(exit 0)" "listeners_bad 2222 < '$TD/ss.good'; echo \"(exit \$?)\""

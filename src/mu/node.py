@@ -29,6 +29,15 @@ MU_WSL_HOST_DRIVE (the host-drive record), MU_NODE_FAULT or the root-owned /etc/
   skip-limits-check    submit takes jobs while the memory self-test fails
   selftest-fail        the self-test reports failure
   fetch-extra-member   fetch adds a member outside the declared outputs
+  bus-error-is-end     a failed `systemctl show` counts as "the unit ended" (review: durability 1)
+  overwrite-result     a result.json that is already valid is replaced by a later one
+  trust-run-rc         a failed systemd-run means "not started", without asking systemd (durability 2)
+  log-truncate-on-rerun  a re-run deletes the log of the attempt before it (durability 3)
+  runner-pass-aborts   one job's error stops the runner's whole pass (durability 4)
+  no-start-disk-check  the runner starts a job whatever the free disk space
+  no-log-cap           the runner lets a job's log grow without a limit
+  no-unit-check-torn   a job whose state.json is unreadable counts as queued, whatever its unit and events say (5)
+  delete-damaged       recovery deletes a job folder whose job.json is unreadable (instead of moving it aside)
 """
 import fcntl
 import hashlib
@@ -51,6 +60,8 @@ from mu.durable import fault
 ROOT = os.environ.get("MU_NODE_ROOT") or "/srv/mu"
 DEFAULT_MIN_FREE_GB = 20
 DEFAULT_TIME_S = 12 * 3600
+DEFAULT_LOG_CAP_GB = 4        # a job whose log grows past this is stopped (node.json log_cap_gb)
+START_TRIES = 3               # systemd-run failures (the unit never existed) before a job is failed
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 UPDATE_HOOK = """#!/bin/sh
 # μ: snapshots are write-once; only refs/mu/snap/<job-id> can be pushed (docs/design/job-layer.md §6.4)
@@ -165,6 +176,18 @@ def unit_props(unit):
 
 def unit_active(props):
     return props.get("ActiveState") in ("active", "activating", "deactivating", "reloading", "unknown")
+
+
+def unit_ended(props):
+    """Does systemd say for certain that the unit is over? A failed `systemctl show` (LoadState=error: the bus, a
+    re-exec of the user manager, a timeout) says nothing, and the job is taken as still running (review: durability
+    1). Ended: the unit is gone (not-found), or loaded and inactive or failed with a Result."""
+    load, active = props.get("LoadState"), props.get("ActiveState")
+    if load == "error" and fault("bus-error-is-end"):
+        return True
+    if load == "not-found":
+        return True
+    return load == "loaded" and active in ("inactive", "failed") and bool(props.get("Result"))
 
 
 def runner_state():
@@ -383,6 +406,14 @@ def log_info(d):
 
 
 def write_result(j, state, written_by, unit_result=None, note=None, **extra):
+    """result.json, written once: a valid result already there is kept (the first word on a job is final; a shim that
+    ends after the runner gave up on it cannot change it), and returned."""
+    old = durable.read_record(os.path.join(j["dir"], "result.json"))
+    if old and not fault("overwrite-result"):
+        event(j["dir"], "result %s (%s) not written: the job already has its result (%s)" % (state, written_by,
+                                                                                            old.get("state")))
+        j["result"] = old
+        return old
     st = j["state"] or {}
     now = time.time()
     started = st.get("started_at")
@@ -487,6 +518,7 @@ def verb_receive_pack(key, args):
                 with open(os.path.join(tmp, "hooks", "update"), "w") as f:
                     f.write(UPDATE_HOOK)
                 os.chmod(os.path.join(tmp, "hooks", "update"), 0o755)
+            os.sync()   # config, HEAD and the hook on disk before the repository takes its name (durability 6)
             durable.sync_dir(tmp)
             os.rename(tmp, repo)
             durable.sync_dir(p("projects"))
@@ -593,11 +625,12 @@ def verb_submit(key, args):
             if j["job"]:
                 j["state"], j["result"] = durable.read_record(os.path.join(d, "state.json")), job_result(d)
                 s = status_of(j)
+                register_pin(j["job"].get("project_id", spec["project_id"]), j["job"].get("mu_version", spec["mu_version"]))
                 journal("submit id=%s key=%s duplicate" % (job_id, key))
                 return {"ok": True, "job_id": job_id, "state": s["state"], "position": s["position"], "duplicate": True}
-            shutil.rmtree(d)   # never acknowledged: start again
+            set_aside(job_id, "its job.json is unreadable; submitted again")
         if runner_state() != "active" and not fault("start-on-submit") and not fault("job-in-session"):
-            raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "on the PC: wsl -d mu-compute -u mu -- mu node enable",
+            raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu node enable",
                             message="the job runner (mu-node.service) is not running")
         disk = disk_info(node)
         if disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]:
@@ -606,11 +639,11 @@ def verb_submit(key, args):
                             largest=largest_jobs())
         if not limits_ok(node) and not fault("skip-limits-check"):
             raise NodeError(proto.NODE_UNAVAILABLE, "limits-unavailable",
-                            "on the PC: wsl -d mu-compute -u mu -- mu node selftest (design §19 step 1)",
+                            "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu node selftest (design §19 step 1)",
                             message="the node cannot enforce a job's memory limit (self-test: %s)" % (
                                 (node.get("selftest") or {}).get("detail") or "not run since this boot"))
         if spec["mu_version"] not in installed_versions():
-            raise NodeError(proto.NODE_TOOLCHAIN, "toolchain-missing", "on the PC: wsl -d mu-compute -u mu -- mu install %s"
+            raise NodeError(proto.NODE_TOOLCHAIN, "toolchain-missing", "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu install %s"
                             % spec["mu_version"], message="μ %s is not installed on the node" % spec["mu_version"],
                             installed=installed_versions())
         check_snapshot(spec)
@@ -618,15 +651,15 @@ def verb_submit(key, args):
         tmp = p("jobs", ".%s.%d" % (job_id, os.getpid()))
         shutil.rmtree(tmp, ignore_errors=True)
         os.mkdir(tmp, 0o700)
-        now_ns = time.time_ns()
+        now_ns = next_accept_ns()
         job = dict(spec, job_id=job_id, accepted_ns=now_ns, accepted_at=proto.iso(now_ns / 1e9), key=key,
                    node=node.get("name"))
         durable.write_record(os.path.join(tmp, "job.json"), job)
         durable.write_record(os.path.join(tmp, "state.json"), {"state": "queued", "attempt": 1, "updated": proto.iso()})
         event(tmp, "accepted from %s (attempt 1)" % key)
+        register_pin(spec["project_id"], spec["mu_version"])   # before the job exists: auto-update keeps its version
         os.rename(tmp, d)
         durable.sync_dir(p("jobs"))
-        register_pin(spec["project_id"], spec["mu_version"])
         journal("submit id=%s key=%s project=%s accepted" % (job_id, key, spec["project_id"]))
         j = load_job(job_id)
         if fault("start-on-submit"):
@@ -636,6 +669,33 @@ def verb_submit(key, args):
         return run_in_session(load_job(job_id))
     return {"ok": True, "job_id": job_id, "state": "running" if fault("start-on-submit") else "queued", "position": pos,
             "duplicate": False}
+
+
+def next_accept_ns():
+    """The queue's order (accepted_ns): the clock, but never at or before the last job accepted, so a clock that
+    steps back (WSL's can) does not put a new job ahead of older ones. Under the lock; node.json keeps the last."""
+    n = node_info()
+    last = n.get("last_accepted_ns") if isinstance(n.get("last_accepted_ns"), int) else 0
+    now = max(time.time_ns(), last + 1)
+    n["last_accepted_ns"] = now
+    n.setdefault("protocol", proto.PROTOCOL)
+    durable.write_record(p("node.json"), n)
+    return now
+
+
+def set_aside(job_id, why):
+    """A job folder with a final name whose job.json cannot be read is never deleted: it moves to damaged/ (its result
+    and outputs may still be there), and the journal says so (review: durability 5)."""
+    d = job_dir(job_id)
+    if fault("delete-damaged"):
+        shutil.rmtree(d, ignore_errors=True)
+        journal("recovery: removed %s (%s)" % (job_id, why))
+        return
+    os.makedirs(p("damaged"), mode=0o700, exist_ok=True)
+    dest = p("damaged", "%s.%d" % (job_id, int(time.time())))
+    os.rename(d, dest)
+    durable.sync_dir(p("jobs"))
+    journal("recovery: %s moved to %s (%s)" % (job_id, dest, why))
 
 
 def largest_jobs():
@@ -874,6 +934,7 @@ def start_job(j):
               "cores": lim.get("cores") or hw_info()["cores_physical"]}
     st.update(state="running", attempt=attempt, unit=unit, started_at=proto.iso(), started_epoch=time.time(),
               limits=limits, updated=proto.iso())
+    st.pop("note", None) if (st.get("note") or "").startswith("waiting") else None
     j["state"] = st
     try:
         prepare_work(j)
@@ -884,6 +945,7 @@ def start_job(j):
         durable.write_record(os.path.join(d, "state.json"), st)
         write_result(j, "failed", "runner", note=str(e)[:500])
         return
+    st["start_unconfirmed"] = True   # until systemd-run says it started the unit
     durable.write_record(os.path.join(d, "state.json"), st)
     event(d, "start attempt %d as %s" % (attempt, unit))
     systemctl("reset-failed", unit, timeout=15)
@@ -906,21 +968,60 @@ def start_job(j):
         rc, err = r.returncode, r.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         rc, err = 1, str(e)
-    if rc != 0:
-        write_result(j, "failed", "runner", note="systemd-run failed: %s" % err.strip()[:400])
-        journal("job %s: systemd-run failed: %s" % (j["id"], err.strip()[:300]))
-    else:
+    if rc == 0:
+        st.pop("start_unconfirmed", None)
+        durable.write_record(os.path.join(d, "state.json"), st)
         journal("job %s started (attempt %d)" % (j["id"], attempt))
+        return
+    journal("job %s: systemd-run failed: %s" % (j["id"], err.strip()[:300]))
+    if fault("trust-run-rc"):
+        write_result(j, "failed", "runner", note="systemd-run failed: %s" % err.strip()[:400])
+        return
+    # a failed or slow systemd-run may still have made the unit (a lost reply, a timeout): ask systemd. Only a unit
+    # that does not exist is a start that failed; anything else stays "running" and the next pass classifies it
+    if unit_props(unit).get("LoadState") == "not-found":
+        start_failed(j, "systemd-run failed: %s" % err.strip()[:300])
+    else:
+        event(d, "systemd-run failed (%s), but systemd knows the unit: left to the next pass" % err.strip()[:200])
+
+
+def start_failed(j, why):
+    """The unit was never made: back to the queue (the attempt is not used up), failed after START_TRIES."""
+    st = dict(j["state"] or {})
+    n = int(st.get("start_failures", 0)) + 1
+    if n >= START_TRIES:
+        write_result(j, "failed", "runner", note="%s (%d starts failed)" % (why, n))
+        return
+    st.update(state="queued", start_failures=n, note="start %d of %d failed: %s" % (n, START_TRIES, why),
+              updated=proto.iso())
+    for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed"):
+        st.pop(k, None)
+    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+    j["state"] = st
+    event(j["dir"], "start failed, queued again: %s" % why)
+
+
+def append_log(d, line):
+    """One line of μ's own in the job's log, on disk before anything depends on it."""
+    try:
+        with open(os.path.join(d, "log"), "ab") as f:
+            f.write(line.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        pass
 
 
 def interrupted(j, why):
-    """§9.3: a job whose process ended without a result. Re-run once (attempt 1, rerun true), else interrupted."""
+    """§9.3: a job whose process ended without a result. Re-run once (attempt 1, rerun true), else interrupted. The
+    log is kept and goes on (the next attempt appends after a marker line), so a client following it by byte offset
+    never misses or splices output (review: durability 3)."""
     st = dict(j["state"] or {})
     if fault("trust-unit-success"):
         write_result(j, "succeeded", "runner", unit_result="success", note="taken as succeeded (test fault)")
         return
     if st.get("attempt", 1) == 1 and j["job"].get("rerun", True):
-        for f in ("work", "index", "log"):
+        for f in ("work", "index") + (("log",) if fault("log-truncate-on-rerun") else ()):
             x = os.path.join(j["dir"], f)
             if os.path.isdir(x):
                 shutil.rmtree(x, ignore_errors=True)
@@ -928,8 +1029,10 @@ def interrupted(j, why):
                 os.unlink(x)
         prev = last_stop()
         note = "re-run after %s" % why if prev in ("unknown", "first") else "re-run after %s (previous stop of the node: %s)" % (why, prev)
+        if not fault("log-truncate-on-rerun"):
+            append_log(j["dir"], "\n== μ: attempt 1 ended without a result (%s); re-run as attempt 2 ==\n" % why)
         st.update(state="queued", attempt=2, note=note, updated=proto.iso())
-        for k in ("unit", "started_at", "started_epoch", "pid"):
+        for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed"):
             st.pop(k, None)
         durable.write_record(os.path.join(j["dir"], "state.json"), st)
         j["state"] = st
@@ -939,13 +1042,32 @@ def interrupted(j, why):
     write_result(j, "interrupted", "runner", note=why)
 
 
+def log_last_mu_line(d):
+    """The last line μ's shim wrote to the log ("== ..."), for a note that says why a unit failed."""
+    try:
+        with open(os.path.join(d, "log"), "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            lines = [x for x in f.read().decode("utf-8", "replace").splitlines() if x.startswith("== ")]
+        return lines[-1][3:200] if lines else ""
+    except OSError:
+        return ""
+
+
 def classify(j, props):
-    """§8.5: a job whose unit ended."""
+    """§8.5: a job whose unit ended (unit_ended(props) is true)."""
     if j["result"]:
         return
-    unit = (j["state"] or {}).get("unit")
+    st = j["state"] or {}
+    unit = st.get("unit")
     res = props.get("Result", "")
-    if os.path.exists(os.path.join(j["dir"], "cancel")):
+    if props.get("LoadState") == "not-found" and st.get("start_unconfirmed"):
+        start_failed(j, "the unit did not start (systemd-run failed and systemd does not know it)")
+        return
+    if os.path.exists(os.path.join(j["dir"], "logcap")):
+        write_result(j, "failed", "runner", unit_result=res or None, note=read_text(os.path.join(j["dir"], "logcap")).strip()
+                     or "the log grew past its limit")
+    elif os.path.exists(os.path.join(j["dir"], "cancel")):
         write_result(j, "cancelled", "runner", unit_result=res or None, note="cancelled while running")
     elif res == "oom-kill":
         write_result(j, "oom", "runner", unit_result=res, note="the job used more memory than its limit")
@@ -954,7 +1076,9 @@ def classify(j, props):
     elif props.get("LoadState") == "not-found" or res in ("success", ""):
         interrupted(j, "the job's process ended without a result")
     else:
-        write_result(j, "failed", "runner", unit_result=res, note="the unit ended with %s" % res)
+        last = log_last_mu_line(j["dir"])
+        write_result(j, "failed", "runner", unit_result=res, note="the unit ended with %s%s" % (
+            res, " (the log's last line from μ: %s)" % last if last else ""))
     if unit and unit != "session":
         systemctl("reset-failed", unit, timeout=15)
 
@@ -970,52 +1094,136 @@ def session_alive(st):
         return False
 
 
-def step(first=False):
-    """One pass of the runner under the lock. -> True while a job is queued or running."""
+def attempts_started(d):
+    """The highest "start attempt N" in events.log (0 if none): what a job's state was, when state.json is lost."""
+    n = 0
+    for m in re.finditer(r"start attempt ([0-9]+) as ", read_text(os.path.join(d, "events.log"))):
+        n = max(n, int(m.group(1)))
+    return n
+
+
+def rebuild_state(j):
+    """state.json unreadable (on-disk damage): rebuilt from the unit and events.log instead of taken as queued, so a
+    running job is not started a second time and the attempt counter is not reset (review: durability 5)."""
+    if j["state"] or j["result"] or fault("no-unit-check-torn"):
+        return
+    n = attempts_started(j["dir"])
+    if not n:
+        return   # it never started: queued (what the caller does with a missing state)
+    unit = "mu-job-%s.service" % j["id"]
+    st = {"state": "running", "attempt": n, "unit": unit, "updated": proto.iso(),
+          "note": "state.json was unreadable: rebuilt from events.log"}
+    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+    j["state"] = st
+    event(j["dir"], "state.json unreadable: rebuilt as running, attempt %d (%s)" % (n, unit))
+    journal("job %s: state.json unreadable, rebuilt as running attempt %d" % (j["id"], n))
+
+
+def log_cap_bytes(node):
+    v = node.get("log_cap_gb", DEFAULT_LOG_CAP_GB)
+    return int(float(v) * (1 << 30)) if isinstance(v, (int, float)) and v > 0 else DEFAULT_LOG_CAP_GB << 30
+
+
+def check_running(j, first, cap):
+    """One running job: -> True while it is still running."""
+    st = j["state"] or {}
+    if st.get("unit") == "session":
+        if session_alive(st):
+            return True
+        j["result"] = job_result(j["dir"])
+        if not j["result"]:
+            interrupted(j, "the ssh session that ran it ended")
+        return False
+    props = unit_props(st.get("unit", ""))
+    if not unit_ended(props):
+        if props.get("LoadState") == "error":
+            event(j["dir"], "systemctl show failed (%s): taken as still running" % (props.get("error") or "")[:200])
+        if first and fault("no-adopt"):
+            interrupted(j, "the runner restarted (test fault: not adopted)")
+            return False
+        if os.path.exists(os.path.join(j["dir"], "cancel")):
+            systemctl("stop", st["unit"], timeout=30)
+        elif not fault("no-log-cap"):
+            try:
+                size = os.path.getsize(os.path.join(j["dir"], "log"))
+            except OSError:
+                size = 0
+            if size > cap and not os.path.exists(os.path.join(j["dir"], "logcap")):
+                durable.write_durable(os.path.join(j["dir"], "logcap"), "the log grew past %s: the job was stopped\n"
+                                      % proto.human_size(cap))
+                event(j["dir"], "log over %d bytes: stopping %s" % (cap, st["unit"]))
+                systemctl("stop", st["unit"], timeout=30)
+        return True
+    j["result"] = job_result(j["dir"])   # the shim may have written it since the scan
+    classify(j, props)
+    return not j["result"] and (j["state"] or {}).get("state") == "running"
+
+
+def step(first=False, stop=None):
+    """One pass of the runner under the lock. -> True while a job is queued or running. A failure with one job is
+    journalled and the pass goes on with the others (review: durability 4). Once STOP[0] is set (SIGTERM), no job
+    is started."""
     with Lock():
         jobs = scan_jobs()
-        running = []
+        node = node_info()
+        cap = log_cap_bytes(node)
+        running, broken = [], set()
         for j in jobs:
-            st = j["state"] or {}
-            if j["result"] or st.get("state") != "running":
-                continue
-            if st.get("unit") == "session":
-                if session_alive(st):
-                    running.append(j)
-                else:
-                    j["result"] = job_result(j["dir"])
-                    if not j["result"]:
-                        interrupted(j, "the ssh session that ran it ended")
-                continue
-            props = unit_props(st.get("unit", ""))
-            if unit_active(props) and props.get("LoadState") != "error":
-                if first and fault("no-adopt"):
-                    interrupted(j, "the runner restarted (test fault: not adopted)")
+            try:
+                rebuild_state(j)
+                st = j["state"] or {}
+                if j["result"] or st.get("state") != "running":
                     continue
-                if os.path.exists(os.path.join(j["dir"], "cancel")):
-                    systemctl("stop", st["unit"], timeout=30)
-                running.append(j)
-                continue
-            j["result"] = job_result(j["dir"])   # the shim may have written it since the scan
-            classify(j, props)
-            if not j["result"] and (j["state"] or {}).get("state") == "running":
-                running.append(j)
+                if check_running(j, first, cap):
+                    running.append(j)
+            except Exception:  # noqa
+                if fault("runner-pass-aborts"):
+                    raise
+                broken.add(j["id"])
+                journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+                if (j["state"] or {}).get("state") == "running":
+                    running.append(j)   # unknown: never start another job beside it
         queued = queued_jobs(jobs)
         for j in list(queued):
-            if os.path.exists(os.path.join(j["dir"], "cancel")):
-                write_result(j, "cancelled", "runner", note="cancelled while queued")
+            try:
+                if os.path.exists(os.path.join(j["dir"], "cancel")):
+                    write_result(j, "cancelled", "runner", note="cancelled while queued")
+                    queued.remove(j)
+                elif not j["state"]:
+                    durable.write_record(os.path.join(j["dir"], "state.json"), {"state": "queued", "attempt": 1,
+                                                                                 "updated": proto.iso()})
+            except Exception:  # noqa
+                if fault("runner-pass-aborts"):
+                    raise
+                broken.add(j["id"])
                 queued.remove(j)
-            elif not j["state"]:
-                durable.write_record(os.path.join(j["dir"], "state.json"), {"state": "queued", "attempt": 1,
-                                                                             "updated": proto.iso()})
+                journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+        if stop and stop[0]:
+            return bool(running or queued)
         if not running and queued:
-            start_job(queued[0])
+            j = queued[0]
+            disk = disk_info(node)
+            if not fault("no-start-disk-check") and disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]:
+                note = "waiting: %s GB free on %s, jobs need %s" % (disk["free_gb"], disk["where"], disk["min_free_gb"])
+                if (j["state"] or {}).get("note") != note:
+                    st = dict(j["state"] or {"state": "queued", "attempt": 1}, note=note, updated=proto.iso())
+                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+                    event(j["dir"], note)
+                return True
+            try:
+                start_job(j)
+            except Exception:  # noqa
+                if fault("runner-pass-aborts"):
+                    raise
+                journal("runner: starting job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
             return True
         return bool(running or queued)
 
 
 def recover():
-    """§9.3, at the runner's start: folders without a valid job.json are deleted; the rest goes through step()."""
+    """§9.3, at the runner's start: temporary folders (a name starting with '.': never acknowledged) are deleted; a
+    folder with a final name whose job.json is unreadable is moved to damaged/, never deleted; the rest goes through
+    step()."""
     try:
         names = os.listdir(p("jobs"))
     except OSError:
@@ -1023,9 +1231,14 @@ def recover():
     with Lock():
         for n in names:
             d = job_dir(n)
-            if n.startswith(".") or not durable.read_record(os.path.join(d, "job.json")):
+            if n.startswith("."):
                 shutil.rmtree(d, ignore_errors=True)
                 journal("recovery: removed %s (never acknowledged)" % n)
+            elif not durable.read_record(os.path.join(d, "job.json")):
+                try:
+                    set_aside(n, "job.json unreadable at the runner's start")
+                except OSError as e:
+                    journal("recovery: could not move %s aside: %s" % (n, e))
 
 
 def set_busy(busy):
@@ -1058,7 +1271,7 @@ def run_runner():
     first = True
     while not stop[0]:
         try:
-            busy = step(first)
+            busy = step(first, stop)
         except Exception:  # noqa
             journal("runner error: %s" % traceback.format_exc().replace("\n", " | ")[-1500:])
             busy = True
@@ -1158,8 +1371,14 @@ def run_job(job_id):
     else:
         state, ec, sig = "failed", rc, None
     j["state"] = st
-    write_result(j, state, "shim", unit_result="success" if state == "succeeded" else None, exit_code=ec, signal=sig,
-                 outputs=outs, outputs_missing=missing)
+    try:
+        write_result(j, state, "shim", unit_result="success" if state == "succeeded" else None, exit_code=ec, signal=sig,
+                     outputs=outs, outputs_missing=missing)
+    except OSError as e:   # the runner's note then says why (it reads the last "== " line)
+        sys.stdout.write("== μ: could not write result.json (%s: %s); the job %s\n" % (
+            type(e).__name__, e, "succeeded" if state == "succeeded" else "ended " + state))
+        sys.stdout.flush()
+        return 70
     return 0
 
 
@@ -1350,5 +1569,9 @@ def main(args):
         else:
             print(json.dumps(a, indent=1))
         return 0
-    sys.stderr.write(__doc__.split("\n\n")[0] + "\n")
+    usage = __doc__.split("\n\n")[1] if "\n\n" in __doc__ else __doc__
+    if sub in ("-h", "--help", "help"):
+        sys.stdout.write("mu node: the compute node's own side (docs/design/job-layer.md §8)\n\n%s\n" % usage)
+        return 0
+    sys.stderr.write("mu node: unknown subcommand %r\n\n%s\n" % (sub, usage))
     return 64

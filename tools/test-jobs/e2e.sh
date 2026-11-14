@@ -195,6 +195,22 @@ r_keyreq() {
 f_keep_on() { KEEP_KEY=1; }
 f_keep_off() { KEEP_KEY=0; }
 
+# R05: revoke ends what a connection opened before it could still do (review finding 3)
+RFAULT=""
+r_revoke() {
+  local out rc m0 m1
+  close_master; ws compute status office-pc --json > /dev/null 2>&1   # a shared connection (ControlMaster) is open
+  asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O check mu-office-pc > /dev/null 2>&1 && m0=open || m0=none
+  sudo ${RFAULT:+MU_HOST_FAULT=$RFAULT} mu-wsl2-distro revoke avi-mac > /dev/null; sleep 2
+  asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O check mu-office-pc > /dev/null 2>&1 && m1=open || m1=gone
+  out="$(ws compute status office-pc --json 2>&1)"; rc=$?
+  authorize; close_master
+  M="master before the revoke: $m0, after: $m1; a call after it: exit $rc $(printf '%s' "$out" | jget error)"
+  [ "$m0" = open ] && [ "$m1" = gone ] && [ "$rc" = 5 ]
+}
+f_revoke_on() { RFAULT=revoke-keeps-sessions; sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.revoke.good"; sudo sed -i '/mu-gate: revoke check/d' /usr/local/lib/mu/mu-node-gate; }
+f_revoke_off() { RFAULT=""; sudo cp "$WORK/gate.revoke.good" /usr/local/lib/mu/mu-node-gate; close_master; }
+
 r_noshell() {
   local a b c
   a="$(wssh mu-office-pc 'cat /etc/passwd' 2>&1 < /dev/null)"; b="$(wssh mu-office-pc id 2>&1 < /dev/null)"; c="$(wssh -T mu-office-pc 2>&1 < /dev/null)"
@@ -547,6 +563,29 @@ r_protocol() {
   M="hello protocol=2: exit $rc, $(printf '%s' "$out" | jget error): $(printf '%s' "$out" | jget message)"
   [ "$rc" = 65 ] && [ "$(printf '%s' "$out" | jget error)" = protocol-mismatch ]
 }
+# R32: the tunnel's egress filter (review finding 2): what mu-tunnel.service may connect to, tested in a unit of
+# mu-tunnel with the values systemd has for the real unit: mu-sshd yes, the runner's own address no (a listener there
+# answers anything else)
+eprobe() {   # eprobe DENY ALLOW HOST/PORT
+  sudo timeout 40 systemd-run --quiet --wait --pipe --collect -p User=mu-tunnel ${1:+-p "IPAddressDeny=$1"} ${2:+-p "IPAddressAllow=$2"} \
+    /bin/bash -c 'timeout 5 bash -c "exec 3<>/dev/tcp/$0" 2>&1; echo "rc=$?"' "$3" 2>&1 < /dev/null | tr '\n' ' '
+}
+r_egress() {
+  local deny allow ip a b c
+  deny="$(systemctl show mu-tunnel.service -p IPAddressDeny --value)"; allow="$(systemctl show mu-tunnel.service -p IPAddressAllow --value)"
+  ip="$(ip -4 route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1) }')"
+  sudo sh -c 'nohup python3 -m http.server 18555 --bind 0.0.0.0 > /dev/null 2>&1 & echo $! > /tmp/mu-egress-listener.pid'; sleep 1
+  a="$(eprobe "$deny" "$allow" 127.0.0.1/2222)"; b="$(eprobe "$deny" "$allow" "$ip/18555")"; c="$(eprobe "" "" "$ip/18555")"
+  sudo sh -c 'kill "$(cat /tmp/mu-egress-listener.pid)"; rm -f /tmp/mu-egress-listener.pid'
+  M="unit: IPAddressDeny=[$deny] IPAddressAllow=[$allow]; mu-sshd: $a; $ip:18555: $b; the same without the filter: $c"
+  case "$a" in *rc=0*) ;; *) return 1 ;; esac
+  case "$b" in *"Operation not permitted"*) ;; *) return 1 ;; esac
+  case "$c" in *rc=0*) ;; *) return 1 ;; esac
+  wait_up 60 > /dev/null   # and the tunnel itself works through it
+}
+f_egress_on() { sudo MU_HOST_FAULT=no-egress-filter mu-wsl2-distro tunnel refresh > /dev/null 2>&1; wait_up 90 > /dev/null; }
+f_egress_off() { sudo mu-wsl2-distro tunnel refresh > /dev/null 2>&1; wait_up 90 > /dev/null; }
+
 r_fullcycle() {
   local id out rc
   asws rm -rf "$WCWD/results" "$WCWD/runs"
@@ -564,6 +603,7 @@ rows() {
   run_row R02 "key required: an unauthorised key gives exit 5" r_keyreq
   run_row R03 "no shell: 'cat /etc/passwd' bad-character, 'id' unknown-verb, no command no-command" r_noshell
   run_row R04 "no terminal (ssh -tt), no forwarding (ssh -N -L)" r_notty
+  run_row R05 "revoke: the open shared connection ends, and a call after it is refused (exit 5)" r_revoke
   run_row R06 "relay failures: password, fingerprint, port give exit 5 with the reason; node offline, relay down exit 4 within 5 s" r_relay
   run_row R07 "no relay password in any process's command line while calls run" r_nosecret
   run_row R10 "push with git-lfs hooks installed succeeds" r_lfs
@@ -585,12 +625,14 @@ rows() {
   run_row R27 "limits unavailable: with the self-test failing, submit is exit 6" r_limits_case
   run_row R30 "disk low: below min_free_gb, submit is exit 6 (disk-low)" r_disklow
   run_row R31 "protocol mismatch: hello with protocol 2 is refused (65, protocol-mismatch)" r_protocol
+  run_row R32 "the tunnel's egress filter: mu-sshd reachable, the runner's own address refused by the kernel" r_egress
 }
 faults() {
   must_fail R01 no-strict-hostkey f_strict_on f_strict_off r_hostkey
   must_fail R02 "key left in the key file" f_keep_on f_keep_off r_keyreq
   must_fail R03 "ForceCommand removed" f_force_on f_force_off r_noshell
   must_fail R04 "both locks removed (restrict and the sshd lines)" f_locks_on f_locks_off r_notty
+  must_fail R05 "revoke-keeps-sessions, and the gate's revoke check removed" f_revoke_on f_revoke_off r_revoke
   must_fail R06 bare-proxy f_bare_on f_bare_off r_relay
   must_fail R07 auth-in-argv f_argv_on f_argv_off r_nosecret
   must_fail R10 "push-hooks (no --no-verify)" f_hooks_on f_hooks_off r_lfs
@@ -611,6 +653,7 @@ faults() {
   must_fail R26 no-pin-register f_pinreg_on f_pinreg_off r_versions
   must_fail R26 route-by-pin f_route_on f_route_off r_versions
   must_fail R27 skip-limits-check true true r_limits_fault
+  must_fail R32 no-egress-filter f_egress_on f_egress_off r_egress
 }
 
 # ================================================================================================== the host script (H rows)
@@ -620,8 +663,8 @@ d = json.loads(sys.stdin.read() or "{}")
 print(" ".join("%s(%s)" % (c["name"], c["detail"][:90]) for c in d.get("checks", []) if c["result"] == "fail") or "none")'; }
 h_status() {
   local j; j="$(hstatus)"; echo "$j" > "$WORK/out/host-status-$RANDOM.json"
-  M="ok $(printf '%s' "$j" | jget ok); $(printf '%s' "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["checks"]), "checks")'); failed: $(printf '%s' "$j" | failed_checks)"
-  [ "$(printf '%s' "$j" | jget ok)" = true ]
+  M="ok $(printf '%s' "$j" | jget ok), ready $(printf '%s' "$j" | jget ready) $(printf '%s' "$j" | jget not_ready); $(printf '%s' "$j" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["checks"]), "checks")'); failed: $(printf '%s' "$j" | failed_checks)"
+  [ "$(printf '%s' "$j" | jget ok)" = true ] && [ "$(printf '%s' "$j" | jget ready)" = true ]
 }
 h_idempotent() {
   local c3 e3; c3="$(sed -n 's/^changed=//p' "$WORK/out/host/install-3.result")"; e3="$(sed -n 's/^exit=//p' "$WORK/out/host/install-3.result")"
@@ -650,7 +693,7 @@ h_updates() {   # what unattended-upgrades itself says it would take, on the run
   [ -n "$o" ] && ! printf '%s' "$o" | grep -Eq -- '-updates|-backports|-proposed' && printf '%s' "$o" | grep -q -- '-security'
 }
 host_rows() {
-  run_row H1 "the host script's status: every check passes (--no-wsl --offline)" h_status
+  run_row H1 "the host script's status: every check passes (--no-wsl --offline), and it says ready for jobs" h_status
   run_row H2 "install is idempotent: the third run changes nothing" h_idempotent
   run_row H3 "tunnel status: connected; the relay password in no output of the set-up" h_tunnel
   run_row H4 "keys, host-key: the workstation's key under its name, with restrict; the pinned host key is the node's" h_keys
@@ -676,6 +719,7 @@ host_faults() {
   must_fail H1 "tunnel.env readable by everyone (0644)" hf_envmode_on hf_envmode_off h_status
   must_fail H1 "something listening on port 22" hf_22_on hf_22_off h_status
   must_fail H1 "the tunnel stopped" hf_tunnel_on hf_tunnel_off h_status
+  must_fail H1 "the tunnel's egress filter removed" f_egress_on f_egress_off h_status
 }
 # last: uninstall, then install again. The node's host key must survive, so the workstation's pin still holds
 h_uninstall() {
@@ -683,7 +727,8 @@ h_uninstall() {
   fp0="$(sudo ssh-keygen -lf /etc/mu/ssh_host_ed25519_key.pub | awk '{ print $2 }')"
   sudo mu-wsl2-distro uninstall > "$WORK/out/host/uninstall.log" 2>&1 || { M="uninstall failed: $(tail -n 5 "$WORK/out/host/uninstall.log" | tr '\n' ' ')"; return 1; }
   for f in /etc/systemd/system/mu-sshd.service /etc/systemd/system/mu-tunnel.service /etc/mu/sshd_config /etc/mu/tunnel.env \
-           /etc/mu/authorized_keys/mu /usr/local/lib/mu/mu-node-gate /usr/local/lib/mu/chisel \
+           /etc/mu/authorized_keys/mu /usr/local/lib/mu/mu-node-gate /usr/local/lib/mu/chisel /etc/mu/tunnel.hosts \
+           /etc/systemd/system/mu-tunnel.service.d/50-mu-egress.conf /etc/systemd/system/mu-tunnel-refresh.timer \
            /etc/apt/apt.conf.d/52mu-unattended-upgrades /home/mu/.config/systemd/user/mu-node.service; do
     sudo test -e "$f" && left="$left $f"
   done
@@ -714,6 +759,21 @@ host_cycle() {
   run_row H7 "install again, credential, authorize: the workstation's old pin still holds; then install changes nothing" h_reinstall
 }
 
+# every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1"
+check_ran() {
+  local want got
+  want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"
+  got="$(awk -F'\t' '$1 == "PASS" || $1 == "FAIL" { print $2 }' "$WORK/results.tsv" | sort -u | tr '\n' ' ')"
+  [ "$want" = "$got" ] && row PASS Z1 "every expected row ran" "$(printf '%s' "$want" | wc -w | tr -d ' ') rows" \
+    || row FAIL Z1 "every expected row ran" "expected: $want; ran: $got"
+  want="$(printf '%s\n' $EXPECT_FAULTS | sort | tr '\n' ' ')"
+  got="$(awk -F'\t' '$1 == "FAILS-OK" || $1 == "MISSED" { print $2 }' "$WORK/results.tsv" | sort | tr '\n' ' ')"
+  [ "$want" = "$got" ] && row PASS Z2 "every expected fault ran" "$(printf '%s' "$want" | wc -w | tr -d ' ') faults" \
+    || row FAIL Z2 "every expected fault ran" "expected: $want; ran: $got"
+}
+
 collect() {
   sudo journalctl -u mu-sshd -u mu-tunnel --no-pager > "$WORK/logs/system-units.log" 2>&1 || true
   sudo mu-wsl2-distro status --no-wsl --offline > "$WORK/logs/host-status.txt" 2>&1 || true
@@ -740,7 +800,8 @@ summary() {
 
 case "$MODE" in
   probe) setup && probe ;;
-  all) if setup; then probe; host_rows; rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; }; host_cycle; fi ;;
+  all) if setup; then probe; host_rows; rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; }; host_cycle
+         [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran; fi ;;
   *) echo "usage: e2e.sh probe|all" >&2; exit 2 ;;
 esac
 collect; summary

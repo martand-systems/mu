@@ -3,7 +3,7 @@
 # Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
 # The job layer's commands (compute, submit, status, log, fetch, cancel, node) always run on the default toolchain.
-MU_DISPATCHER_REV=7   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=8   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -68,14 +68,23 @@ require_installed() {
 # -I -S: no site packages (the toolchain's .pth files cost a second per start) and nothing from the environment; cli.py
 # puts recipe/src on sys.path itself. lib/mu-env.sh is not sourced: systemctl --user, ssh and git need the caller's
 # environment. Test fault: MU_DISPATCH_FAULT=route-by-pin routes them by the project's pin like any other command.
+# infra_die MESSAGE ERROR NEXT: exit 3, as one JSON object on stdout when the command has --json (before any --)
+infra_die() {
+  if [ "$INFRA_JSON" = 1 ]; then
+    printf '{"ok": false, "exit": 3, "error": "%s", "message": "%s", "next": "%s"}\n' "$2" "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')" \
+      "$(printf '%s' "$3" | sed 's/[\\"]/\\&/g')"
+  fi
+  die "$1. Run: $3" 3
+}
 infra() {
-  local d py f
+  local d py f a
+  INFRA_JSON=0; for a in "$@"; do [ "$a" = -- ] && break; [ "$a" = --json ] && INFRA_JSON=1; done
   if [ "${MU_DISPATCH_FAULT:-}" = route-by-pin ]; then resolve; d="$V"; else d="$(default_version)"; fi
-  [ -n "$d" ] || die "no μ toolchain is installed yet. In a clone of martand-systems/mu, run: ./install.sh" 3
-  installed "$d" || die "the default μ $d is not installed completely. Reinstall it: mu install $d --force" 3
+  [ -n "$d" ] || infra_die "no μ toolchain is installed yet" no-toolchain "./install.sh (in a clone of martand-systems/mu)"
+  installed "$d" || infra_die "the default μ $d is not installed completely" incomplete "mu install $d --force"
   py="$TC/$d/env/bin/python"; f="$TC/$d/recipe/src/mu/cli.py"
-  [ -x "$py" ] || die "μ $d has no Python at $(tilde "$py"). Reinstall it: mu install $d --force" 3
-  [ -f "$f" ] || die "μ $d has no job commands (they start with the release after v2026.11.6). Run: mu update" 3
+  [ -x "$py" ] || infra_die "μ $d has no Python at $(tilde "$py")" no-python "mu install $d --force"
+  [ -f "$f" ] || infra_die "μ $d has no job commands (they start with the release after v2026.11.6)" no-job-layer "mu update"
   MU_INFRA_VERSION="$d" exec "$py" -I -S "$f" "$@"
 }
 
@@ -338,12 +347,21 @@ cmd_status() {
   others="$(versions | grep -vx "$V" | tr '\n' ' ' || true)"
   [ -z "$others" ] || printf '%salso installed: %s%s\n' "$DIM" "$others" "$N"
   au_status_line
+  # the job layer, from local files only (no network): paired nodes, and jobs sent from this clone
+  local cn="" c jn
+  for c in "$MU_HOME"/compute/*/node.conf; do [ -f "$c" ] || continue; c="${c%/node.conf}"; cn="$cn ${c##*/}"; done
+  [ -z "$cn" ] || printf '%scompute node(s):%s · mu compute status · mu submit -- CMD%s\n' "$DIM" "$cn" "$N"
+  if [ -n "${MU_PROJECT:-}" ] && [ -d "$MU_PROJECT/.mu/jobs" ]; then
+    jn="$(ls "$MU_PROJECT/.mu/jobs" 2>/dev/null | grep -c '\.json$' || true)"
+    [ "${jn:-0}" = 0 ] || printf '%s%s job(s) sent from this clone: mu status%s\n' "$DIM" "$jn" "$N"
+  fi
   cat <<H
 
   ${B}mu run${N} <tool> [args]   run a tool: python, gmsh, ccx, cad, openfoam, pvbatch, prusa-slicer, cam-python, …
   ${B}mu doctor${N}              check every tool        ${B}mu test${N}       benchmark suite
   ${B}mu link${N}                connect this project    ${B}mu versions${N}   installed versions
   ${B}mu update${N}              install the latest μ    ${B}mu help${N}       all commands
+  ${B}mu submit${N} -- CMD         run on a compute node   ${B}mu status${N}     this project's jobs
 H
 }
 
@@ -352,7 +370,8 @@ cmd_help() {
 ${B}μ (mu)${N}: Martand's engineering toolchain
 
 ${B}Versions${N}
-  mu                       status: the version this folder uses, its project, common commands
+  mu                       status of the toolchain: the version this folder uses, its project, common commands
+                           (\`mu status\` is job status)
   mu versions              installed versions, the default, and which projects pin each
   mu install [V|latest]    download release V and install it (installer options: ./install.sh --help)
   mu update                install the latest release and make it the default
@@ -369,13 +388,17 @@ ${B}Updates${N}
   mu autoupdate set K V    settings: policy switch|install-only, min_free_gb, gc on|off, keep_previous, hour, minute,
                            max_hours. Updates wait while $(tilde "$AU_BUSY") exists (a job runner holds it)
 
-${B}Compute jobs${N} (always the default version; every command takes --json)
+${B}Compute jobs${N} (always the default version; every command takes --json and --help)
   mu compute add NODE ...  pair a compute node (prints the one command to run on it); list | status [NODE] | remove NODE
-  mu submit [--on NODE] [--mem 16G] [--time 6h] [--output GLOB]... [--wait] -- CMD...
-                           run CMD on the node from a snapshot of this project (git), under the project's pinned μ
-  mu status [JOB] [--wait] this project's jobs, or one job (exit 7 when it ended otherwise than succeeded)
-  mu log JOB [-f] [--tail N] [--offset B]   the job's output     mu fetch JOB [--into DIR]   outputs + runs/JOB.json
+  mu submit [--on NODE] [--mem SIZE] [--time DUR] [--cores N] [--output GLOB]... [--wait [--timeout S]] -- CMD...
+                           run CMD on the node from a snapshot of this project, under its pinned μ
+                           (defaults: node RAM - 2 GB, 12 h; mu submit --help for all options)
+  mu status [JOB] [--wait [--timeout S]]   this project's jobs, or one job (not the toolchain status: that is plain \`mu\`)
+  mu log JOB [-f] [--tail N] [--offset B]   the job's output
+  mu fetch JOB [--into DIR] [--max-size 50M]   the declared outputs + runs/JOB.json
   mu cancel JOB            stop a queued or running job          mu node ...   the node's own side (enable, selftest)
+  Exit codes: 0 ok, 2 usage, 3 version, 4 unreachable, 5 refused, 6 node cannot, 7 job failed, 8 integrity,
+  9 no such, 10 still running
 
 ${B}Tools${N} (from the version this folder uses)
 H

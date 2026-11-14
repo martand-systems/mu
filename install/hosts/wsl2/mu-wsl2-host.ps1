@@ -1113,7 +1113,7 @@ function Invoke-DistroSetup {
   $t = $script:DistroScriptTarget
   Copy-IntoDistro $script:DistroScriptText $t '755'
   Copy-IntoDistro $script:GateText $script:GateTarget '644'
-  $a = @('-d', $Distro, '-u', 'root', '--exec', $t, 'install', '--user', $User, '--repo', $Repo)
+  $a = @('-d', $Distro, '-u', 'root', '--exec', $t, 'install', '--user', $User, '--repo', $Repo, '--from-host')
   # the drive that holds the distro's disk: the distro records it for mu's disk check, which cannot ask Windows once
   # interop is off (docs/design/job-layer.md 13.4)
   $base = $Location
@@ -1302,7 +1302,7 @@ function Invoke-Install {
   $restartVm = $wslconfigChanged
   $restartDistro = ($res.restart -eq '1') -or $newDistro
   if ($NoRestart -and ($restartVm -or $restartDistro)) {
-    Write-Note 'not restarting (-NoRestart): the changes apply at the next start of WSL (wsl --shutdown, or a Windows restart)'
+    Write-Note "not restarting (-NoRestart): apply the changes with a clean stop and start: $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') test-stop"
   } elseif ($restartVm) {
     Write-Note 'wsl --shutdown, so that .wslconfig applies: this stops every running WSL distro of this user'
     [void](Invoke-Wsl -Arguments @('--shutdown'))

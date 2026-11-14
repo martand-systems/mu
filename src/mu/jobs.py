@@ -16,6 +16,10 @@ MU_POLL_S (seconds between status polls, default 5), MU_JOBS_FAULT (comma-separa
   no-fetch-hash      fetch does not compare sizes and SHA-256
   no-member-check    fetch writes any regular tar member, named or not
   lose-answer        submit stops after sending, before reading the node's answer (a lost link)
+  trust-node-globs   fetch takes the declared outputs from the node's result.json, not from this clone's record
+  dot-globs          fetch accepts outputs under .git/ and .mu/ and lets a wildcard match hidden names
+  node-hint          a node's refusal sets `next`, and its extra fields pass through unfiltered
+  no-size-guard      fetch writes a member to its end before it compares the size (no early stop)
 """
 import argparse
 import base64
@@ -42,6 +46,12 @@ from mu.proto import MuError
 SERVICE = "systems.martand.mu.relay"
 DEFAULT_PORT = 7001
 CALL_TIMEOUT = 300
+ANSWER_CAP = 1 << 20          # a JSON answer of the node: at most 1 MB is read (review finding 5)
+RESULT_CAP = durable.MAX_RECORD + (1 << 16)   # fetch what=result: the record (16 MB at most) in one tar member
+PC_MU = "wsl -d mu-compute -u mu --cd ~ --"       # what the owner types at the PC (PowerShell), as mu or as root
+PC_ROOT = "wsl -d mu-compute -u root --"
+LARGE_UNTRACKED = 100 << 20   # the snapshot's uncommitted and untracked files above which submit asks --allow-large
+KEEP_SNAP_REFS = 10           # refs/mu/snap/* of accepted jobs kept in this clone (all unaccepted ones are kept)
 
 
 # ------------------------------------------------------------------------------------------------ paths and files
@@ -269,13 +279,15 @@ def host_key_parse(text):
     parts = (text or "").strip().split()
     if len(parts) < 2 or parts[0] != "ssh-ed25519" or "\n" in (text or "").strip():
         raise MuError(proto.EXIT_USAGE, "bad-host-key", "--host-key must be one ed25519 public key: 'ssh-ed25519 AAAA…'",
-                      "copy it from the PC: wsl -d mu-compute -u root -- mu-wsl2-distro status")
+                      "copy it from the PC: %s mu-wsl2-distro host-key" % PC_ROOT)
     try:
         blob = base64.b64decode(parts[1], validate=True)
     except Exception:
-        raise MuError(proto.EXIT_USAGE, "bad-host-key", "the host key's base64 is damaged", "copy the key again")
+        raise MuError(proto.EXIT_USAGE, "bad-host-key", "the host key's base64 is damaged",
+                      "copy the key again: %s mu-wsl2-distro host-key" % PC_ROOT)
     if not blob.startswith(b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20") or len(blob) != 51:
-        raise MuError(proto.EXIT_USAGE, "bad-host-key", "that is not an ed25519 host key", "copy the key again")
+        raise MuError(proto.EXIT_USAGE, "bad-host-key", "that is not an ed25519 host key",
+                      "copy the key again: %s mu-wsl2-distro host-key" % PC_ROOT)
     return parts[0], parts[1], key_fingerprint(blob)
 
 
@@ -350,10 +362,8 @@ class Conn:
         status = self.new_status()
         muxed = self.muxed()
         try:
-            p = subprocess.run(self.argv(request), input=data if data is not None else None,
-                               stdin=subprocess.DEVNULL if data is None else None, capture_output=True,
-                               timeout=min(timeout, 12) if (quick and muxed and retry) else timeout, env=self.env(status))
-            rc, out, err = p.returncode, p.stdout, p.stderr.decode("utf-8", "replace")
+            rc, out, err = capture(self.argv(request), data, min(timeout, 12) if (quick and muxed and retry) else timeout,
+                                   self.env(status), ANSWER_CAP)
         except subprocess.TimeoutExpired:
             st = read_status(status)
             _unlink(status)
@@ -376,9 +386,9 @@ class Conn:
             raise node_error(rc, err, self.name)
         if rc == 255:
             classify_255(self.conf, err, st, muxed)
-        raise MuError(proto.EXIT_ERROR, "node-error", "%s answered with exit %d: %s" % (
-            self.name, rc, (err.strip() or "(no message)")[-600:]),
-            "if μ on the node is older than the job layer: on the PC, wsl -d mu-compute -u mu -- mu update")
+        raise MuError(proto.EXIT_ERROR, "node-error", "%s answered with exit %d" % (self.name, rc),
+                      "if μ on the node is older than the job layer: on the PC, %s mu update" % PC_MU,
+                      node_message=proto.clean_text((err.strip() or "(no message)")[-600:], 600))
 
     def call(self, verb, data=None, timeout=CALL_TIMEOUT, **args):
         """A JSON verb -> the node's answer (dict). Failures raise MuError with the client's exit code."""
@@ -386,20 +396,23 @@ class Conn:
         rc, out, err, st, muxed = self.run(request, data, timeout, quick=verb in ("hello", "status", "list"))
         if rc != 0:
             if rc in proto.NODE_TO_CLIENT:
-                raise node_error(rc, out.decode("utf-8", "replace") + "\n" + err, self.name)
+                raise node_error(rc, out.decode("utf-8", "replace") + "\n" + err, self.name, args.get("id"))
             self.fail(rc, err, st, muxed)
         try:
             ans = json.loads(out.decode("utf-8").strip().splitlines()[0] if out.strip() else "")
         except (ValueError, UnicodeDecodeError, IndexError):
-            raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer to '%s' is not JSON: %r" % (
-                self.name, verb, out[:200]), "the node's ~/.bashrc must print nothing; on the PC: "
-                "wsl -d mu-compute -u root -- mu-wsl2-distro status")
+            raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer to '%s' is not JSON" % (self.name, verb),
+                          "the node's ~/.bashrc must print nothing; on the PC: %s mu-wsl2-distro status" % PC_ROOT,
+                          node_message=proto.clean_text(repr(out[:200]), 300))
         if not isinstance(ans, dict):
-            raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer is not a JSON object" % self.name, "")
-        return ans
+            raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer is not a JSON object" % self.name,
+                          "the node's μ may differ from this one: mu compute status %s; on the PC: %s mu update"
+                          % (self.name, PC_MU))
+        return proto.clean_obj(ans)   # every string from the node: no control characters, length-capped
 
     def stream(self, request, on_data, data=None):
-        """A streaming verb (log, fetch): ON_DATA(bytes) for each piece of stdout. -> (rc, err, st, muxed)."""
+        """A streaming verb (log, fetch): ON_DATA(bytes) for each piece of stdout (it may raise to stop the stream: the
+        ssh process is then killed). -> (rc, err, st, muxed)."""
         status = self.new_status()
         muxed = self.muxed()
         p = subprocess.Popen(self.argv(request), stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
@@ -437,6 +450,55 @@ def _unlink(p):
         os.unlink(p)
     except OSError:
         pass
+
+
+def capture(argv, data, timeout, env, cap):
+    """subprocess.run(capture_output=True) that reads at most CAP bytes of stdout and of stderr: a node that answers
+    without end is cut off (the process killed) instead of filling this computer's memory. -> (rc, out, err text).
+    Raises subprocess.TimeoutExpired like subprocess.run, and MuError answer-too-large."""
+    p = subprocess.Popen(argv, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=env)
+    bufs, over = {"out": [], "err": []}, []
+
+    def reader(f, key):
+        n = 0
+        while True:
+            b = f.read1(65536) if hasattr(f, "read1") else f.read(65536)
+            if not b:
+                return
+            if n + len(b) > cap:
+                bufs[key].append(b[:cap - n])
+                over.append(key)
+                p.kill()
+                return
+            bufs[key].append(b)
+            n += len(b)
+
+    def writer():
+        try:
+            p.stdin.write(data)
+            p.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+    ts = [threading.Thread(target=reader, args=(p.stdout, "out"), daemon=True),
+          threading.Thread(target=reader, args=(p.stderr, "err"), daemon=True)]
+    if data is not None:
+        ts.append(threading.Thread(target=writer, daemon=True))
+    for t in ts:
+        t.start()
+    try:
+        rc = p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+        raise
+    for t in ts:
+        t.join(5)
+    if over:
+        raise MuError(proto.EXIT_INTEGRITY, "answer-too-large", "the node's answer is larger than %s: cut off, not read"
+                      % proto.human_size(cap), "retry once; if it repeats, the node's μ is damaged or not ours: on the PC, "
+                      "%s mu-wsl2-distro status" % PC_ROOT)
+    return rc, b"".join(bufs["out"]), b"".join(bufs["err"]).decode("utf-8", "replace")
 
 
 def settle(path, rc, err, muxed):
@@ -478,8 +540,8 @@ RELAY_REASONS = {
     "relay-rule": ("the relay does not let {u} reach port {p} (its access rules)",
                    "check relay_port in node.conf against the relay's RELAY_CLIENTS (relay/gen-credentials.sh show)"),
     "node-offline": ("the relay is up, but {n} is not connected to it (its tunnel is down, or the PC is off or asleep)",
-                     "retry later; on the PC: wsl -d mu-compute -u root -- mu-wsl2-distro status. A job already "
-                     "accepted is unaffected"),
+                     "retry later; on the PC: " + PC_ROOT + " mu-wsl2-distro status. A job already accepted is "
+                     "unaffected"),
     "relay-unreachable": ("the relay at {url} cannot be reached", "check this computer's network and retry; "
                           "mu compute status {n}"),
     "relay-lost": ("the connection to the relay was lost", "retry; a job already accepted is unaffected"),
@@ -500,13 +562,22 @@ def classify_255(conf, err, st, muxed):
     if "REMOTE HOST IDENTIFICATION HAS CHANGED" in err or "Host key verification failed" in err:
         raise MuError(proto.EXIT_REFUSED, "host-key", "%s's host key differs from the key pinned at pairing. Never "
                       "retried; nothing was sent [host-key]" % n,
-                      "if the node was reinstalled on purpose, compare the key shown on the PC (mu-wsl2-distro status) "
-                      "and pair again: mu compute remove %s; mu compute add %s --host-key ..." % (n, n),
-                      reason="host-key", node=n)
+                      "tell the user. If the node was reinstalled on purpose, compare the key the PC shows (%s "
+                      "mu-wsl2-distro host-key) and pair again: mu compute remove %s; mu compute add %s --host-key ..."
+                      % (PC_ROOT, n, n), reason="host-key", node=n)
     if "Permission denied (publickey" in err:
+        ws = conf.get("workstation") or u
+        pub, fp = "<public key: mu compute list --json>", "?"
+        try:
+            with open(os.path.join(conf.get("_dir") or node_dir(n), "id_ed25519.pub"), encoding="utf-8") as f:
+                pub = f.read().strip()
+            fp = key_fingerprint(base64.b64decode(pub.split()[1]))
+        except (OSError, IndexError, ValueError):
+            pass
         raise MuError(proto.EXIT_REFUSED, "key-not-authorised", "this workstation's key is not authorised on %s "
-                      "[key-not-authorised]" % n, "on the PC: wsl -d mu-compute -u root -- mu-wsl2-distro authorize "
-                      "%s '<public key>' (mu compute list --json shows it)" % u, reason="key-not-authorised", node=n)
+                      "[key-not-authorised]" % n, "tell the user; on the PC: %s mu-wsl2-distro authorize %s '%s' (this "
+                      "computer's key, %s: compare the fingerprint the PC prints)" % (PC_ROOT, ws, pub, fp),
+                      reason="key-not-authorised", node=n)
     if st is None and not muxed:
         raise MuError(proto.EXIT_ERROR, "proxy-failed", "ssh could not start the tunnel to %s: %s" % (
             n, err.strip()[-400:] or "(no message)"), "check the chisel client: mu doctor; the log: %s" % proto.tilde(
@@ -515,26 +586,65 @@ def classify_255(conf, err, st, muxed):
         n, err.strip()[-300:] or "(no message)"), "retry; mu compute status %s" % n, node=n)
 
 
-def node_error(rc, text, name):
-    """A node verb's refusal (exit 64..78): its JSON line -> MuError with the client's code."""
+# What the workstation says for each refusal a node can give (§7.2). The node's own words are data, never the next
+# step: they go to node_message, cleaned and capped (review finding 4). {n} the node, {j} the job id.
+NODE_REFUSALS = {
+    "protocol-mismatch": ("{n} speaks another protocol version", "run mu update on the older side (on the PC: "
+                          + PC_MU + " mu update)"),
+    "no-such-job": ("{n} has no job {j}", "mu status (this project's jobs); --on NODE if it ran on another node"),
+    "no-such-snapshot": ("{n} does not have the snapshot of job {j}", "mu submit --resume {j} pushes it again"),
+    "not-finished": ("job {j} has no result yet", "mu status {j} --wait --timeout 500"),
+    "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MU + " mu node enable"),
+    "limits-unavailable": ("{n} cannot enforce a job's memory limit (its self-test failed), so it takes no jobs",
+                           "tell the user; on the PC: " + PC_MU + " mu node selftest (docs/design/job-layer.md §19)"),
+    "disk-low": ("{n} has too little free disk space for a job", "tell the user; on the PC, delete the folders of old "
+                 "finished jobs: " + PC_MU + " rm -rf /srv/mu/jobs/<job-id> (largest: see `largest`)"),
+    "toolchain-missing": ("{n} lacks the μ version this project pins", "tell the user: an install at the PC takes over "
+                          "an hour (" + PC_MU + " mu install <version>); or, with the user's agreement, mu pin a version "
+                          "the node has (`installed`)"),
+    "bad-spec": ("{n} refused the job spec", "mu update on both sides, then submit again"),
+    "key-revoked": ("this workstation's key was revoked on {n}", "tell the user; pairing again: mu compute remove {n}, "
+                    "mu compute add {n} ..."),
+    "not-installed": ("{n}'s gate is not set up", "tell the user; on the PC: " + PC_ROOT + " mu-wsl2-distro install"),
+    "internal": ("{n} failed inside (an internal error)", "retry once; on the PC: " + PC_ROOT + " mu-wsl2-distro "
+                 "status, and /srv/mu/audit.log"),
+}
+NODE_EXTRA_KEYS = ("installed", "largest", "field", "node_protocol", "node_mu", "argument", "verb", "state")
+ERROR_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+
+
+def node_error(rc, text, name, job_id=None):
+    """A node verb's refusal (exit 64..78): its JSON line -> MuError with the client's code, the workstation's own
+    message and next step for that error, and the node's text only in node_message."""
     ans = {}
-    for line in text.splitlines():
+    for line in text.splitlines()[:50]:
         line = line.strip()
         if line.startswith("{"):
             try:
-                ans = json.loads(line)
+                ans = json.loads(line[:65536])
                 break
             except ValueError:
                 pass
+    if not isinstance(ans, dict):
+        ans = {}
     code = proto.NODE_TO_CLIENT.get(rc, proto.EXIT_ERROR)
-    err = ans.get("error", "node-error")
+    err = ans.get("error") if isinstance(ans.get("error"), str) and ERROR_NAME.match(ans.get("error")) else "node-error"
     if err == "not-finished":
         code = proto.EXIT_USAGE
-    if err == "protocol-mismatch":
+    if err in ("protocol-mismatch", "key-revoked"):
         code = proto.EXIT_REFUSED
-    msg = ans.get("message") or "%s refused the request: %s" % (name, err)
-    extra = {k: v for k, v in ans.items() if k not in ("ok", "error", "hint", "message")}
-    return MuError(code, err, "%s [%s]" % (msg, err), ans.get("hint", ""), node=name, **extra)
+    said = proto.clean_text(" ".join(str(ans.get(k)) for k in ("message", "hint") if ans.get(k)), 600)
+    if fault("node-hint"):   # the old way: the node's hint is the next step, its fields pass through
+        extra = {k: v for k, v in ans.items() if k not in ("ok", "error", "hint", "message")}
+        return MuError(code, err, "%s [%s]" % (ans.get("message") or "%s refused the request: %s" % (name, err), err),
+                       ans.get("hint", ""), node=name, **extra)
+    msg, hint = NODE_REFUSALS.get(err, ("{n} refused the request (%s)" % err, "the node's μ may differ from this "
+                                         "one: mu compute status {n}; mu update on the older side"))
+    j = job_id or "<job-id>"
+    extra = {k: proto.clean_obj(ans[k]) for k in NODE_EXTRA_KEYS if k in ans}
+    if said:
+        extra["node_message"] = said
+    return MuError(code, err, msg.format(n=name, j=j) + " [%s]" % err, hint.format(n=name, j=j), node=name, **extra)
 
 
 # ------------------------------------------------------------------------------------------------ the ProxyCommand
@@ -685,17 +795,24 @@ def cmd_compute_add(a):
         raise MuError(proto.EXIT_USAGE, "exists", "%s is already paired" % name, "mu compute remove %s first" % name)
     ktype, kb64, hostfp = host_key_parse(a.host_key)
     if not re.match(r"^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$", a.relay or ""):
-        raise MuError(proto.EXIT_USAGE, "bad-relay-url", "--relay must be a URL like https://relay.martand.systems", "")
+        raise MuError(proto.EXIT_USAGE, "bad-relay-url", "--relay must be a URL like https://relay.martand.systems",
+                      "e.g. --relay https://relay.martand.systems (relay/gen-credentials.sh client <workstation> prints "
+                      "RELAY_URL)")
     if not FINGERPRINT.match(a.relay_fingerprint or ""):
         raise MuError(proto.EXIT_USAGE, "bad-fingerprint", "--relay-fingerprint must be the relay's fingerprint "
                       "(44 characters of base64)", "relay/gen-credentials.sh fingerprint")
     if not proto.NODE_NAME.match(a.relay_user or ""):
-        raise MuError(proto.EXIT_USAGE, "bad-relay-user", "--relay-user must be the relay client name, e.g. avi-mac", "")
+        raise MuError(proto.EXIT_USAGE, "bad-relay-user", "--relay-user must be the relay client name, e.g. avi-mac",
+                      "this computer's relay client name: relay/gen-credentials.sh show (role workstation)")
     if not (7001 <= a.relay_port <= 7999):
-        raise MuError(proto.EXIT_USAGE, "bad-relay-port", "--relay-port must be 7001 to 7999", "")
+        raise MuError(proto.EXIT_USAGE, "bad-relay-port", "--relay-port must be 7001 to 7999",
+                      "the port the relay gave the node: relay/gen-credentials.sh show")
     store = a.secret_store or ("keychain" if sys.platform == "darwin" else "file")
     if a.relay_password_stdin:
-        password = sys.stdin.readline().strip()
+        if sys.stdin.isatty():   # typed or pasted at a terminal: never shown
+            password = getpass.getpass("relay password of %s (not shown): " % a.relay_user).strip()
+        else:
+            password = sys.stdin.readline().strip()
     else:
         password = os.environ.get("MU_RELAY_PASSWORD", "")
     if not PASSWORD.match(password):
@@ -704,7 +821,7 @@ def cmd_compute_add(a):
                       "relay/gen-credentials.sh client %s prints it" % a.relay_user)
     workstation = a.name or a.relay_user
     if not proto.KEY_NAME.match(workstation):
-        raise MuError(proto.EXIT_USAGE, "bad-name", "--name must be [a-z0-9-]{1,32}", "")
+        raise MuError(proto.EXIT_USAGE, "bad-name", "--name must be [a-z0-9-]{1,32}", "e.g. --name avi-mac")
     safe_path_for_config(mu_home())
     keygen = shutil.which("ssh-keygen")
     if not keygen:
@@ -716,7 +833,9 @@ def cmd_compute_add(a):
         p = subprocess.run([keygen, "-q", "-t", "ed25519", "-N", "", "-C", workstation, "-f",
                             os.path.join(tmpd, "id_ed25519")], capture_output=True, stdin=subprocess.DEVNULL)
         if p.returncode != 0:
-            raise MuError(proto.EXIT_ERROR, "keygen", "ssh-keygen failed: %s" % p.stderr.decode(errors="replace"), "")
+            raise MuError(proto.EXIT_ERROR, "keygen", "ssh-keygen failed: %s" % p.stderr.decode(errors="replace"),
+                          "check that %s is writable and has free space, then run mu compute add again"
+                          % proto.tilde(compute_root()))
         # explicit modes: a default ACL on the folder (seen on CI runners) can leave the key 0644, which ssh refuses
         os.chmod(os.path.join(tmpd, "id_ed25519"), 0o600)
         os.chmod(os.path.join(tmpd, "id_ed25519.pub"), 0o644)
@@ -734,10 +853,15 @@ def cmd_compute_add(a):
     with open(os.path.join(d, "id_ed25519.pub"), encoding="utf-8") as f:
         pub = f.read().strip()
     pubfp = key_fingerprint(base64.b64decode(pub.split()[1]))
-    auth_cmd = "wsl -d mu-compute -u root -- mu-wsl2-distro authorize %s '%s'" % (workstation, pub)
+    auth_cmd = "%s mu-wsl2-distro authorize %s '%s'" % (PC_ROOT, workstation, pub)
+    stick_cmd = 'cmd /c "wsl -d mu-compute -u root --exec /usr/local/sbin/mu-wsl2-distro authorize %s - < E:\\%s.pub"' % (
+        workstation, workstation)
+    durable.write_durable(os.path.join(d, "authorize.txt"), "# on the PC (PowerShell), either:\n%s\n%s\n# (the second "
+                          "reads the key from a stick: copy id_ed25519.pub there as %s.pub)\n" % (auth_cmd, stick_cmd,
+                                                                                               workstation), 0o644)
     out = {"ok": True, "node": name, "workstation": workstation, "public_key": pub, "key_fingerprint": pubfp,
            "host_key_fingerprint": hostfp, "secret_store": store, "authorize_command": auth_cmd,
-           "folder": d}
+           "authorize_command_stick": stick_cmd, "folder": d}
     if a.json:
         proto.emit_json(out)
     else:
@@ -745,7 +869,9 @@ def cmd_compute_add(a):
         print("  host key        %s   (compare with the PC's screen)" % hostfp)
         print("  this computer   %s   key %s" % (workstation, pubfp))
         print("  relay password  stored in the %s" % ("login Keychain" if store == "keychain" else "file relay.auth (0600)"))
-        print("\nOn the PC, once:\n  %s\nThen: mu compute status %s" % (auth_cmd, name))
+        print("\nOn the PC, once (either; also in %s):\n  %s\n  %s   (key copied to the stick as %s.pub)\n"
+              "Then: mu compute status %s" % (proto.tilde(os.path.join(d, "authorize.txt")), auth_cmd, stick_cmd,
+                                              workstation, name))
     return 0
 
 
@@ -796,7 +922,9 @@ def hello(conn):
 def cmd_compute_status(a):
     names = [a.node] if a.node else paired_nodes()
     if not names:
-        raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired", "mu compute add ...")
+        raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired",
+                      "mu compute add <node> --host-key '...' --relay URL --relay-fingerprint FP --relay-user NAME "
+                      "--relay-password-stdin (docs/design/first-job-checklist.md)")
     results, worst = [], 0
     for n in names:
         conf = load_node(n)
@@ -1018,20 +1146,90 @@ def parse_command(args):
     return args, []
 
 
+def check_node(ans, node_name, pin, job_id=None):
+    """What hello says about taking a job of this project: -> None, or MuError (3 or 6). Asked before the snapshot is
+    made, so a node that cannot take the job costs nothing (§4.2: each refusal happens before anything is sent)."""
+    extra = {"job_id": job_id} if job_id else {}
+    installed = list((ans.get("mu") or {}).get("installed") or [])
+    if pin not in installed:
+        have = sorted(installed)[-1] if installed else None
+        raise MuError(proto.EXIT_VERSION, "toolchain-missing", "%s has no μ %s, which this project pins (installed "
+                      "there: %s)" % (node_name, pin, ", ".join(installed) or "none"),
+                      "tell the user: the node needs μ %s; at the PC (an install takes over an hour): %s mu install %s"
+                      "%s" % (pin, PC_MU, pin, "; or, with the user's agreement, pin a version the node has: mu pin %s"
+                              % have if have else ""), installed=installed, **extra)
+    if ans.get("runner") != "active":
+        raise MuError(proto.EXIT_NODE_CANNOT, "not-enabled", "the job runner on %s is not running" % node_name,
+                      "tell the user; on the PC: %s mu node enable" % PC_MU, **extra)
+    if not (ans.get("limits") or {}).get("memory"):
+        raise MuError(proto.EXIT_NODE_CANNOT, "limits-unavailable", "%s cannot enforce a job's memory limit (its "
+                      "self-test failed), so it takes no jobs" % node_name,
+                      "tell the user; on the PC: %s mu node selftest (docs/design/job-layer.md §19 step 1)" % PC_MU,
+                      **extra)
+    disk = ans.get("disk") or {}
+    if isinstance(disk.get("free_gb"), (int, float)) and disk["free_gb"] < disk.get("min_free_gb", 0):
+        raise MuError(proto.EXIT_NODE_CANNOT, "disk-low", "%s has %s GB free (%s); jobs need %s GB" % (
+            node_name, disk["free_gb"], disk.get("where"), disk.get("min_free_gb")),
+            "tell the user; on the PC, delete the folders of old finished jobs: %s rm -rf /srv/mu/jobs/<job-id> "
+            "(mu status lists this project's jobs)" % PC_MU, **extra)
+
+
+def uncommitted_size(root):
+    """The bytes a snapshot adds on top of HEAD: untracked files that are not ignored, and changed tracked files.
+    -> (total, largest size, largest path)."""
+    names = set()
+    for args in (("ls-files", "-o", "--exclude-standard", "-z"), ("diff", "--name-only", "-z", "HEAD")):
+        p = git(root, *args, check=False)
+        if p.returncode == 0:
+            names.update(x for x in p.stdout.decode("utf-8", "replace").split("\0") if x)
+    total, big, bigp = 0, 0, ""
+    for n in names:
+        if n == ".mu" or n.startswith(".mu/"):
+            continue
+        try:
+            st = os.lstat(os.path.join(root, n))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            total += st.st_size
+            if st.st_size > big:
+                big, bigp = st.st_size, n
+    return total, big, bigp
+
+
+def prune_snap_refs(prj):
+    """refs/mu/snap/<id> of this clone's accepted jobs beyond the newest KEEP_SNAP_REFS: the node has them, and a
+    push only needs the latest few to send just what is new. Unaccepted jobs (state sending) keep theirs (--resume),
+    and refs without a record here (another worktree's) are left alone."""
+    p = git(prj.root, "for-each-ref", "--format=%(refname)", "refs/mu/snap/", check=False)
+    if p.returncode != 0:
+        return
+    ids = sorted(r.rsplit("/", 1)[-1] for r in p.stdout.decode().split())
+    done = [i for i in ids if (prj.read_job_record(i) or {}).get("state") not in (None, "sending")]
+    for i in done[:-KEEP_SNAP_REFS] if len(done) > KEEP_SNAP_REFS else []:
+        git(prj.root, "update-ref", "-d", "refs/mu/snap/%s" % i, check=False)
+
+
 def cmd_submit(a, command):
     prj = Project()
+    job_id, rec = None, None
     if a.resume:
         if not proto.JOB_ID.match(a.resume):
             raise MuError(proto.EXIT_USAGE, "bad-job-id", "'%s' is not a job id" % a.resume, "mu status")
         rec = prj.read_job_record(a.resume)
         if not rec:
             raise MuError(proto.EXIT_NO_SUCH, "no-such-job", "this clone has no record of job %s (.mu/jobs)" % a.resume,
-                          "mu status")
-        spec, node_name = rec["spec"], rec["node"]
+                          "mu status (the jobs sent from this clone)")
+        spec, node_name, job_id = rec["spec"], rec["node"], rec["job_id"]
         conf = load_node(node_name)
+        pin = spec["mu_version"]
     else:
         if not command:
-            raise MuError(proto.EXIT_USAGE, "no-command", "nothing to run", "mu submit [options] -- <command ...>")
+            raise MuError(proto.EXIT_USAGE, "no-command", "nothing to run", "mu submit [options] -- <command ...>, e.g. "
+                          "mu submit --time 2h -- python sweep.py")
+        if command[0] == "mu" and command[1:2] == ["run"]:
+            raise MuError(proto.EXIT_USAGE, "bad-command", "the node already runs the command as `mu run <command>`",
+                          "give the bare command: mu submit -- %s" % " ".join(command[2:] or ["python x.py"]))
         conf = pick_node(a.on)
         node_name = conf["name"]
         if not prj.pin or prj.pin == "unreleased":
@@ -1039,26 +1237,41 @@ def cmd_submit(a, command):
                           "mu pin")
         if not proto.VERSION.match(prj.pin):
             raise MuError(proto.EXIT_USAGE, "bad-pin", "[mu] version '%s' in mu.toml is not a version" % prj.pin, "mu pin")
+        pin = prj.pin
         outputs = a.output or prj.outputs
         for g in outputs:
             if not proto.glob_ok(g):
                 raise MuError(proto.EXIT_USAGE, "bad-output", "output '%s' must be a glob relative to the project root, "
                               "without '..'" % g, "e.g. --output 'results/*.json'")
+            if proto.forbidden_part(g):
+                raise MuError(proto.EXIT_USAGE, "bad-output", "output '%s' points into %s, which a fetch never writes"
+                              % (g, proto.forbidden_part(g)), "declare the job's result files, e.g. --output 'results/*.json'")
         limits = {"mem_bytes": None, "time_s": None, "cores": None}
         if a.mem:
             limits["mem_bytes"] = proto.parse_size(a.mem)
             if not limits["mem_bytes"]:
-                raise MuError(proto.EXIT_USAGE, "bad-mem", "--mem takes a size like 16G, 512M", "")
+                raise MuError(proto.EXIT_USAGE, "bad-mem", "--mem takes a size like 16G, 512M", "e.g. --mem 16G")
         if a.time:
             limits["time_s"] = proto.parse_duration(a.time)
             if not limits["time_s"]:
-                raise MuError(proto.EXIT_USAGE, "bad-time", "--time takes a duration like 90s, 30m, 6h, 2d", "")
+                raise MuError(proto.EXIT_USAGE, "bad-time", "--time takes a duration like 90s, 30m, 6h, 2d", "e.g. --time 6h")
         if a.cores is not None:
             if a.cores < 1:
-                raise MuError(proto.EXIT_USAGE, "bad-cores", "--cores must be at least 1", "")
+                raise MuError(proto.EXIT_USAGE, "bad-cores", "--cores must be at least 1", "e.g. --cores 8")
             limits["cores"] = a.cores
         if any("\0" in x for x in command):
-            raise MuError(proto.EXIT_USAGE, "bad-command", "the command holds a NUL byte", "")
+            raise MuError(proto.EXIT_USAGE, "bad-command", "the command holds a NUL byte", "remove it from the command")
+    conn = Conn(conf)
+    ans = hello(conn)                        # nothing of the project is made or sent before the node says yes
+    check_node(ans, node_name, pin, job_id)
+    if not a.resume:
+        if not a.allow_large:
+            total, big, bigp = uncommitted_size(prj.root)
+            if total > LARGE_UNTRACKED:
+                raise MuError(proto.EXIT_USAGE, "large-untracked", "the snapshot would add %s of uncommitted or "
+                              "untracked files (largest: %s, %s): they are uploaded with the job" % (
+                                  proto.human_size(total), bigp, proto.human_size(big)),
+                              "gitignore generated files (and make them inside the job), or pass --allow-large")
         job_id = proto.new_job_id()
         snap = snapshot(prj.root, job_id)
         for g in snap["gitlinks"]:
@@ -1077,7 +1290,18 @@ def cmd_submit(a, command):
         rec = {"schema": 1, "job_id": job_id, "node": node_name, "state": "sending", "spec": spec,
                "warnings": {"gitlinks": snap["gitlinks"], "lfs": snap["lfs"]}}
         prj.write_job_record(rec)
-    job_id = spec["job_id"]
+    try:
+        return send_job(a, prj, conn, conf, rec, spec, job_id, node_name)
+    except MuError as e:   # the job has an id and a record now: say which, and how to send the same job again
+        e.extra.setdefault("job_id", job_id)
+        if e.code in (proto.EXIT_ERROR, proto.EXIT_VERSION, proto.EXIT_UNREACHABLE, proto.EXIT_NODE_CANNOT) and \
+                "--resume" not in e.hint:
+            e.hint = (e.hint + "; then " if e.hint else "") + "mu submit --resume %s (the same job; never a new " \
+                "submit)" % job_id
+        raise
+
+
+def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
     warnings = rec.get("warnings", {})
     if not a.json:
         for g in warnings.get("gitlinks", []):
@@ -1086,40 +1310,27 @@ def cmd_submit(a, command):
             sys.stderr.write("warning: %s is a git-lfs pointer: its content does not reach the node\n" % g)
         if not spec["outputs"]:
             sys.stderr.write("note: no outputs declared: only the log and the result record come back\n")
-    conn = Conn(conf)
-    ans = hello(conn)
-    if spec["mu_version"] not in (ans.get("mu") or {}).get("installed", []):
-        raise MuError(proto.EXIT_VERSION, "toolchain-missing", "%s has no μ %s, which this project pins (installed "
-                      "there: %s)" % (node_name, spec["mu_version"], ", ".join(ans["mu"]["installed"]) or "none"),
-                      "on the PC: wsl -d mu-compute -u mu -- mu install %s   (or move the project: mu pin)" % spec["mu_version"],
-                      job_id=job_id)
-    if ans.get("runner") != "active":
-        raise MuError(proto.EXIT_NODE_CANNOT, "not-enabled", "the job runner on %s is not running" % node_name,
-                      "on the PC: wsl -d mu-compute -u mu -- mu node enable", job_id=job_id)
-    if not (ans.get("limits") or {}).get("memory"):
-        raise MuError(proto.EXIT_NODE_CANNOT, "limits-unavailable", "%s cannot enforce a job's memory limit (its "
-                      "self-test failed), so it takes no jobs" % node_name,
-                      "on the PC: wsl -d mu-compute -u mu -- mu node selftest (docs/design/job-layer.md §19 step 1)",
-                      job_id=job_id)
-    disk = ans.get("disk") or {}
-    if isinstance(disk.get("free_gb"), (int, float)) and disk["free_gb"] < disk.get("min_free_gb", 0):
-        raise MuError(proto.EXIT_NODE_CANNOT, "disk-low", "%s has %s GB free (%s); jobs need %s GB" % (
-            node_name, disk["free_gb"], disk.get("where"), disk.get("min_free_gb")),
-            "free space on the node (old job folders are under /srv/mu/jobs), then submit again", job_id=job_id)
+        sys.stderr.write("%s: snapshot %s = HEAD %s%s; pushing to %s (only what it lacks)...\n" % (
+            job_id, spec["snapshot"][:10], spec["head"][:10], " + uncommitted changes" if spec.get("dirty") else "",
+            node_name))
     push(conn, prj.root, spec["project_id"], spec["snapshot"], job_id)
     if fault("lose-answer"):
         conn.run("submit id=%s" % job_id, json.dumps(spec).encode())
         raise MuError(proto.EXIT_UNREACHABLE, "relay-lost", "the link was lost before the node's answer arrived "
-                      "(test fault lose-answer)", "mu submit --resume %s" % job_id, job_id=job_id)
+                      "(test fault lose-answer)", "", job_id=job_id)
     res = conn.call("submit", data=json.dumps(spec).encode(), id=job_id)
     rec = prj.read_job_record(job_id) or {"schema": 1, "job_id": job_id, "node": node_name, "spec": spec}
     rec.update(state=res.get("state"), accepted=proto.iso(), duplicate=bool(res.get("duplicate")))
     prj.write_job_record(rec)
-    out = {"ok": True, "job_id": job_id, "node": node_name, "state": res.get("state"), "position": res.get("position"),
-           "duplicate": bool(res.get("duplicate")), "snapshot": spec["snapshot"], "dirty": spec["dirty"],
-           "warnings": warnings}
+    try:
+        prune_snap_refs(prj)
+    except MuError:
+        pass
+    out = {"ok": True, "exit": 0, "job_id": job_id, "node": node_name, "state": res.get("state"),
+           "position": res.get("position"), "duplicate": bool(res.get("duplicate")), "snapshot": spec["snapshot"],
+           "dirty": spec["dirty"], "warnings": warnings}
     if a.wait:
-        a.job_id, a.timeout = job_id, None
+        a.job_id, a.on, a.submitted = job_id, node_name, out
         if not a.json:
             print("%s accepted by %s (%s)" % (job_id, node_name, res.get("state")))
         return cmd_status(a)
@@ -1129,7 +1340,7 @@ def cmd_submit(a, command):
         pos = " (position %s)" % res["position"] if res.get("position") else ""
         print("%s %s on %s%s%s" % (job_id, res.get("state"), node_name, pos, " — already known: not sent twice" if
                                    res.get("duplicate") else ""))
-        print("  mu status %s --wait · mu log %s -f · mu fetch %s" % (job_id, job_id, job_id))
+        print("  mu status %s --wait --timeout 500 · mu log %s --tail 20 · mu fetch %s" % (job_id, job_id, job_id))
     return 0
 
 
@@ -1172,6 +1383,9 @@ def describe(s):
 
 
 def cmd_status(a):
+    if not a.job_id and a.wait:
+        raise MuError(proto.EXIT_USAGE, "usage", "--wait needs a job id", "mu status (lists the jobs), then "
+                      "mu status <id> --wait --timeout 500")
     if not a.job_id:
         prj = Project()
         local = {}
@@ -1227,26 +1441,50 @@ def cmd_status(a):
             print(describe(s))
             last = describe(s)
         if deadline and time.time() > deadline:
-            raise MuError(proto.EXIT_UNREACHABLE, "timeout", "job %s has no result after %s s (%s)" % (
-                a.job_id, a.timeout, s.get("state")), "mu status %s --wait" % a.job_id)
+            raise MuError(proto.EXIT_STILL_RUNNING, "still-running", "job %s is still %s after %d s (it keeps running "
+                          "on %s)" % (a.job_id, s.get("state"), a.timeout, conf["name"]),
+                          "mu status %s --wait --timeout N (ask again), or mu log %s --tail 20" % (a.job_id, a.job_id),
+                          job_id=a.job_id, state=s.get("state"), node=conf["name"])
         time.sleep(poll_s())
     s["node"] = conf["name"]
+    code = proto.EXIT_JOB_FAILED if (a.wait and s.get("state") != "succeeded") else 0
+    s["exit"], s["ok"] = code, code == 0
+    if getattr(a, "submitted", None):
+        s["submitted"] = a.submitted
     if a.json:
         proto.emit_json(s)
     else:
         print(describe(s))
-    if a.wait and s.get("state") != "succeeded":
-        return proto.EXIT_JOB_FAILED
-    return 0
+        if code:
+            print("  mu log %s --tail 50 shows why" % a.job_id)
+    return code
+
+
+TERM_UNSAFE = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\xc2[\x80-\x9f]")
+
+
+class _TermSafe:
+    """stdout for a job's log on a terminal: escape sequences and other control bytes removed (the log is the job's
+    text; a terminal would act on them). A pipe or a file gets the bytes as they are."""
+
+    def __init__(self, raw):
+        self.raw = raw
+
+    def write(self, b):
+        self.raw.write(TERM_UNSAFE.sub(b"", b))
+
+    def flush(self):
+        self.raw.flush()
 
 
 def cmd_log(a):
     conf, _ = job_node(a.job_id, a.on)
     conn = Conn(conf)
-    out = sys.stdout.buffer
+    out = _TermSafe(sys.stdout.buffer) if sys.stdout.isatty() else sys.stdout.buffer
     if a.follow:
         if a.json:
-            raise MuError(proto.EXIT_USAGE, "usage", "--json does not go with -f", "poll with mu log <id> --json --offset N")
+            raise MuError(proto.EXIT_USAGE, "usage", "--json does not go with -f", "poll with mu log %s --json --offset N"
+                          % a.job_id)
         offset = a.offset or 0
         if a.tail is not None:
             offset = tail_offset(conn, a.job_id, a.tail)
@@ -1288,7 +1526,7 @@ def cmd_log(a):
     nxt = offset + len(data)
     if a.json:
         proto.emit_json({"ok": True, "job_id": a.job_id, "offset": offset, "next_offset": nxt,
-                         "text": data.decode("utf-8", "replace"), "state": s.get("state"),
+                         "text": data.decode("utf-8", "replace"), "state": s.get("state"), "attempt": s.get("attempt"),
                          "eof": s.get("state") in proto.FINISHED and nxt >= size})
     else:
         out.write(data)
@@ -1332,9 +1570,11 @@ def safe_target(into, rel):
 
 def unpack_outputs(stream, result, into, declared):
     """Read the tar stream of `fetch` after result.json: each member must be the next output of RESULT, a regular file
-    of the recorded size and SHA-256, under a declared glob. -> list of written paths. Raises FetchError (exit 8)."""
+    of the recorded size and SHA-256, under a glob this clone declared (DECLARED: never the node's word), never inside
+    .git or .mu. Each file is written to a temp file, fsynced and renamed; the folders are synced at the end.
+    -> list of written paths. Raises FetchError (exit 8)."""
     expected = list(result.get("outputs") or [])
-    written = []
+    written, dirs = [], set()
     tf = tarfile.open(fileobj=stream, mode="r|")
     first = True
     for m in tf:
@@ -1353,8 +1593,13 @@ def unpack_outputs(stream, result, into, declared):
                 raise FetchError("member %r is not the next declared output %r" % (m.name, want.get("path")))
             if not m.isreg():
                 raise FetchError("member %r is not a regular file" % m.name)
+            if not fault("dot-globs") and proto.forbidden_part(rel):
+                raise FetchError("member %r is inside %s, which a fetch never writes" % (m.name, proto.forbidden_part(rel)))
             if not any(proto.glob_match(g, rel) for g in declared):
-                raise FetchError("member %r matches none of the declared outputs" % m.name)
+                raise FetchError("member %r matches none of the declared outputs (%s)" % (m.name, ", ".join(declared)
+                                                                                           or "none"))
+            if not isinstance(want.get("size"), int) or (m.size != want["size"] and not fault("no-size-guard")):
+                raise FetchError("member %r is %d bytes; the result records %s" % (m.name, m.size, want.get("size")))
         else:
             want, rel = {"size": m.size, "sha256": None}, m.name
             if not m.isreg():
@@ -1362,6 +1607,7 @@ def unpack_outputs(stream, result, into, declared):
         target = safe_target(into, rel)
         fd, tmp = tempfile.mkstemp(prefix=".mu-fetch.", dir=os.path.dirname(target))
         h, n = hashlib.sha256(), 0
+        limit = want.get("size") if isinstance(want.get("size"), int) and not fault("no-size-guard") else None
         try:
             src = tf.extractfile(m)
             with os.fdopen(fd, "wb") as f:
@@ -1371,16 +1617,23 @@ def unpack_outputs(stream, result, into, declared):
                         break
                     h.update(b)
                     n += len(b)
+                    if limit is not None and n > limit:
+                        raise FetchError("%s: more than the %d bytes the result records" % (rel, limit))
                     f.write(b)
+                f.flush()
+                durable._sync(f.fileno())
             if not fault("no-fetch-hash") and check and (n != want.get("size") or h.hexdigest() != want.get("sha256")):
                 raise FetchError("%s: %d bytes, sha256 %s; the result records %s bytes, %s" % (
                     rel, n, h.hexdigest()[:16], want.get("size"), str(want.get("sha256"))[:16]))
             os.chmod(tmp, 0o644)
             os.replace(tmp, target)
+            dirs.add(os.path.dirname(target))
         except BaseException:
             _unlink(tmp)
             raise
         written.append(rel)
+    for d in dirs:
+        durable.sync_dir(d)
     if expected and not fault("no-member-check"):
         raise FetchError("the stream ended before %s" % expected[0].get("path"))
     return written
@@ -1414,11 +1667,19 @@ class _Pipe:
 
 
 def fetch_result(conn, job_id):
-    chunks = []
-    rc, err, st, muxed = conn.stream("fetch id=%s what=result" % job_id, chunks.append)
+    chunks, size = [], [0]
+
+    def keep(b):
+        size[0] += len(b)
+        if size[0] > RESULT_CAP:
+            raise MuError(proto.EXIT_INTEGRITY, "answer-too-large", "the node's result record of %s is larger than %s: "
+                          "cut off, not read" % (job_id, proto.human_size(RESULT_CAP)), "mu fetch %s again; if it "
+                          "repeats, the node's copy is damaged" % job_id)
+        chunks.append(b)
+    rc, err, st, muxed = conn.stream("fetch id=%s what=result" % job_id, keep)
     if rc != 0:
         if rc in proto.NODE_TO_CLIENT:
-            raise node_error(rc, b"".join(chunks).decode("utf-8", "replace") + "\n" + err, conn.name)
+            raise node_error(rc, b"".join(chunks).decode("utf-8", "replace") + "\n" + err, conn.name, job_id)
         conn.fail(rc, err, st, muxed)
     import io
     try:
@@ -1433,7 +1694,7 @@ def fetch_result(conn, job_id):
     if not res or res.get("job_id") != job_id:
         raise MuError(proto.EXIT_INTEGRITY, "bad-result", "the node's result record for %s is damaged" % job_id,
                       "mu fetch %s again; if it repeats: mu status %s" % (job_id, job_id))
-    return res
+    return proto.clean_obj(res, cap=100000)
 
 
 def cmd_fetch(a):
@@ -1441,27 +1702,47 @@ def cmd_fetch(a):
     conn = Conn(conf)
     maxb = proto.parse_size(a.max_size or "50M")
     if not maxb:
-        raise MuError(proto.EXIT_USAGE, "bad-max-size", "--max-size takes a size like 50M", "")
+        raise MuError(proto.EXIT_USAGE, "bad-max-size", "--max-size takes a size like 50M", "e.g. --max-size 200M")
     s = conn.call("status", id=a.job_id)
     if s.get("state") not in proto.FINISHED:
         raise MuError(proto.EXIT_USAGE, "not-finished", "job %s is still %s: it has no result yet" % (
             a.job_id, s.get("state")), "mu status %s --wait" % a.job_id)
     res = fetch_result(conn, a.job_id)
-    total = sum(o.get("size", 0) for o in res.get("outputs") or [])
-    if total > maxb:
-        raise MuError(proto.EXIT_USAGE, "too-large", "the outputs of %s add up to %s, over --max-size %s" % (
-            a.job_id, proto.human_size(total), proto.human_size(maxb)),
-            "mu fetch %s --max-size %dM" % (a.job_id, total // (1 << 20) + 1),
-            outputs=[{"path": o["path"], "size": o["size"]} for o in res.get("outputs") or []])
     if prj is None:
         try:
             prj = Project()
         except MuError:
             prj = None
+    # the globs this clone declared for the job: from its own record, never from the node's result (review finding 1)
+    rec = prj.read_job_record(a.job_id) if prj else None
+    if fault("trust-node-globs"):
+        declared = (res.get("job") or {}).get("outputs") or []
+    elif rec and isinstance((rec.get("spec") or {}).get("outputs"), list):
+        declared = list(rec["spec"]["outputs"]) + list(a.output or [])
+    elif a.output:
+        declared = list(a.output)
+    else:
+        raise MuError(proto.EXIT_USAGE, "no-local-record", "this clone has no record of job %s (.mu/jobs), so it does "
+                      "not know which outputs the job declared; the node's word is not taken for it" % a.job_id,
+                      "fetch from the clone that submitted it, or name the outputs: mu fetch %s --output 'results/*.json'"
+                      " (repeatable)" % a.job_id)
+    for g in declared:
+        if not proto.glob_ok(g) or proto.forbidden_part(g):
+            raise MuError(proto.EXIT_USAGE, "bad-output", "output '%s' must be a glob relative to the project root, "
+                          "without '..', not into .git or .mu" % g, "e.g. --output 'results/*.json'")
+    if not isinstance(res.get("outputs") or [], list) or not all(isinstance(o, dict) for o in res.get("outputs") or []):
+        raise MuError(proto.EXIT_INTEGRITY, "bad-result", "the node's result record of %s lists its outputs wrongly"
+                      % a.job_id, "mu fetch %s again" % a.job_id)
+    total = sum(o.get("size", 0) if isinstance(o.get("size"), int) else 0 for o in res.get("outputs") or [])
+    if total > maxb:
+        raise MuError(proto.EXIT_USAGE, "too-large", "the outputs of %s add up to %s, over --max-size %s" % (
+            a.job_id, proto.human_size(total), proto.human_size(maxb)),
+            "mu fetch %s --max-size %dM" % (a.job_id, total // (1 << 20) + 1),
+            outputs=[{"path": o.get("path"), "size": o.get("size")} for o in res.get("outputs") or []])
     into = os.path.realpath(a.into or (prj.root if prj else os.getcwd()))
     if not os.path.isdir(into):
-        raise MuError(proto.EXIT_USAGE, "bad-into", "--into %s is not a folder" % into, "")
-    declared = (res.get("job") or {}).get("outputs") or []
+        raise MuError(proto.EXIT_USAGE, "bad-into", "--into %s is not a folder" % into, "mkdir -p it first, or give "
+                      "another folder: --into DIR")
     pipe = _Pipe()
     box = {}
 
@@ -1497,6 +1778,7 @@ def cmd_fetch(a):
         ensure_dir(os.path.join(prj.root, "runs"), 0o755)
         run_path = os.path.join(prj.root, "runs", a.job_id + ".json")
         durable.write_record(run_path, record, 0o644)
+        durable.sync_dir(prj.root)
     out = {"ok": True, "job_id": a.job_id, "state": res.get("state"), "written": written, "into": into,
            "run_record": run_path, "outputs_missing": res.get("outputs_missing", [])}
     if a.json:
@@ -1524,97 +1806,160 @@ def run_record(res, node, prj):
             "result_sha256": res.get("sha256")}
 
 
+def forget_unsent(prj, job_id):
+    """A job this clone never got accepted: its record and its snapshot ref go."""
+    _unlink(prj.job_record_path(job_id))
+    git(prj.root, "update-ref", "-d", "refs/mu/snap/%s" % job_id, check=False)
+    msg = "%s was never accepted: its record and snapshot ref are removed" % job_id
+    return {"ok": True, "exit": 0, "job_id": job_id, "state": "forgotten", "note": msg}
+
+
 def cmd_cancel(a):
-    conf, _ = job_node(a.job_id, a.on)
-    ans = Conn(conf).call("cancel", id=a.job_id)
+    if not proto.JOB_ID.match(a.job_id or ""):
+        raise MuError(proto.EXIT_USAGE, "bad-job-id", "'%s' is not a job id (YYYYMMDD-HHMMSS-xxxxxx)" % a.job_id, "mu status")
+    prj, rec = None, None
+    try:
+        prj = Project()
+        rec = prj.read_job_record(a.job_id)
+    except MuError:
+        pass
+    unsent = bool(rec) and rec.get("state") == "sending"
+    if a.local:
+        if not unsent:
+            raise MuError(proto.EXIT_USAGE, "not-unsent", "--local only forgets a job this clone never got accepted "
+                          "(state sending); %s is not one" % a.job_id, "mu cancel %s (asks the node)" % a.job_id)
+        ans = forget_unsent(prj, a.job_id)
+    else:
+        conf, _ = job_node(a.job_id, a.on)
+        try:
+            ans = Conn(conf).call("cancel", id=a.job_id)
+        except MuError as e:
+            if not (unsent and e.error == "no-such-job"):
+                raise
+            ans = forget_unsent(prj, a.job_id)
     if a.json:
         proto.emit_json(ans)
     else:
-        print("%s %s" % (a.job_id, ans.get("state")))
+        print("%s %s%s" % (a.job_id, ans.get("state"), (": " + ans["note"]) if ans.get("note") else ""))
     return 0
 
 
 # ------------------------------------------------------------------------------------------------ arguments
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise MuError(proto.EXIT_USAGE, "usage", message, self.format_usage().strip())
+        if "unrecognized arguments" in message and self.prog == "mu submit":
+            raise MuError(proto.EXIT_USAGE, "usage", message, "put the command after --: mu submit [options] -- python x.py")
+        raise MuError(proto.EXIT_USAGE, "usage", message, self.format_usage().strip() + "  (%s --help)" % self.prog)
 
 
-def parser(prog):
-    p = Parser(prog=prog, add_help=True)
-    p.add_argument("--json", action="store_true", help="one JSON object on stdout")
+def parser(prog, description=None):
+    p = Parser(prog=prog, add_help=True, description=description, epilog=proto.EXIT_CODES_LINE + ".",
+               formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--json", action="store_true", help="one JSON object on stdout (read exit, error, next)")
     return p
+
+
+COMPUTE_HELP = """mu compute: the compute nodes paired with this computer (docs/design/job-layer.md §4)
+
+  mu compute add NODE --host-key KEY --relay URL --relay-fingerprint FP --relay-user NAME [--relay-port 7001]
+                 --relay-password-stdin [--secret-store keychain|file] [--name WORKSTATION]
+                         pair a node: makes this computer's key, pins the node's host key; sends nothing
+  mu compute list        the paired nodes and their last answer (no network)
+  mu compute status [NODE]   ask the node(s): hello through the relay (exit 0 = up)
+  mu compute remove NODE     forget a node here (prints the command that revokes this computer's key there)
+  mu compute proxy NODE      ssh's ProxyCommand (not for people)
+
+Every subcommand takes --json. """ + proto.EXIT_CODES_LINE + "."
 
 
 def main(cmd, args):
     if cmd == "compute":
+        if args[:1] in (["-h"], ["--help"], ["help"]):
+            print(COMPUTE_HELP)
+            return 0
         sub = args[0] if args and not args[0].startswith("-") else "list"
         rest = args[1:] if args and not args[0].startswith("-") else args
         if sub == "proxy":
             if len(rest) != 1:
-                raise MuError(2, "usage", "usage: mu compute proxy <node> (ssh's ProxyCommand)", "")
+                raise MuError(2, "usage", "usage: mu compute proxy <node> (ssh's ProxyCommand)",
+                              "it is run by ssh, not by hand: mu compute status <node>")
             return cmd_proxy(rest[0])
         p = parser("mu compute " + sub)
         if sub == "add":
-            p.add_argument("node")
-            p.add_argument("--host-key", required=True)
-            p.add_argument("--relay", required=True)
-            p.add_argument("--relay-fingerprint", required=True)
-            p.add_argument("--relay-user", required=True)
-            p.add_argument("--relay-port", type=int, default=DEFAULT_PORT)
-            p.add_argument("--secret-store", choices=("keychain", "file"))
-            p.add_argument("--relay-password-stdin", action="store_true")
+            p.add_argument("node", help="the node's name, e.g. office-pc (its relay client name)")
+            p.add_argument("--host-key", required=True, help="the node's ssh-ed25519 public key (mu-wsl2-distro host-key)")
+            p.add_argument("--relay", required=True, help="the relay URL, e.g. https://relay.martand.systems")
+            p.add_argument("--relay-fingerprint", required=True, help="the relay's key fingerprint (44 characters)")
+            p.add_argument("--relay-user", required=True, help="this computer's relay client name, e.g. avi-mac")
+            p.add_argument("--relay-port", type=int, default=DEFAULT_PORT, help="the node's port on the relay (default 7001)")
+            p.add_argument("--secret-store", choices=("keychain", "file"), help="where the relay password goes "
+                           "(default: keychain on macOS, file elsewhere)")
+            p.add_argument("--relay-password-stdin", action="store_true", help="read the relay password from stdin "
+                           "(asked without echo at a terminal)")
             p.add_argument("--name", help="this workstation's name on the node (default: the relay user)")
             return cmd_compute_add(p.parse_args(rest))
         if sub in ("list", "ls"):
             return cmd_compute_list(p.parse_args(rest))
         if sub == "status":
-            p.add_argument("node", nargs="?")
+            p.add_argument("node", nargs="?", help="one node (default: every paired node)")
             return cmd_compute_status(p.parse_args(rest))
         if sub in ("remove", "rm"):
             p.add_argument("node")
             return cmd_compute_remove(p.parse_args(rest))
-        raise MuError(2, "usage", "unknown: mu compute %s" % sub, "mu compute add|list|status|remove")
+        raise MuError(2, "usage", "unknown: mu compute %s" % sub, "mu compute add|list|status|remove (mu compute --help)")
     if cmd == "submit":
         opts, command = parse_command(args)
-        p = parser("mu submit")
-        p.add_argument("--on")
-        p.add_argument("--name")
-        p.add_argument("--mem")
-        p.add_argument("--time")
-        p.add_argument("--cores", type=int)
-        p.add_argument("--output", action="append", default=[])
-        p.add_argument("--no-rerun", action="store_true")
-        p.add_argument("--wait", action="store_true")
-        p.add_argument("--resume", metavar="JOB_ID")
+        p = parser("mu submit", "run a command on a paired compute node, from a snapshot of this project (HEAD + "
+                   "uncommitted changes + untracked files that are not gitignored), under the project's pinned μ.\n"
+                   "usage: mu submit [options] -- CMD ARG...   (the node runs `mu run CMD ARG...`)")
+        p.add_argument("--on", metavar="NODE", help="the paired node (needed when several are paired)")
+        p.add_argument("--name", help="a label for the job (default: the command)")
+        p.add_argument("--mem", metavar="SIZE", help="memory limit, e.g. 16G (default: node RAM - 2 GB; above it: oom)")
+        p.add_argument("--time", metavar="DUR", help="wall-time limit, e.g. 6h (default 12h; then: timeout)")
+        p.add_argument("--cores", type=int, metavar="N", help="sets $MU_JOB_CORES for the job (default: all physical "
+                       "cores); pass it to the solver yourself (mpirun -np $MU_JOB_CORES); not enforced")
+        p.add_argument("--output", action="append", default=[], metavar="GLOB", help="output glob, repeatable "
+                       "(default: [compute] outputs in mu.toml)")
+        p.add_argument("--no-rerun", action="store_true", help="do not re-run after an interrupted attempt")
+        p.add_argument("--wait", action="store_true", help="then wait for the result (as mu status JOB --wait)")
+        p.add_argument("--timeout", type=float, metavar="S", help="with --wait: seconds to wait (default: no limit); "
+                       "then exit 10, the job keeps running")
+        p.add_argument("--resume", metavar="JOB_ID", help="send a job that was not accepted again (same id, same "
+                       "snapshot)")
+        p.add_argument("--allow-large", action="store_true", help="send over 100 MB of uncommitted or untracked files")
         a = p.parse_args(opts)
-        a.timeout = None
         return cmd_submit(a, command)
     if cmd == "status":
-        p = parser("mu status")
+        p = parser("mu status", "this project's jobs, or one job. (The toolchain's own status is plain `mu`.)")
         p.add_argument("job_id", nargs="?")
-        p.add_argument("--on")
-        p.add_argument("--wait", action="store_true")
-        p.add_argument("--timeout", type=float)
+        p.add_argument("--on", metavar="NODE", help="the node (default: this clone's record of the job)")
+        p.add_argument("--wait", action="store_true", help="wait until the job ends; exit 7 unless it succeeded")
+        p.add_argument("--timeout", type=float, metavar="S", help="seconds to wait (default: no limit); then exit 10, "
+                       "the job keeps running")
         return cmd_status(p.parse_args(args))
     if cmd == "log":
-        p = parser("mu log")
+        p = parser("mu log", "a job's output (stdout and stderr), from the node")
         p.add_argument("job_id")
-        p.add_argument("--on")
-        p.add_argument("--tail", type=int)
-        p.add_argument("--offset", type=int)
-        p.add_argument("-f", "--follow", action="store_true")
+        p.add_argument("--on", metavar="NODE")
+        p.add_argument("--tail", type=int, metavar="N", help="the last N lines")
+        p.add_argument("--offset", type=int, metavar="B", help="from byte B (with --json: poll with next_offset)")
+        p.add_argument("-f", "--follow", action="store_true", help="follow until the job ends (blocks; not for a "
+                       "call with a time limit)")
         return cmd_log(p.parse_args(args))
     if cmd == "fetch":
-        p = parser("mu fetch")
+        p = parser("mu fetch", "a finished job's declared outputs into the project (overwriting), and runs/JOB.json")
         p.add_argument("job_id")
-        p.add_argument("--on")
-        p.add_argument("--into")
-        p.add_argument("--max-size")
+        p.add_argument("--on", metavar="NODE")
+        p.add_argument("--into", metavar="DIR", help="write there instead of the project root")
+        p.add_argument("--max-size", metavar="SIZE", help="refuse outputs adding up to more (default 50M)")
+        p.add_argument("--output", action="append", default=[], metavar="GLOB", help="also accept outputs under GLOB "
+                       "(needed when this clone has no record of the job)")
         return cmd_fetch(p.parse_args(args))
     if cmd == "cancel":
-        p = parser("mu cancel")
+        p = parser("mu cancel", "stop a queued or running job")
         p.add_argument("job_id")
-        p.add_argument("--on")
+        p.add_argument("--on", metavar="NODE")
+        p.add_argument("--local", action="store_true", help="forget a job this clone never got accepted (state "
+                       "sending), without asking the node")
         return cmd_cancel(p.parse_args(args))
     raise MuError(2, "usage", "unknown command: %s" % cmd, "mu help")

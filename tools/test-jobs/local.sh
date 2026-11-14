@@ -190,6 +190,26 @@ eq "  the runner is active" "$(printf '%s' "$out" | jget hello.runner)" active
 out2="$(ws compute status office-pc --json 2>&1)"
 eq "  a second call reuses the connection" "$(printf '%s' "$out2" | jget reused)" true
 echo "  info  first $(printf '%s' "$out" | jget rtt_s) s, reused $(printf '%s' "$out2" | jget rtt_s) s"
+section "revoke: a connection opened before it gets no new session (review finding 3)"
+cp "$ROOT/authorized_keys" "$ROOT/authorized_keys.good"
+revoked_call() {   # with the key line gone and the shared connection still open: exit and error of a call over it
+  local o r m; : > "$ROOT/authorized_keys"
+  m="$([ -S "$RCP" ] && echo open || echo none)"
+  o="$(ws compute status office-pc --json 2>&1)"; r=$?
+  cp "$ROOT/authorized_keys.good" "$ROOT/authorized_keys"
+  printf '%s %s %s' "$r" "$(printf '%s' "$o" | jget error)" "$m"
+}
+RCP="$(ws compute status office-pc --json 2>/dev/null | jget control_path)"   # the shared connection is open
+eq "after the key line is removed, a call over the open connection: exit 5, key-revoked" "$(revoked_call)" "5 key-revoked open"
+cp "$ROOT/gate" "$ROOT/gate.good"
+sed -i.bak '/mu-gate: revoke check/d' "$ROOT/gate"
+ws compute status office-pc --json > /dev/null 2>&1
+case "$(revoked_call)" in
+  0*) ok "must-fail: with the gate's revoke check removed, the open connection still works after the revoke (as it must)" ;;
+  *) bad "must-fail: without the revoke check the call was still refused" ;;
+esac
+cp "$ROOT/gate.good" "$ROOT/gate"
+eq "the key back: exit 0" "$(ws compute status office-pc --json > /dev/null 2>&1; echo $?)" 0
 
 section "a job: submit, status --wait, log, fetch"
 P="$ROOT/my project"; mkdir -p "$P"
