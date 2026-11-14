@@ -409,6 +409,10 @@ def t_http():
         s, h, d = req(port, "/api/session", headers={"X-Mu-Token": tok})
         j = json.loads(d)
         check("every /api answer carries api: 1", j.get("api") == 1 and j.get("ok") is True)
+        s, h, d = req(port, "/api/dev/fake-stats/office-pc", headers={"X-Mu-Token": tok})
+        check("dev: a fake node's raw stats (D06's page test), with the token", s == 200 and
+              isinstance(json.loads(d).get("stats", {}).get("host"), dict) and
+              req(port, "/api/dev/fake-stats/office-pc")[0] == 401, (s, d[:200]))
     finally:
         stop_proc(p)
     # a static folder the sandboxed build can write: symlinks (to a file, or assets/ itself) are never followed
@@ -527,6 +531,8 @@ def t_open():
         check("D15: the redirect file is 0600 and redirects to #t=<token>",
               os.path.exists(page) and oct(os.stat(page).st_mode & 0o777) == "0o600" and
               ("#t=" + tok) in open(page).read())
+        check("a real server has no /api/dev/ route", req(port, "/api/dev/fake-stats/office-pc",
+                                                          headers={"X-Mu-Token": tok})[0] == 404)
         st, _ = jget(port, "/api/session?first=1", tok)
         check("D15: the redirect file is gone after the token's first use", st == 200 and not os.path.exists(page))
         r = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "open", "20261114-101500-k3f9qa"], env=env,
@@ -1141,6 +1147,8 @@ def t_agent():
           d.get("StandardErrorPath", "").endswith("launchd-dashboard.log"), d)
     if shutil.which("plutil"):
         check("D23: the plist passes plutil -lint", subprocess.run(["plutil", "-lint", "-s", pl]).returncode == 0)
+    else:
+        skip("D23: the plist passes plutil -lint", "no plutil here (macOS only)")
     log = open(rec).read()
     check("D23: loaded with launchctl bootstrap into the gui domain", "bootstrap gui/%d %s" % (os.getuid(), pl) in log,
           log)

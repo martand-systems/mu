@@ -13,7 +13,9 @@ REAL_HOME="$HOME"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mu dash test.XXXXXX")"
 cleanup() { if [ "${KEEP:-0}" = 1 ]; then echo "kept: $ROOT"; else rm -rf "${ROOT:?}"; fi; }
 trap cleanup EXIT
-PASS=0; FAILN=0; FAILED=""
+PASS=0; FAILN=0; FAILED=""; SKIPN=0; SKIPPED=""
+skipped() { SKIPN=$((SKIPN + 1)); SKIPPED="$SKIPPED
+  - $1"; printf '  skip  %s\n' "$1"; }
 ok()   { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
 bad()  { FAILN=$((FAILN + 1)); FAILED="$FAILED
   - $1"; printf '  FAIL  %s\n' "$1"; [ -z "${2:-}" ] || printf '%s\n' "$2" | sed 's/^/        | /' | head -30; }
@@ -23,6 +25,8 @@ py_section() {   # py_section PY SECTION: its ok/FAIL lines count here
   out="$(cd "$ROOT" && "$py" -I -S "$HERE/unit.py" "$@" 2>&1)"; rc=$?
   printf '%s\n' "$out" | while IFS= read -r l; do printf '  %s\n' "$l"; done
   PASS=$((PASS + $(printf '%s\n' "$out" | grep -c '^ok ')))
+  while IFS= read -r l; do SKIPN=$((SKIPN + 1)); SKIPPED="$SKIPPED
+  - ${l#skip  } [$*, $(basename "$py")]"; done < <(printf '%s\n' "$out" | grep '^skip ')
   if [ "$rc" != 0 ] || printf '%s\n' "$out" | grep -q '^Traceback'; then
     FAILN=$((FAILN + 1)); FAILED="$FAILED
   - unit.py $* ($(basename "$py"), exit $rc)"
@@ -70,7 +74,7 @@ must_fail fixed-token         "$PY1" http
 must_fail csp-unsafe-inline   "$PY1" http
 if [ "$(uname -s)" = Darwin ] && /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/null | grep -q enabled \
    && [ -z "${CI:-}" ]; then
-  printf '  skip  must-fail: http, with fault bind-all (the application firewall is on here: a listener on 0.0.0.0 would ask the user; CI runs it)\n'
+  skipped "must-fail: http, with fault bind-all (the application firewall is on here: a listener on 0.0.0.0 would ask the user; CI runs it)"
 else
   must_fail bind-all          "$PY1" http
 fi
@@ -97,7 +101,7 @@ if [ -n "$SLOW" ] && "$PY1" -I -S -c "import sys; sys.path.insert(0, '$REPO/src'
   must_fail cpu-first-call    "$PY1" sampler
 elif [ -n "$SLOW" ]; then
   if [ "${MU_TEST_NEED_PSUTIL:-0}" = 1 ]; then bad "must-fail: sampler, with fault cpu-first-call: no psutil in $PY1"
-  else printf '  skip  must-fail: sampler, with fault cpu-first-call (no psutil in %s)\n' "$PY1"; fi
+  else skipped "must-fail: sampler, with fault cpu-first-call (no psutil in $PY1)"; fi
 fi
 
 section "Repository checks"
@@ -109,8 +113,28 @@ for x in ./dashboard/node_modules ./dashboard/test-results ./dashboard/playwrigh
   if grep -q -- "--exclude $x" "$REPO/install/install.sh"; then ok "install.sh leaves $x out of the recipe"
   else bad "install.sh copies $x into the recipe"; fi
 done
+# an inline eslint-disable of an HTML-sink rule (no-restricted-*) in the page's source only on a fault's line
+sink_disables() {   # sink_disables DIR -> the disables not within 3 lines after a __FAULT_ constant
+  local f
+  grep -rlE 'eslint-disable[^*]*no-restricted-' "$1" 2>/dev/null | while IFS= read -r f; do
+    awk -v F="$f" '/__FAULT_/ { last = NR } /eslint-disable[^*]*no-restricted-/ && (last == 0 || NR - last > 3) { print F ":" NR ": " $0 }' "$f"
+  done
+}
+out="$(sink_disables "$REPO/dashboard/src")"
+if [ -z "$out" ]; then ok "the HTML-sink lint rules are disabled inline only on a fault's line (dashboard/src)"
+else bad "an HTML-sink lint rule is disabled inline outside a fault" "$out"; fi
+mkdir -p "$ROOT/sinkfx"; printf 'const a = 1;\n// eslint-disable-next-line no-restricted-properties\nel.innerHTML = x;\n' > "$ROOT/sinkfx/x.tsx"
+if [ -n "$(sink_disables "$ROOT/sinkfx")" ]; then ok "must-fail: a planted inline disable of the sink rule is found"
+else bad "must-fail: a planted inline disable of the sink rule was not found"; fi
 if /bin/bash -n "$REPO/bin/mu" && /bin/bash -n "$REPO/tools/dashboard-npm"; then ok "bin/mu and tools/dashboard-npm parse with $(/bin/bash -c 'echo $BASH_VERSION')"
 else bad "bash -n failed"; fi
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAILN"
+printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAILN" "$SKIPN"
+if [ "$SKIPN" -gt 0 ]; then
+  printf 'skipped (not tested here):%s\n' "$SKIPPED"
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    printf '%s\n' "$SKIPPED" | sed -n 's/^  - //p' | while IFS= read -r l; do printf '::warning title=skipped check::%s\n' "$l"; done
+    [ -z "${GITHUB_STEP_SUMMARY:-}" ] || { printf '### Skipped checks (%s, %d)\n' "$(uname -s)" "$SKIPN"; printf '%s\n' "$SKIPPED" | sed -n 's/^  - /- /p'; } >> "$GITHUB_STEP_SUMMARY"
+  fi
+fi
 [ "$FAILN" = 0 ] || { printf 'failed:%s\n' "$FAILED"; exit 1; }

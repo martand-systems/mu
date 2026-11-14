@@ -41,6 +41,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # npm code runs in these jobs: no GITHUB_TOKEN left in .git/config
       - name: A Python with psutil 7.2.2 from the toolchain's pinned env.pip.txt (--require-hashes)
         run: |
           grep '^psutil==' "${{ matrix.pins }}" > "$RUNNER_TEMP/psutil.txt"
@@ -61,6 +63,8 @@ jobs:
         working-directory: dashboard
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # npm code runs in these jobs: no GITHUB_TOKEN left in .git/config
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: dashboard/.nvmrc
@@ -102,12 +106,24 @@ jobs:
           retention-days: 30
       - name: BUILD.json matches the source (D28, the Python half that needs no Node)
         run: python3 -I ../tools/dashboard-build-info.py check ..
-      - name: The committed share/dashboard/ is this build (D28)
+      - name: The committed share/dashboard/ is this build (D28; --ignored, so an ignore rule cannot hide a new file)
         run: |
-          git -C .. status --porcelain -- share/dashboard
+          d28() { test -z "$(git -C .. status --porcelain --ignored -- share/dashboard)"; }
+          git -C .. status --porcelain --ignored -- share/dashboard
           git -C .. diff --exit-code --stat -- share/dashboard
-          test -z "$(git -C .. status --porcelain -- share/dashboard)" || {
-            echo "::error::share/dashboard/ differs from the build of dashboard/: commit the dashboard-build artifact (gh run download)"; exit 1; }
+          d28 || { echo "::error::share/dashboard/ differs from the build of dashboard/: commit the dashboard-build artifact (gh run download)"; exit 1; }
+          # must-fail: a changed file, a new file and a new ignored file are each caught
+          cp ../share/dashboard/index.html "$RUNNER_TEMP/index.html"
+          echo "<!-- changed -->" >> ../share/dashboard/index.html
+          if d28; then echo "::error::must-fail D28: a changed committed file passed"; exit 1; fi
+          cp "$RUNNER_TEMP/index.html" ../share/dashboard/index.html; d28
+          echo x > ../share/dashboard/assets/new-file.js
+          if d28; then echo "::error::must-fail D28: a new file passed"; exit 1; fi
+          rm ../share/dashboard/assets/new-file.js; d28
+          printf 'share/dashboard/assets/*.tmp.js\n' >> ../.git/info/exclude; echo x > ../share/dashboard/assets/a.tmp.js
+          if d28; then echo "::error::must-fail D28: a new ignored file passed"; exit 1; fi
+          rm ../share/dashboard/assets/a.tmp.js; d28
+          echo "ok: D28's git check catches a changed, a new and an ignored new file"
 
   supply:
     name: supply (lockfile, canary, audit, licences)
@@ -115,6 +131,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # npm code runs in these jobs: no GITHUB_TOKEN left in .git/config
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: dashboard/.nvmrc
@@ -143,6 +161,8 @@ jobs:
       DASH_E2E_PORT: "47999"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # npm code runs in these jobs: no GITHUB_TOKEN left in .git/config
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: dashboard/.nvmrc
@@ -186,6 +206,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false   # npm code runs in these jobs: no GITHUB_TOKEN left in .git/config
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: dashboard/.nvmrc

@@ -53,6 +53,12 @@ cp "$DASH/.npmrc" "$T/canary/app/.npmrc"
 (cd "$T/canary/app" && npm ci --ignore-scripts --no-audit >/dev/null 2>&1)
 if [ -e "$T/canary/RAN" ]; then bad "the canary's install script ran under npm ci --ignore-scripts"
 else ok "npm ci --ignore-scripts (and .npmrc ignore-scripts=true): the canary's script did not run"; fi
+(cd "$T/canary/app" && rm -rf node_modules && npm ci --no-audit >/dev/null 2>&1)
+if [ -e "$T/canary/RAN" ]; then bad "the canary's install script ran under plain npm ci: .npmrc's ignore-scripts=true is not honoured"
+else ok "plain npm ci (no flag; dashboard/.npmrc ignore-scripts=true): the canary's script did not run"; fi
+(cd "$T/canary/app" && rm -rf node_modules .npmrc && npm ci --no-audit >/dev/null 2>&1)
+if [ -e "$T/canary/RAN" ]; then ok "must-fail: no-npmrc: without .npmrc plain npm ci runs the canary (the check sees it)"; rm -f "$T/canary/RAN"
+else bad "must-fail: no-npmrc: the canary did not run without .npmrc (the check proves nothing)"; fi
 (cd "$T/canary/app" && rm -rf node_modules && npm ci --ignore-scripts=false --no-audit >/dev/null 2>&1)
 if [ -e "$T/canary/RAN" ]; then ok "must-fail: scripts-on: with scripts allowed the canary file appears (the check sees it)"
 else bad "must-fail: scripts-on: the canary did not run even with scripts on (the check proves nothing)"; fi

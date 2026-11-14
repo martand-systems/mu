@@ -627,6 +627,17 @@ class FakeMac:
             del self.cpu[:-1810], self.mem[:-1810]
         return s
 
+    def prefill(self, span=600.0):
+        """The last SPAN seconds of CPU and memory (dev servers only: the sparklines start full)."""
+        now = self.clock.wall()
+        t = now - span
+        with self.lock:
+            while t < now - 2:
+                k = int(t // 2)
+                self.cpu.append((round(t, 1), round(30 + 10 * _h("mac", k), 1)))
+                self.mem.append((round(t, 1), int(9.1 * GB + 0.2 * GB * _h("mem", k))))
+                t += 2.0
+
     def battery(self):
         stub = os.environ.get("MU_DASH_BATTERY")
         return {"on_battery": stub == "1", "percent": 100.0 if stub != "1" else 50.0}

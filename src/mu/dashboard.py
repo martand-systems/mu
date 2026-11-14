@@ -27,7 +27,7 @@ Test hooks: MU_LAUNCHCTL, MU_LAUNCH_AGENTS_DIR, MU_OPENER (the program that open
   swap-mem-fields     a node's available memory sent as used
   default-send-error  http.server's own error pages (no CSP)  static-follow-links symlinks in the static folder followed
   fault-guard-off     a real serve takes the unsafe faults     open-passes-faults  `open` hands MU_JOBS_FAULT to its server
-  open-trusts-port    `open` trusts whatever answers the port
+  open-trusts-port    `open` trusts whatever answers the port no-trusted-types    the CSP without require-trusted-types-for
 A real (non-dev) `serve` refuses to start with any fault that weakens its security (UNSAFE_FAULTS); open-url-argv
 works only with MU_OPENER (a test's stub opener).
 """
@@ -93,6 +93,8 @@ NO_BUILD_PAGE = (b"<!doctype html><meta charset=utf-8><title>\xce\xbc dashboard<
 
 
 def csp():
+    if fault("no-trusted-types"):
+        return CSP.replace("require-trusted-types-for 'script'; trusted-types 'none'", "trusted-types 'none'")
     if fault("csp-unsafe-inline"):
         return CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'").replace(
             "style-src 'self'", "style-src 'self' 'unsafe-inline'")
@@ -1347,6 +1349,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             self.log_error("code %d, message %s", code, message)
             self.close_connection = True
+            if getattr(self, "request_version", "HTTP/0.9") == "HTTP/0.9":
+                self.request_version = "HTTP/1.0"   # a status line and headers even for a request line not understood
             body = json.dumps({"api": API, "ok": False, "error": "bad-request" if code < 500 else "server",
                                "message": "malformed request (HTTP %d)" % code}).encode("utf-8")
             self.send_response(code)
@@ -1450,6 +1454,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.send_json(200, app.api_jobs(query), head)
             if path == "/api/mac":
                 return self.send_json(200, app.api_mac(), head)
+            if app.dev and path.startswith("/api/dev/fake-stats/"):
+                # dev only (fake nodes): a fake node's raw `stats` answer, so the page tests compare the page with
+                # the node itself rather than with this server's processing of it (D06)
+                name = path[len("/api/dev/fake-stats/"):]
+                fake = app.scenario.nodes.get(name) if app.scenario and proto.NODE_NAME.match(name) else None
+                if fake is None:
+                    raise ApiError(404, "no-such-node", "no fake node by that name")
+                return self.send_json(200, {"stats": fake.stats()}, head)
             m = ROUTE_JOB.match(path)
             if m:
                 jid = m.group(1)
@@ -1514,6 +1526,27 @@ def build_dev(scenario_name, fake_mac):
     return dict(dev=True, scenario=sc, readers=readers, index=FakeIndex(sc.clock, sc), mac=mac)
 
 
+def prefill_dev_series(app, span=600.0):
+    """Dev only: the fake nodes' (and the fake Mac's) last 10 minutes of CPU, so the sparklines of a fresh dev server
+    look as they do after a while (the owner's review copy). Each value is the fake's own function of the time."""
+    now = app.clock.wall()
+    for name, w in app.workers.items():
+        fake = app.scenario.nodes.get(name) if app.scenario else None
+        if fake is None or not fake.features or fake.failure or fake.stale_stats is not None:
+            continue
+        t = now - span
+        with w.lock:
+            while t < now - 5:
+                try:
+                    host = fake.stats(t).get("host") or {}
+                except Exception:
+                    break
+                w.series.append((round(t, 1), num(host.get("cpu_pct"), 0, 100)))
+                t += 5.0
+    if hasattr(app.mac, "prefill"):
+        app.mac.prefill(span)
+
+
 def build_real():
     readers = {}
     for name in jobs.paired_nodes():
@@ -1527,7 +1560,7 @@ def build_real():
 # test faults that weaken the server's security: a real (non-dev) server refuses to start with any of them, so a shell
 # with a leftover MU_JOBS_FAULT never serves the real nodes' data without its token, Host check or CSP
 UNSAFE_FAULTS = ("bind-all", "no-host-check", "no-token", "fixed-token", "csp-unsafe-inline", "default-send-error",
-                 "static-follow-links")
+                 "static-follow-links", "no-trusted-types")
 
 
 def cmd_serve(a):
@@ -1558,6 +1591,8 @@ def cmd_serve(a):
     app = App(port=srv.server_address[1], log=log, **parts)
     app.static = load_static(a.static or STATIC_DIR)
     srv.app = app
+    if dev:
+        prefill_dev_series(app)
     default_at_start = mac_version()
     write_private(token_path(dev), app.token + "\n")
     info = {"pid": os.getpid(), "port": app.port, "started": proto.iso(app.started), "version": app.version,

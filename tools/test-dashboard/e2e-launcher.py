@@ -37,7 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SCENARIOS = {"idle", "busy", "offline", "refused", "stale", "old-node", "hostile", "many", "wake"}
 SERVER_FAULTS = {"node-from-config", "swap-mem-fields", "serve-last-as-live", "fixed-token", "csp-unsafe-inline",
-                 "retry-refused", "rename-field", "poll-list-2s", "default-limit"}
+                 "retry-refused", "rename-field", "poll-list-2s", "default-limit", "no-trusted-types"}
 ENV_ALLOWED = {"MU_DASH_OLD_STEP", "MU_DASH_FAKE_SPEED"}
 
 
