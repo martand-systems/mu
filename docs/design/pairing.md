@@ -232,8 +232,9 @@ Every Mac error is the job layer's JSON shape (`exit`, `error`, `message`, `next
 
 - **The PC was reinstalled** (new host key) or **the Mac lost its folder**: `mu compute invite office-pc --replace`. The
   Mac keeps its old `compute/office-pc/` aside until `finish` and puts it back on any failure. The relay keeps the old
-  client until the new answer arrives, restores it on abort or expiry, and at `finish` restarts chisel so that no session
-  of the old credential survives (§6.7). The Mac keeps its key for the node (the PC's `authorize` replaces the line of the
+  client until the new answer arrives; then it replaces it and restarts chisel at once, so that no session of the old
+  credential survives and holds the node's port while the new tunnel tries to bind it (§6.7). On abort or expiry it puts
+  the old client back. The Mac keeps its key for the node (the PC's `authorize` replaces the line of the
   same name); `--new-key` makes a new one.
 - At the PC the line is `C:\Mu\host\mu-wsl2-host.ps1 pair`: install is a no-op there, so no restart; the code, the
   credential, the key, the answer and the wait take under a minute. Without the Windows side
@@ -406,9 +407,11 @@ but undoes nothing: by then the keys on both sides were each verified on their o
 | `answered` | answer | answered + 15 min | finish (admin) → `finished`; abort; expiry. **No new claim, no second answer** |
 | `finished`, `aborted`, `expired`, `locked` | | kept 24 h, then purged | none (every request answers the state) |
 
-Side effects: on `answered`, R creates (or replaces) the dynamic client and adds the port to the inviter's workstation
-client (§6.5); on `aborted` or `expired` from `answered`, R removes that client and restores the one it replaced; on
-`finished`, R drops the replaced entry and, if it replaced or removed anything, restarts chisel (§6.7). A claim counts
+Side effects: on `answered`, R creates (or replaces) the dynamic client, adds the port to the inviter's workstation
+client (§6.5) and, if it replaced a client, restarts chisel (§6.7: an old session would otherwise keep the port's
+listener and the new tunnel would get `Server cannot listen`); on `aborted` or `expired` from `answered`, R removes
+that client, restores the one it replaced and restarts chisel (a removal: the refused claimer's sessions must end);
+on `finished`, R drops the saved entry. A claim counts
 as wrong when its token's hash differs from `claim_hash`; 5 wrong claims lock the invite in any non-terminal state
 before `answered`. A right claim from another address than the first right claim sets the flag `contested` (§12.1);
 the state goes on, and the inviter refuses to finish a contested invite.
@@ -451,7 +454,7 @@ All under `/mu/v1/`, JSON in and out (`Content-Type: application/json`, body at 
 | `GET /mu/v1/` | none | `{"ok":true,"service":"mu-relay","protocol":1,"pairing":true}` |
 | `POST /mu/v1/invites` | admin | `{id, kind, name, port \| ports, inviter, claim_hash, offer, offer_mac, ttl_s, replace}` → `{id, state, expires}`. Checks: §6.3 |
 | `GET /mu/v1/invites/{id}?wait=S&since=STATE` | admin | long poll (S ≤ 25) until the state differs from `since` → `{state, contested, events[], claims: [{at, from}], answer, answer_mac, deadline}` |
-| `POST /mu/v1/invites/{id}/finish` | admin | `{confirm, confirm_mac}` → `{state: "finished", evicted: bool}`. Only from `answered` |
+| `POST /mu/v1/invites/{id}/finish` | admin | `{confirm, confirm_mac}` → `{state: "finished"}`. Only from `answered` |
 | `POST /mu/v1/invites/{id}/abort` | admin or session | `{reason}` → `{state: "aborted"}` |
 | `POST /mu/v1/invites/{id}/claim` | claim token | `{claim}` → `{session, kind, name, port \| ports, inviter, offer, offer_mac, deadline}` |
 | `GET /mu/v1/invites/{id}/offer` | session | `{offer, offer_mac, name, port, inviter, state}` (the PC re-reads it after its restart) |
