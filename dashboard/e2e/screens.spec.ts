@@ -2,7 +2,7 @@
 // test-results/screens/<state>-<theme>.png (uploaded by CI as the dashboard-e2e artifact). Not asserted beyond each
 // screen being reached: the look is reviewed by a person. Chromium only (the e2e tests cover WebKit).
 import type { Page } from "@playwright/test";
-import { expect, openDash, setTheme, test, type Dash } from "./helpers";
+import { expect, gotoJob, openDash, setTheme, test, type Dash } from "./helpers";
 
 test.skip(({ browserName }) => browserName !== "chromium", "screenshots once, in Chromium");
 test.describe.configure({ mode: "serial" });
@@ -61,7 +61,7 @@ test("screens: job details", async ({ page, serve }) => {
   await openDash(page, d);
   for (const st of ["running", "queued", "oom", "succeeded", "failed"]) {
     const id = await firstJob(page, st);
-    await page.goto(`${d.url}/#job=${id}`);
+    await gotoJob(page, id);
     await expect(page.getByTestId("job-detail")).toBeVisible();
     await page.waitForTimeout(st === "running" ? 4000 : 2500);
     await shot(page, `job-${st}`);
@@ -75,14 +75,14 @@ test("screens: job details", async ({ page, serve }) => {
   const o = await serve("old-node");
   await openDash(page, o);
   const id = await firstJob(page, "succeeded");
-  await page.goto(`${o.url}/#job=${id}`);
+  await gotoJob(page, id);
   await expect(page.getByTestId("resources-old-node")).toBeVisible();
   await page.waitForTimeout(2500);
   await shot(page, "job-old-node");
   const h = await serve("hostile");
   await openDash(page, h);
   const hid = await firstJob(page, "running");
-  await page.goto(`${h.url}/#job=${hid}`);
+  await gotoJob(page, hid);
   await page.waitForTimeout(4000);
   await shot(page, "job-hostile");
   await page.goto(`${h.url}/#job=20991231-235959-zzzzzz`);
@@ -162,7 +162,7 @@ test("screens: phone width", async ({ page, serve }) => {
   const d = await serve("busy");
   await overview(page, d, "phone-overview");
   const id = await firstJob(page, "running");
-  await page.goto(`${d.url}/#job=${id}`);
+  await gotoJob(page, id);
   await page.waitForTimeout(3500);
   await shot(page, "phone-job");
 });

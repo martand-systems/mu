@@ -58,11 +58,12 @@ export function CopyCommand({ cmd, primary = false, label, block = false }: { cm
         type="button"
         onClick={onClick}
         className={`inline-flex shrink-0 items-center gap-1 border-l px-2 py-1 text-xs font-medium ${btn}`}
-        aria-label={`Copy: ${cmd}`}
+        data-copy-cmd={cmd}
         data-copy-result={res}
       >
         {res === "copied" ? <Check aria-hidden="true" size={13} /> : <Copy aria-hidden="true" size={13} />}
         <span>{res === "copied" ? "copied" : res === "select" ? "selected: press ⌘C" : (label ?? "copy")}</span>
+        <span className="sr-only"> {cmd}</span>
       </button>
     </span>
   );

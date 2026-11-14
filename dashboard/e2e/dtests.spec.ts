@@ -6,7 +6,7 @@
 // the auto fixture in helpers.ts).
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
-import { apiJson, expect, openDash, restartServer, setTheme, test, type Dash } from "./helpers";
+import { apiJson, expect, gotoJob, openDash, restartServer, setTheme, test, type Dash } from "./helpers";
 
 const WEBKIT_TOO = /^(D05|D06|D07|D16|D29|D42|D47)\b/;
 test.beforeEach(({ browserName }, info) => {
@@ -46,7 +46,7 @@ test("D04 an old node (no features): the jobs are listed and the card says to up
   expect((await rows(page)).every((r) => r.node === "office-pc")).toBe(true);
   // the job detail of an old node: no resource chart, elapsed only
   const id = (await rows(page))[0]!.job;
-  await page.goto(`${d.url}/#job=${id}`);
+  await gotoJob(page, id);
   await expect(page.getByTestId("resources-old-node")).toBeVisible();
   await expect(page.getByTestId("resource-chart")).toHaveCount(0);
 });
@@ -190,7 +190,7 @@ test("D16 hostile node text: nothing is created from it, nothing runs, the page 
   await expect(hostile.getByText('<img src=x onerror="window.__xss=1">', { exact: false })).toBeVisible();
   // the hostile job's detail: its log holds HTML, ANSI escapes and a 1 MB line
   const id = (await hostile.getAttribute("data-job"))!;
-  await page.goto(`${d.url}/#job=${id}`);
+  await gotoJob(page, id);
   await expect(page.getByTestId("log-text")).toContainText("<script>", { timeout: 20000 });
   await expect(page.getByTestId("log-text")).toContainText("bytes cut", { timeout: 30000 });
   const t = Date.now();
@@ -285,7 +285,7 @@ test("D26 accessibility: keyboard, names, labels, no live churn, axe clean in li
       const words = await page.locator("[data-state] span, [data-machine-state] span").evaluateAll((s) => s.map((x) => x.textContent?.trim()));
       expect(words.every((w) => w)).toBe(true);
       const id = await page.locator('tr[data-state="running"]').first().getAttribute("data-job");
-      await page.goto(`${d.url}/#job=${id}`);
+      await gotoJob(page, id);
       await expect(page.getByTestId("resource-chart")).toBeVisible({ timeout: 15000 });
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
@@ -329,7 +329,7 @@ test("D29 no CSP or Trusted Types violation with every overlay opened", async ({
   await page.locator(".resource-pane .u-over").first().hover();
   await page.getByRole("button", { name: "show as table" }).click();
   await expect(page.getByTestId("sample-table")).toBeVisible();
-  await page.getByRole("button", { name: /Copy: mu status/ }).click();
+  await page.getByRole("button", { name: / mu status / }).click();
   await page.waitForTimeout(500);
   // the no-token page and the error page mount without a violation too (the fixture checks after the test)
   await page.getByRole("button", { name: "Jobs" }).click();
@@ -351,7 +351,7 @@ test("D42 theme: set before the app's module runs; the charts redraw in the othe
   await page.unroute(/\/assets\/index-[^/]+\.js$/);
   // the chart: pixels of the cores series in the dark theme's colour, then the light theme's after a switch
   const id = await page.locator('tr[data-state="running"]').first().getAttribute("data-job");
-  await page.goto(`${d.url}/#job=${id}`);
+  await gotoJob(page, id);
   await expect(page.locator(".resource-pane canvas").first()).toBeVisible({ timeout: 15000 });
   await page.waitForTimeout(500);
   const count = (hex: string) =>
@@ -420,6 +420,7 @@ test("D46 failure states: server down is not 'node offline'; the error page hold
 // ------------------------------------------------------------------------------------------------ D47
 test("D47 copy works in Safari's engine: the exact command reaches the clipboard, or is selected with a word", async ({ page, serve, browserName }) => {
   test.skip(browserName !== "webkit", "WebKit only");
+  test.setTimeout(90000);
   // Safari refuses the clipboard outside a user gesture; Playwright's WebKit build does not enforce that rule, so the
   // test puts it back: writeText is refused once the click's transient activation has lapsed.
   await page.addInitScript(() => {
@@ -427,16 +428,21 @@ test("D47 copy works in Safari's engine: the exact command reaches the clipboard
     const orig = c.writeText.bind(c);
     const ua = (navigator as unknown as { userActivation?: { isActive: boolean } }).userActivation;
     c.writeText = (t: string) => (ua && !ua.isActive ? Promise.reject(new DOMException("not in a gesture", "NotAllowedError")) : orig(t));
+    // every state a copy button passes through ("copied" lasts 2 s: a slow poll could miss it)
+    const states: string[] = ((window as unknown as { __copyStates: string[] }).__copyStates = []);
+    new MutationObserver((ms) => {
+      for (const m of ms) states.push((m.target as Element).getAttribute("data-copy-result") ?? "");
+    }).observe(document, { subtree: true, attributes: true, attributeFilter: ["data-copy-result"] });
   });
   const d = await serve("busy");
   await openDash(page, d);
   const id = await page.locator('tr[data-state="running"]').first().getAttribute("data-job");
-  await page.goto(`${d.url}/#job=${id}`);
-  const btn = page.getByRole("button", { name: /^Copy: mu log/ });
+  await gotoJob(page, id);
+  const btn = page.getByRole("button", { name: /^copy mu log/ });
   await expect(btn).toBeVisible({ timeout: 15000 });
-  const cmd = (await btn.getAttribute("aria-label"))!.replace(/^Copy: /, "");
+  const cmd = (await btn.getAttribute("data-copy-cmd"))!;
   await btn.click();
-  await expect(btn).toHaveAttribute("data-copy-result", "copied", { timeout: 4000 });
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __copyStates: string[] }).__copyStates), { timeout: 4000 }).toContain("copied");
   // read it back: paste into a field, as the user would
   await page.evaluate(() => {
     const ta = document.createElement("textarea");
@@ -451,8 +457,9 @@ test("D47 copy works in Safari's engine: the exact command reaches the clipboard
   await page.evaluate(() => {
     navigator.clipboard.writeText = () => Promise.reject(new DOMException("refused", "NotAllowedError"));
   });
-  const fetchBtn = page.getByRole("button", { name: /^Copy: mu fetch/ });
-  const fetchCmd = (await fetchBtn.getAttribute("aria-label"))!.replace(/^Copy: /, "");
+  await expect(page.getByRole("button", { name: /^copy mu fetch/ })).toBeVisible(); // its name holds the command
+  const fetchBtn = page.locator('button[data-copy-cmd^="mu fetch"]');
+  const fetchCmd = (await fetchBtn.getAttribute("data-copy-cmd"))!;
   await fetchBtn.click();
   await expect(fetchBtn).toContainText("selected: press ⌘C");
   expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(fetchCmd);

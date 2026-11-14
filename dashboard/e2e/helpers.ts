@@ -91,3 +91,12 @@ export async function apiJson(page: Page, d: Dash, path: string): Promise<Record
   const r = await page.request.get(`${d.url}${path}`, { headers: { "X-Mu-Token": d.token } });
   return (await r.json()) as Record<string, unknown>;
 }
+
+/** Open a job in the page (a fragment change, as a click on its link does; a page.goto to another fragment of the
+ * same document is cancelled now and then by WebKit). */
+export async function gotoJob(page: Page, id: string | null): Promise<void> {
+  await page.evaluate((j) => {
+    window.location.hash = `job=${j}`;
+  }, id ?? "");
+  await expect(page.getByTestId("job-detail").or(page.getByText("No node lists this job"))).toBeVisible({ timeout: 15000 });
+}
