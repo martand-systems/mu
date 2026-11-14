@@ -17,6 +17,14 @@ server, fake nodes, the Mac's sampler; no node change) runs in parallel with the
 node's sampler, verbs and usage records) follows the scheduler and the node's auto-update fix (§7.1). Changed: §2,
 §3.1–3.2, §4.1, §4.4, §4.6, §4.8 (new), §5.3 (new), §7, §8, §9 Q11–Q12, §10, §11.
 
+**Revision 3 (2026-11-14, after a review of revision 2).** The review approved the shape and asked for four fixes
+before the go-ahead, all taken: the CSP analysed part by part (Radix's `ScrollArea` and modal menus dropped, a CSP
+table per phase for ECharts and three.js, Trusted Types required); the build-time supply chain (npm code runs with the
+developer's rights once a build starts, so the Mac runs npm only through a sandboxed wrapper; the committed bundle is
+CI's; the Dependabot flow spelled out); a traffic plan for today's node, which has no `watch`; and the effort, now
+1a 8–11 days and phase 1 12–16. Changed: §2.1, §3.2, §4.3, §4.6, §4.6.1, §4.8, §5.3, §7.0, §7.1, §7.6, §8, §9 Q9,
+§11.2 (new: which findings were taken and which were not).
+
 Sections: [1 Goal](#1-goal-and-non-goals) · [2 Decisions](#2-decisions) · [3 Build or adopt](#3-build-or-adopt-plan-17) ·
 [4 Architecture](#4-architecture) · [5 Screens](#5-screens) · [6 Performance comparison](#6-performance-comparison-mac-vs-node) ·
 [7 Phases and tests](#7-phases-acceptance-tests-and-effort) · [8 Risks](#8-risks) · [9 Questions](#9-questions-for-the-owner) ·
@@ -60,7 +68,8 @@ to the same job on the other machine".
    React + TypeScript single-page app, built by Vite in CI into `share/dashboard/` and committed, so each release
    carries it (§4.8). No Node.js on users' machines, no CDN at runtime. Adopted: SQLite (stdlib, phase 2), psutil on
    the Mac (already hash-pinned at 7.2.2 in both platforms' `env.pip.txt`), and a short list of pinned, permissively
-   licensed front-end libraries (§3.2): React, TanStack Query and Table, uPlot, Radix UI, Tailwind CSS (build time).
+   licensed front-end libraries (§3.2): React, TanStack Query, uPlot, Radix UI's Tooltip, lucide icons, Tailwind CSS
+   (build time); TanStack Table and Router from phase 2.
 2. **The node measures itself; the Mac pulls.**
    - From phase 1, the node's runner samples the running job's cgroup and the machine's `/proc` files every 5 s, keeps
      `metrics/now.json`, and appends the job's series to `jobs/<id>/metrics.jsonl`.
@@ -83,13 +92,15 @@ to the same job on the other machine".
 6. **Its own ssh master.** The dashboard uses a ControlPath of its own per node and never closes the CLI's, so a slow
    dashboard call can never end Claude's in-flight `mu submit`, `mu fetch` or `mu log -f` (§4.3).
 7. **Streams, not polling, toward the node.** One `watch` session per node while a tab is visible, `log follow=1` for
-   the open log, and `list` only when the node's `rev` moves. The browser polls the local server every 2 s.
+   the open log, and `list` only when the node's `rev` moves. The browser polls the local server every 2 s. A node
+   without these verbs (every node until 1b reaches it) is polled with `list` on a stated budget (§4.3).
 8. **Security.**
    - Binds 127.0.0.1 only and checks the `Host` header.
    - Every API call needs an `X-Mu-Token` header. The token is new at each server start, lives in a 0600 file and in
      the page's `localStorage`, never in a cookie, argv, a log or Claude-visible output.
-   - Strict CSP (no `unsafe-inline`, no `unsafe-eval`). Every node string is rendered as text only; React escapes
-     text, and `dangerouslySetInnerHTML` and the other HTML sinks are forbidden by lint.
+   - Strict CSP (no `unsafe-inline`, no `unsafe-eval`, never a nonce) with Trusted Types required, so no HTML sink
+     works even inside a library. Every node string is rendered as text only; React escapes text, and
+     `dangerouslySetInnerHTML` and the other HTML sinks are forbidden by lint.
    - The server reaches nodes only through one wrapper that refuses any verb outside a fixed read-only allowlist.
    - The front end's npm supply chain is locked, audited, licence-checked and rebuilt in CI (§4.6.1).
 
@@ -197,28 +208,29 @@ the real cost is what the build contains, which D36 measures and bounds.
 | Package | Pin (released) | Newer, not yet pinned | Licence | Size (gzip) | For | Phase |
 |---|---|---|---|---|---|---|
 | `react`, `react-dom` | 19.3.1 (2026-10-14) | — | MIT | about 60 kB together (estimate: the unminified production file of `react-dom/client` is 110 kB gzipped) | the UI | 1a |
-| `@tanstack/react-query` | 5.105.0 (2026-10-26) | 5.107.1 | MIT | 13 kB | polling `/api`, caching, deduplication, pausing in hidden tabs, retry with back-off | 1a |
-| `@tanstack/react-table` | 9.3.1 (2026-10-12) | — | MIT | 32 kB whole; tree-shaken | the job table: columns, sorting; filters and search in phase 2. Headless: our markup and styles | 1a |
-| `uplot` | 1.6.32 (2025-03-14) | — | MIT | 22 kB | every time series (machine sparklines, the job's resource chart, host history). Wrapped in our own component of about 80 lines; `uplot-react` (1.2.4, MIT) is not adopted | 1a |
-| `radix-ui` | 1.8.1 (2026-10-12) | — | MIT | 74 kB if all of it were imported; only the parts used are bundled | accessible primitives: Tooltip, DropdownMenu, Toggle, ScrollArea (1a); Tabs, Popover (2). Styled by us with Tailwind, following shadcn/ui's patterns (MIT, copied as source where useful, not a dependency; the shadcn CLI is not used in CI) | 1a |
+| `@tanstack/react-query` | 5.105.0 (2026-10-26) | 5.107.1 | MIT | 13 kB | polling `/api`, caching, deduplication, pausing in hidden tabs, retry with back-off. Set to `networkMode: 'always'`: the default pauses every query while `navigator.onLine` is false, which would freeze a page whose server is on the same Mac (D41) | 1a |
+| `uplot` | 1.6.32 (2025-03-14) | — | MIT | 22 kB | every time series (machine sparklines, the job's resource chart, host history). Wrapped in our own component of about 80 lines; `uplot-react` (1.2.4, MIT) is not adopted. Its last release is from March 2025 and it has one maintainer: acceptable because only our wrapper touches it, so it can be replaced in one file (§8) | 1a |
+| `radix-ui` | 1.8.1 (2026-10-12) | — | MIT | 74 kB if all of it were imported; only the parts used are bundled | accessible primitives. **1a: Tooltip only.** Phase 2: Tabs and Popover (non-modal, its default). Styled by us with Tailwind, following shadcn/ui's patterns (MIT, copied as source where useful, not a dependency; the shadcn CLI is not used in CI). **Never used:** `ScrollArea` (it renders a `<style>` element, which `style-src 'self'` blocks: native overflow with scrollbar styling in our stylesheet instead), `Toggle` (a `<button aria-pressed>` instead), and any part in a modal mode (`Dialog`, `AlertDialog`, `DropdownMenu`, `Select` and `Popover` with `modal`), whose scroll lock (`react-remove-scroll`) injects a `<style>` element when it opens. The two job-table filters are native `<select>` elements | 1a |
+| `@tanstack/react-table` | 9.3.1 (2026-10-12) | — | MIT | 32 kB whole; tree-shaken | phase 2's job list with filters and search. Not in 1a: a 100-row table with three sortable columns is a few lines of our own, and v9 is a month old | 2 |
+| `@tanstack/react-virtual` | not pinned: 3.14.26 (2026-11-03) is under 14 days old | — | MIT | about 5 kB | long logs and job lists, only if phase 2's caps prove too small (§5.3 `LogView` caps the log at numbers in 1a) | 2 (if needed) |
 | `lucide-react` | 1.65.0 (2026-10-30) | 1.73.0 | ISC | under 1 kB per icon used | state icons (an icon and a word go with every state colour) | 1a |
 | `@tanstack/react-router` | 1.170.46 (2026-10-22) | — | MIT | 31 kB | separate pages, filters kept in the URL with types, hash history. Phase 1 has one page and reads `#job=<id>` itself, so no router until phase 2 | 2 |
-| `echarts` | 6.1.0 (2026-05-19) | — | Apache-2.0 | 368 kB whole; only the chart types used, in a lazily loaded chunk | Compare › Performance bars and scatter, the daily compute-hours chart. Adopted only if hand-drawn SVG is not enough | 2 (optional) |
-| `three` | 0.187.0 (2026-10-30) | — | MIT | 186 kB whole; lazily loaded | STL and GLB previews (its own `OrbitControls`, `STLLoader`, `GLTFLoader`) | 4 |
+| `echarts` | 6.1.0 (2026-05-19) | — | Apache-2.0 | 368 kB whole; only the chart types used, in a lazily loaded chunk | Compare › Performance bars and scatter, the daily compute-hours chart. Adopted only if hand-drawn SVG is not enough; canvas renderer, tooltip only in `renderMode: 'richText'` or none (§4.6, CSP by phase) | 2 (optional) |
+| `three` | 0.187.0 (2026-10-30) | — | MIT | 186 kB whole; lazily loaded | STL and untextured GLB previews (its own `OrbitControls`, `STLLoader`, `GLTFLoader`); no Draco, KTX2 or meshopt decoders (§4.6, CSP by phase) | 4 |
 | `@react-three/fiber` | 9.8.2 (2026-10-14) | — | MIT | 58 kB | React bindings for three.js (peer: React ≥ 19 and < 19.4, three ≥ 0.156; both met). `@react-three/drei` not adopted | 4 |
 
 **Build and test only (never shipped):**
 
 | Package | Pin (released) | Newer | Licence | For |
 |---|---|---|---|---|
-| Node.js | 24.22.2 LTS "Krypton" (2026-10-27), with npm 11.19.1 | 24.22.3, 26.13.1 LTS | MIT | the build, in `.nvmrc`, `package.json` `engines` (with `engine-strict`), and CI's `setup-node` |
+| Node.js | 24.22.2 LTS "Krypton" (2026-10-27), with npm 11.19.1 | 24.22.3, 26.13.1 LTS | MIT | the build, in `.nvmrc`, `package.json` `engines` (with `engine-strict`), and CI's `setup-node`. On the Mac, the official tarball checked against a pinned SHA-256, in `$MU_CACHE/dev/`, used only through `tools/dashboard-npm` (§4.6.1) |
 | `typescript` | 6.0.3 (2026-04-16) | 7.0.2 | Apache-2.0 | type checking (`tsc --noEmit`; Vite strips types itself). **Not 7.0**: `typescript-eslint` 8.72 declares `typescript >=4.8.4 <6.1.0`. Move when it supports 7 |
 | `vite` | 8.3.5 (2026-10-21) | 8.3.8 | MIT | dev server and build (needs Node ^20.19 or ≥ 22.12) |
 | `@vitejs/plugin-react` | 6.1.2 (2026-10-05) | 6.3.0 | MIT | JSX and fast refresh in the dev server |
 | `tailwindcss`, `@tailwindcss/vite` | 4.3.3 (2026-07-16) | 4.3.5 | MIT | utility CSS compiled at build time into one `.css` file; the design tokens (§5.3) are its theme |
 | `eslint` | 10.14.0 (2026-10-30) | 10.15.0 | MIT | lint, including the rules of §4.6.1 |
 | `typescript-eslint` | 8.72.1 (2026-10-26) | 8.72.2 | MIT | TypeScript rules |
-| `eslint-plugin-react-hooks` | 7.1.1 (2026-04-17) | — | MIT | hooks rules. `eslint-plugin-react` is not adopted: 7.37.5 declares ESLint ≤ 9.7; the HTML-sink ban uses ESLint's own `no-restricted-syntax` and `no-restricted-properties` |
+| `eslint-plugin-react-hooks` | 7.1.1 (2026-04-17) | — | MIT | hooks rules. `eslint-plugin-react` is not adopted: 7.37.5 declares ESLint ≤ 9.7; the HTML-sink ban uses ESLint's own `no-restricted-syntax` and `no-restricted-properties`. `eslint-plugin-jsx-a11y` cannot be used either: 6.10.2, its latest, declares ESLint ≤ 9; accessibility is checked by axe and D26 instead |
 | `vitest` | 5.0.5 (2026-10-15) | 5.1.0 | MIT | unit tests of components and data shaping (needs Node ^22.12, ^24 or ≥ 26) |
 | `jsdom` | 30.1.3 (2026-10-15) | 31.0.1 | MIT | DOM for Vitest |
 | `@testing-library/react` | 16.3.3 (2026-08-27) | — | MIT | component tests |
@@ -228,10 +240,13 @@ the real cost is what the build contains, which D36 measures and bounds.
 | `actions/setup-node` | v7.1.0, commit `949feb2413d6458794dcd2491c4babbbce0c15c1` (2026-10-08) | — | MIT | CI, pinned by commit like the other actions in `job-layer.yml` |
 
 **Not verified here, checked in phase 1a:** the licences of transitive dependencies (the CI licence job does it on the
-real lockfile); the real bundle sizes; that every package installs and builds with install scripts off; that Radix's
-modal parts (Dialog, and Select in its default modal mode), whose scroll lock may insert a `<style>` element, run
-without a CSP violation (if not, phase 1 uses their non-modal forms or native elements, D29); the publication dates of
-the `@types` packages.
+real lockfile); the real bundle sizes; that every package installs and builds with install scripts off; that the
+lockfile carries the Linux and macOS native packages of the build tools (D35); that the phase 1 set runs with no CSP or
+Trusted Types violation with every overlay opened (D29; the Radix analysis above is from Radix's source as known, not
+yet run); the publication dates of the `@types` packages. If a part still violates the CSP, it is replaced by a native
+element or our own component. **The fallback is never a nonce, a hash or `unsafe-inline`**: a nonce would make the
+server rewrite `index.html` per request, and the others weaken the one control that covers code inside
+`node_modules`.
 
 ## 4. Architecture
 
@@ -353,7 +368,8 @@ every job on the node. What is new is on the workstation: more node-controlled t
 **Still to confirm on the PC** (§7.0): the job unit's `ControlGroup`; that `memory.peak` and `pids.peak` exist (they
 need kernel 5.19 or later; the WSL kernel's version is not yet checked); what is left of an OOM-killed unit's cgroup
 after the kill; PSI (`CONFIG_PSI`); whether `mu` can read `/proc/<pid>/io` for its own processes (`io.stat` is absent,
-because the user manager is delegated only `cpu memory pids`); the CPU cost of one verb call.
+because the user manager is delegated only `cpu memory pids`). The CPU cost of one verb call is measured earlier, on
+today's node, before 1a's release (§7.0), because 1a's polling of old nodes depends on it.
 
 ### 4.3 Getting node data to the Mac
 
@@ -370,19 +386,27 @@ because the user manager is delegated only `cpu memory pids`); the CPU cost of o
   - A slow or offline node never blocks the others.
 - **Cost of a call.** About 0.9 s on a live master through the relay, about 5 s plus a Keychain read for a new one.
   Each call on the node spawns an sshd session, the gate (`sh`, `awk`, `id`), bash `bin/mu` and Python; the review
-  estimated 80–150 ms of CPU per call, not measured. §7.0 measures it, which is why the plan below avoids per-second
-  calls.
-- **Traffic.**
+  estimated 80–150 ms of CPU per call, not measured. §7.0 measures it on today's node before 1a's release, which is
+  why the plan below avoids per-second calls.
+- **Traffic.** The server makes the node calls, once per node however many tabs are open.
 
-| Situation | Node traffic |
-|---|---|
-| A tab is visible | one `watch interval=2` session per node (live host and job figures, and `rev`); `list limit=100` when `rev` moves, at most every 5 s, and every 5 min as a backstop; `log id= follow=1` while a job's log is open (one session); `metrics id= offset=` once when a job's detail opens, then the live points come from `watch` |
-| No visible tab, a job unfinished, on mains power | `list limit=100` every 60 s, enough to notice the end |
-| No visible tab, a job unfinished, on battery (psutil `sensors_battery`) | `list` every 5 min; the master is allowed to expire (`ControlPersist 300`), so no 15 s keepalives run for the whole job |
-| Nothing unfinished, no tab | nothing; the master expires; the server sits in `accept()` |
+| Situation | Node with `features` (1b and later) | Old node, no `features` (every node until 1b reaches it) |
+|---|---|---|
+| A tab is visible | one `watch interval=2` session per node (live host and job figures, and `rev`); `list limit=100` when `rev` moves, at most every 5 s, and every 5 min as a backstop; `log id= follow=1` while a job's log is open (one session); `metrics id= offset=` once when a job's detail opens, then the live points come from `watch` | `list limit=100` every **15 s** while the node has an unfinished job or this Mac submitted to it in the last 2 min (`jobs.index` changed), else every **60 s**; `log id= follow=1` while a log is open; `status id=` once when a job's detail opens. No live figures |
+| No visible tab, a job unfinished, on mains power | `list limit=100` every 60 s, enough to notice the end | the same |
+| No visible tab, a job unfinished, on battery (psutil `sensors_battery`) | `list` every 5 min; the master is allowed to expire (`ControlPersist 300`), so no 15 s keepalives run for the whole job | the same |
+| Nothing unfinished, no tab | nothing; the master expires; the server sits in `accept()` | the same |
 
   "A tab is visible" means an `/api` request in the last 10 s; the page polls only while
   `document.visibilityState` is `visible`.
+
+  **Cost of the old-node mode**, the only mode against the office PC from 1a's release until 1b reaches it: every
+  `list` is one ssh session (several sshd `VERBOSE` lines) and one line in `/srv/mu/audit.log`, and costs 80–150 ms of
+  node CPU (estimate until §7.0 measures it). At 15 s that is 240 sessions and audit lines an hour (about 50 kB of
+  `audit.log`) and 20–36 s of CPU an hour (0.5–1 % of one core), only while a tab is visible and a job is unfinished.
+  A job's state change reaches the page within 20 s (15 s plus the call), not the 15 s D05 asks of a node with
+  `watch`. If §7.0 measures more than 150 ms per call, the 15 s step becomes 30 s before 1a ships. D39 bounds the call
+  count. `audit.log` rotation ships with step 2's release (ROADMAP §1, §9 Q9).
 
 - **`list` limit.** `verb_list` returns at most `limit` finished jobs (default 20). The dashboard sends `limit=100`.
   When the node has more, the job table ends with "older jobs: `mu status`", and the day's totals are marked "at
@@ -429,7 +453,7 @@ because the user manager is delegated only `cpu memory pids`); the CPU cost of o
   - `serve`: internal.
   - Later, if wanted: `url`, `stop`, `reset-token`.
 - **Static files.** The server also serves the React app from the release's `share/dashboard/` (§4.8): `/` is
-  `index.html`, `/assets/<name>` the hashed bundles. It builds a fixed table of those files once at start; no request
+  `index.html`, `/theme.js` and `/favicon.svg` two fixed small files, `/assets/<name>` the hashed bundles. It builds a fixed table of those files once at start; no request
   path is ever joined to a directory.
 - **API.** Plain JSON, polled. No stream endpoint, which also keeps several open tabs inside the browser's six
   connections per origin. How the app uses it: §4.8.
@@ -468,30 +492,85 @@ change what gc keeps. Jobs submitted before phase 1, or from another workstation
 | Getting the token to the browser | `mu dashboard open` reads the port from `run/dashboard.json`, writes `run/dashboard-open.html` (0600), a redirect to `http://127.0.0.1:<port>/#t=<token>`, and opens that **file** (Jupyter's method). argv holds only a path. The page moves the fragment into `localStorage` and removes it with `history.replaceState`. The server deletes the file when the token is first used, or after 60 s. Fragments never reach a server or a `Referer`. The token is never printed, never in `--json`, never in a log |
 | A page without a token | The first click is often on the URL `mu submit` printed, which has no token. That page holds no data and says: "run `mu dashboard open` in a terminal (or ask Claude to)". The same page appears when a stored token is from an earlier server start (401) |
 | A process squatting the port | With the LaunchAgent the port is held while the user is logged in. The token rotates at each server start, so a token a squatter's page could read from `localStorage` is useless once the real server is back |
-| Hostile node text (any job can write its name, log, notes, metrics lines, files that `hello` reads) | rendered as React text children only, which React escapes; `dangerouslySetInnerHTML`, `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval` and `new Function` are lint errors (§4.6.1); no URL from a node becomes an `href` or `src`; the server strips control and escape sequences (`proto.clean_text`) and caps sizes; the app decodes every response with typed decoders that parse numbers as numbers and cap strings (§4.8). CSP on every response: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` (no `unsafe-inline`, no `unsafe-eval`; Vite's production output needs neither), plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`. Phase 1a also tries `require-trusted-types-for 'script'` and keeps it if the app runs without a violation in Chromium |
-| Libraries that break the CSP | Runtime CSS-in-JS (styled-components, Emotion) and anything that injects `<style>` or inline `<script>` elements or evaluates strings is not adopted. Styles come from the one built `.css` file; React sets `style` props through the CSSOM, which the CSP allows. Playwright fails any test that sees a `securitypolicyviolation` event (D29) |
+| Hostile node text (any job can write its name, log, notes, metrics lines, files that `hello` reads) | rendered as React text children only, which React escapes; `dangerouslySetInnerHTML`, `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval` and `new Function` are lint errors (§4.6.1); no URL from a node becomes an `href` or `src`; the server strips control and escape sequences (`proto.clean_text`) and caps sizes; the app decodes every response with typed decoders that parse numbers as numbers and cap strings (§4.8). CSP on every response: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'` (no `unsafe-inline`, no `unsafe-eval`, no nonce; Vite's production output needs none of them), plus `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`. **Trusted Types are a requirement from phase 1a**, not a trial: with no policy allowed, every HTML or script sink (`innerHTML`, `insertAdjacentHTML`, `script.src`, `eval`) throws, including inside `node_modules`, which the lint ban cannot see. Tested in Chromium and WebKit (D29); if the pinned Playwright WebKit build does not enforce Trusted Types, its run checks the CSP only and that is written in the test |
+| Libraries that break the CSP | Runtime CSS-in-JS (styled-components, Emotion) and anything that injects `<style>` or inline `<script>` elements or evaluates strings is not adopted. Styles come from the one built `.css` file; React and uPlot set styles through the CSSOM (`element.style`), which the CSP allows. Radix: Tooltip only in 1a; `ScrollArea` and every modal part are never used, because they inject `<style>` elements when they mount or open (§3.2). A violation fires when the element mounts, not at page load, so D29 opens every overlay. The fallback for a violating part is a native element or our own component, never a nonce or `unsafe-inline` |
 | The npm supply chain (build time only) | §4.6.1 |
 | Secrets | the API returns an allowlist of fields. The server never reads the Keychain, `relay.auth`, keys, invites or `node.conf` beyond `name`, `added` and the host-key fingerprint. It reaches nodes only through `NodeReader` → `jobs.Conn`, whose proxy subprocess reads the relay password, so the server process never holds it. The relay admin API is not used |
 | Actions | phases 1–3 are read-only, so an XSS that slipped through could read job data but change nothing. Cancel (phase 4, only if the owner wants it): `POST`, token, Origin check, a confirmation naming the job, node and state, and the same code as `mu cancel`. Never fetch |
 | Other people's jobs on a shared node | `list` without a project filter shows every workstation's jobs, argv included. The job table's "from" filter defaults to this workstation's key; §9 Q7 is decided before a second workstation pairs |
 | Notifications (phase 3, opt-in) | `osascript` with the text passed as arguments (as `au_notify` does), the job name cleaned and capped |
 
+**CSP by phase.** What each library needs, decided now so no phase loosens the policy by accident. A row that would
+need more than the policy above is a design change, reviewed like one.
+
+| Phase | Library or feature | What it needs | Decision | CSP change |
+|---|---|---|---|---|
+| 1a | React 19, TanStack Query, Vite 8's output (module scripts, `modulePreload` polyfill off), Tailwind 4 (one static `.css`), uPlot (canvas; styles through the CSSOM), Radix Tooltip, lucide icons (inline SVG elements made by React) | nothing beyond `'self'`; no HTML sink | adopted as listed; checked by D29 with Trusted Types on | none |
+| 1a | the theme script (§5.3) | an external classic script in `<head>` | a static file served by the fixed table; it sets one attribute, no sink | none |
+| 2 | Radix Tabs, Popover (non-modal) | nothing beyond `'self'` | adopted | none |
+| 2 | **ECharts** | its default HTML tooltip builds markup with inline `style=` through `innerHTML`: blocked by `style-src`, an HTML sink for node-supplied series names, and broken by Trusted Types. The SVG renderer also builds strings | canvas renderer only; tooltip `renderMode: 'richText'` (drawn on the canvas) or none, with values in our own legend as for uPlot; no `toolbox` image export; series names passed as data only | none |
+| 4 | **three.js** (`STLLoader`, `GLTFLoader`) | `GLTFLoader` loads embedded textures through `blob:` URLs (`img-src blob:`, and `connect-src blob:` for `fetch`); Draco, KTX2 and meshopt decoders need `worker-src blob:` and `script-src 'wasm-unsafe-eval'` | **STL and untextured GLB only; no decoder workers and no wasm.** Geometry is fetched as an `ArrayBuffer` through the token-carrying API client, size-capped by the server, then `parse()`d; the loaders never fetch URLs themselves. A model file from a node is hostile binary input to a parser running in the page: the server caps its size, the page parses it in a lazily loaded chunk and shows "cannot preview" on any error. If textures are ever wanted: `blob:` in `img-src` and `connect-src` only, never in `worker-src`, and never wasm | none (textures: `img-src` and `connect-src` gain `blob:`) |
+
 #### 4.6.1 The front end's supply chain
 
 npm packages run on the developer's machine and in CI at build time, and their code ends up in the page. The page
 holds job data and a token, so a malicious package could read them; it cannot reach a node, because the server's
-allowlist (D17) and the read-only API bound what any script in the page can do. The rules:
+allowlist (D17) and the read-only API bound what any script in the page can do.
 
+**What the rules below do not stop.** `--ignore-scripts` stops install scripts only. As soon as `npm run build`,
+`test`, `lint` or `dev` runs, Vite, Rolldown, Tailwind, ESLint, TypeScript, Vitest and Playwright execute with the
+full rights of whoever runs them. On the owner's Mac that would include the Keychain (the relay password), the node
+ssh keys and git push rights to `mu`. Against a malicious *new* version of one of those packages, the only defences are
+the 14-day release age, the small number of dependencies, reading the lockfile diff before an update is merged, and
+running npm on the Mac only inside the sandbox below. CI is the other place npm code runs, so CI gets no secrets.
+
+The rules:
+
+- **npm on the Mac only through `tools/dashboard-npm`.** A short shell wrapper, the only supported way to run npm or
+  npx for `dashboard/`:
+  - Node comes from the official tarball (`nodejs.org/dist/v<ver>/node-v<ver>-darwin-arm64.tar.xz`), checked against a
+    SHA-256 pinned in `dashboard/node.sha256` (copied from the release's signed `SHASUMS256.txt` when the version is
+    pinned), unpacked into `$MU_CACHE/dev/node-<ver>/`. It is never on the global `PATH`; no Homebrew, no nvm, no
+    install script. "No Node.js on user machines" is true of the runtime: the owner's Mac has this copy only because it
+    is also the developer's machine, and only for this work.
+  - The environment is scrubbed (`env -i` plus `PATH`, a `HOME` under `$MU_CACHE/dev/home`, `npm_config_cache` under
+    `$MU_CACHE/dev/`): no `SSH_AUTH_SOCK`, no `MU_*`, no `GIT_*`, no tokens.
+  - Every npm command runs under a `sandbox-exec` profile that denies reading `~/.ssh`, `~/Library/Keychains`, the
+    secret parts of `$MU_HOME` (keys, the relay credential, node configs; only `run/dev/` is readable, for the dev
+    token) and git's credential stores; denies the Security server's mach service and running `/usr/bin/security`;
+    and allows writes only to `dashboard/`, `share/dashboard/`, `$MU_CACHE/dev/` and the temp folder. `install`
+    (`npm ci --ignore-scripts`, Playwright's browser download) may use the network; `build`, `test`, `lint`, `dev` and
+    `e2e` may reach only `127.0.0.1`. `mu dashboard serve --dev` is μ's own code and is started outside the sandbox.
+  - `sandbox-exec` is deprecated in its man page but still works and is still used by Apple's and others' build tools.
+    If it stops working, the fallback is a separate macOS user for front-end work, or accepting the risk in writing
+    here. Effort: ½–1 day in 1a, with the Node install.
+- **CI holds nothing worth stealing.** `dashboard.yml` has `permissions: contents: read` (as `job-layer.yml` has), no
+  secrets, no `pull_request_target`, actions pinned by commit. It cannot push, comment or release.
+- **The committed bundle is CI's.** The Linux `front` job uploads `share/dashboard/` as an artifact on every run. The
+  bundle that is committed is that artifact (`gh run download`), never a hand-edited tree. A one-time check in 1a
+  builds on the Mac through the wrapper and compares byte for byte with CI's; only if they are identical may local
+  builds be committed, and D28 still decides. After a rebase or merge the bundle is rebuilt, never hand-merged
+  (`.gitattributes`: `share/dashboard/** -diff linguist-generated`, so diffs and GitHub's language count skip it).
 - **Locked and exact.** `dashboard/package-lock.json` is committed. Every dependency, direct or dev, is an exact version
   (`.npmrc`: `save-exact=true`). CI and developers install with `npm ci --ignore-scripts` (also `ignore-scripts=true`
   in `.npmrc`), which fails if the lockfile and `package.json` disagree and never runs a package's install script. A
   package that cannot work without its install script is replaced, or its step is run by name in a reviewed script.
+- **The lockfile holds both platforms.** A lockfile written on macOS arm64 can leave out the Linux optional native
+  packages (Rolldown's, Lightning CSS's, Tailwind's oxide engine), and `npm ci` then fails in CI. Lockfile changes are
+  made so that both `darwin-arm64` and `linux-x64` bindings are recorded (in 1a: find the reliable command, for
+  example `npm install --package-lock-only`, and write it into `dashboard/README.md`); D35 asserts both are present.
 - **Node pinned for the build.** `.nvmrc` holds the exact Node version (§3.2); `package.json` `engines` plus
   `engine-strict=true` refuse another major version; CI's `setup-node` (pinned by commit) reads `.nvmrc`.
 - **Updates by pull request only.** Dependabot (built into GitHub, so no third-party app gets access to the private
   repo) opens weekly, grouped PRs for `dashboard/` and for the workflow actions, with a 14-day cooldown on new releases
-  (the `cooldown` option; checked when configured). Each PR rebuilds the bundle (D28), so a dependency change is
-  reviewed together with its effect on `share/dashboard/`. Nothing updates itself.
+  (the `cooldown` option; checked when configured). A Dependabot PR changes only `package.json` and the lockfile, so
+  D28 fails on it by design, and Dependabot's runs get a read-only token. The flow:
+  1. CI runs on the PR as on any other and uploads the rebuilt bundle and the size report as artifacts.
+  2. A person, or Claude at the owner's request, reads each updated package's changelog and **the lockfile diff**: new
+     transitive packages, changed maintainers or repositories, any new `hasInstallScript`, a jump in size.
+  3. Only then they download the artifact and commit it to the PR branch; CI runs again and D28 passes.
+  No workflow commits anything. A minified vendor chunk's diff is not reviewable, so the review is of the lockfile and
+  the size report, not of `share/dashboard/`. Nothing updates itself.
 - **Audit.** CI runs `npm audit --audit-level=high` on every dashboard PR and weekly on `main` (new advisories appear
   without a code change), and `npm audit signatures` (registry signatures and provenance). High or critical fails the
   build; a known false positive is waived in a reviewed file with a reason and an expiry date.
@@ -502,12 +581,14 @@ allowlist (D17) and the read-only API bound what any script in the page can do. 
   licence texts to `share/dashboard/THIRD-PARTY.txt`, the start of the `THIRD_PARTY.md` the repo's `LICENSE` promises.
 - **The committed build matches the source.** CI rebuilds and runs `git diff --exit-code -- share/dashboard` (D28).
   `share/dashboard/BUILD.json` records the SHA-256 of the app's source files, the lockfile and the Node version, so the
-  ordinary Python CI (no Node) also catches a source change committed without a rebuild.
+  ordinary Python CI (no Node) also catches a source change committed without a rebuild. That Python check runs on
+  every commit and is the release gate (§7.1).
 - **Nothing at runtime from the network.** No CDN, no web fonts, no analytics, no source maps fetched; `connect-src
   'self'`. The page works with the Mac offline.
 - **Lint bans the HTML sinks.** ESLint's `no-restricted-syntax` rejects the JSX attribute `dangerouslySetInnerHTML`, and
   `no-restricted-properties` / `no-restricted-globals` reject `innerHTML`, `outerHTML`, `insertAdjacentHTML`,
   `document.write`, `eval` and `Function`. Lint runs in CI; a planted `dangerouslySetInnerHTML` must fail it (D16).
+  Lint sees only our code; Trusted Types (§4.6) cover the libraries.
 - **Node-supplied strings stay hostile** everywhere in the app: decoded with caps, rendered as text, never used as a
   URL, a CSS value, a class name or a key into an object without a check.
 - **The dev server never sees real data.** Vite's dev server (`npm run dev`) binds `127.0.0.1` and proxies `/api` to
@@ -536,8 +617,9 @@ the JSON API from one origin (`http://127.0.0.1:<port>`). The browser never talk
 
 ```
 dashboard/                    app source (not used at runtime)
-  package.json, package-lock.json, .npmrc, .nvmrc
+  package.json, package-lock.json, .npmrc, .nvmrc, node.sha256, README.md
   vite.config.ts, tsconfig.json, eslint.config.js, index.html
+  public/                     theme.js (the pre-paint theme script), favicon.svg: copied as-is
   src/
     main.tsx                  boot: move #t= into localStorage, then render
     api/                      client (fetch + X-Mu-Token), decoders, types, query hooks
@@ -547,29 +629,38 @@ dashboard/                    app source (not used at runtime)
     styles/tokens.css         design tokens, light and dark (§5.3)
   test/                       Vitest unit and component tests
   e2e/                        Playwright specs and config
-share/dashboard/              the build, committed: index.html, assets/<name>-<hash>.js|.css,
-                              BUILD.json, THIRD-PARTY.txt
+share/dashboard/              the build, committed (CI's artifact, §4.6.1): index.html, theme.js, favicon.svg,
+                              assets/<name>-<hash>.js|.css, BUILD.json, THIRD-PARTY.txt
 src/mu/dashboard.py           the server, the API, static serving (§4.4)
 src/mu/dashnode.py            NodeReader (§4.3)
-src/mu/dashfake.py            fake nodes for --dev and the tests
+src/mu/dashfake.py            fake nodes for --dev and the tests; emits the golden fixtures below
 tools/test-dashboard/         Python tests of the server (D12–D15, D17–D20, D22, D27)
+tools/test-dashboard/fixtures/*.json   the golden shapes of every node answer (`hello`, `list`, `status`, `stats`,
+                              `watch` lines, `metrics` lines) and of every `/api` response: the one contract (D38, D40)
+tools/dashboard-npm           the sandboxed npm wrapper for the Mac (§4.6.1)
+tools/dashboard-licences.py   the licence check (D34)
 .github/workflows/dashboard.yml   the front end's CI jobs (§7.1)
+.github/dependabot.yml, .gitattributes
 ```
 
 `share/dashboard/` is in the recipe that every release installs, so the server finds it at
 `$MU_HOME/toolchains/<version>/recipe/share/dashboard/` (the same tree as `src/mu`). The node's copy of the recipe
-carries it too and never uses it.
+carries it too and never uses it. **A 1a change to `install/install.sh`:** the recipe copy (`tar` at line 261) excludes
+only `.git`, `__pycache__`, `.DS_Store` and the pip-stub builds, so an install from a working tree that has run npm
+would copy hundreds of MB of `dashboard/node_modules` into every toolchain. It gains `--exclude ./dashboard/node_modules
+--exclude ./dashboard/test-results --exclude ./dashboard/playwright-report`, with a check in the installer's tests.
 
 **Build settings.** `build.outDir` is `../share/dashboard` (emptied on each build); no source maps; no inlined assets
 (`assetsInlineLimit: 0`); no module-preload polyfill; a modern target (current Safari, Chrome and Firefox). The vendor
 code (React, TanStack, Radix) goes in its own chunk, so a change to the app alone changes one small file in the repo.
 ECharts and three.js, when they come, are loaded lazily by the pages that need them. The bundle budget for phase 1 is
-250 kB of gzipped JavaScript and 30 kB of CSS on first load (D36).
+250 kB of gzipped JavaScript and 30 kB of CSS on first load (D36). The browser floor is Tailwind 4's: Safari 16.4,
+Chrome 111, Firefox 128.
 
 **Serving.** At start the server lists `share/dashboard/` once into a table of regular files whose names match
 `^[A-Za-z0-9._-]+$` (no symlinks, no subdirectories beyond `assets/`). `/` returns `index.html` with `Cache-Control:
-no-store`; `/assets/<name>` returns the file with `Cache-Control: public, max-age=31536000, immutable`; anything else is
-404. Content types come from a fixed map (`.html .js .css .svg .woff2 .png .txt`). `index.html` holds no data and no
+no-store`; the fixed root files `theme.js` and `favicon.svg` return with `Cache-Control: no-cache`; `/assets/<name>`
+returns the file with `Cache-Control: public, max-age=31536000, immutable`; anything else is 404. Content types come from a fixed map (`.html .js .css .svg .woff2 .png .txt`). `index.html` holds no data and no
 token. Static files need no token (they hold no data, §4.6); every `/api/` route does.
 
 **How the app uses the API.**
@@ -577,14 +668,26 @@ token. Static files need no token (they hold no data, §4.6); every `/api/` rout
 - Endpoints as in §4.4, plus `/api/session` (the server's version, start time and API version; also how the app learns
   that its stored token is stale: 401 → the no-token page).
 - Every response carries `"api": 1`. The app and the server ship in the same release, so a mismatch only happens in
-  development; the app then shows "reload: the dashboard was updated".
+  development; the app then shows "reload: the dashboard was updated". The same banner appears when a lazily loaded
+  chunk returns 404 after an update (Vite's `vite:preloadError` event; it matters from phase 2, when chunks are lazy).
 - TanStack Query holds all server state: `/api/overview` every 2 s; the open job's `/api/jobs/<id>` every 2 s; its log
   by offset (`/api/jobs/<id>/log?offset=`) every 1 s while following; `/api/jobs/<id>/metrics` once, then live points
   from the overview. Polling stops when the tab is hidden (`refetchIntervalInBackground: false`), which is what the
-  server's "a tab is visible" rule (§4.3) observes. Errors back off as the CLI classes say (§4.3).
+  server's "a tab is visible" rule (§4.3) observes. Errors back off as the CLI classes say (§4.3). Queries use
+  `networkMode: 'always'`, so they keep running when macOS reports no network: the server is on the same machine
+  (D41).
+- A failed `fetch` to the server itself (connection refused or reset) is its own state, distinct from a node being
+  offline: "the dashboard server is not running: `mu dashboard on`" (§5.3). A React error boundary around the page
+  shows a fixed message and the `mu` commands, and renders **no** error text, since an error's message can carry node
+  text.
 - Each endpoint has a hand-written decoder (no schema library) that checks types, clamps numbers, caps strings and
-  keeps each value's time. Components get decoded, typed values only. A contract test runs the decoders over the JSON
-  the Python fake nodes produce, so a renamed field fails in CI (D38).
+  keeps each value's time. Components get decoded, typed values only.
+- **One contract.** The shape of every node answer and every `/api` response lives once, as golden JSON in
+  `tools/test-dashboard/fixtures/`. `dashfake.py` emits exactly those; the Python tests check the server's responses
+  against them; the app's decoders are tested on them (D38). In 1b, the real node's `stats`, `watch` and `metrics`
+  output is validated against the same fixtures (D40), so fake and real nodes cannot drift apart. Before 1a freezes
+  `now.json`'s shape (§4.2), the scheduler's author reviews it, because concurrent jobs change its `running` and
+  `queue` parts.
 - Ages are computed in the browser from each value's time and the server's clock offset (from `/api/session`), so a
   value turns stale even when polling stops returning.
 - The URL holds the view: `#job=<id>` opens a job (the link `mu submit` prints). The app reads the fragment itself in
@@ -598,13 +701,16 @@ token. Static files need no token (they hold no data, §4.6); every `/api/` rout
   including `oom` and `timeout`), `offline`, `refused`, `stale`, `old-node` (no `features`), `hostile` (the D16 job),
   `many` (150 finished jobs), `wake` (a clock jump). Each scenario moves on in time by itself so the page has something
   to show.
-- `npm run dev` starts Vite's dev server on `127.0.0.1:5173` (`strictPort`); its proxy sends `/api` to the dev server's
-  port and adds the `X-Mu-Token` header read from `run/dev/`. Hot reload works; the strict CSP applies to the built
-  app, not to Vite's dev page (it injects an inline refresh script).
-- `npm run build` writes `share/dashboard/`; `npm test` runs Vitest; `npm run e2e` runs Playwright against
-  `mu dashboard serve --dev` serving the **built** files with the real headers.
+- `tools/dashboard-npm run dev` starts Vite's dev server on `127.0.0.1:5173` (`strictPort`); its proxy sends `/api` to
+  the dev server's port and adds the `X-Mu-Token` header read from `run/dev/`. Hot reload works; the strict CSP applies
+  to the built app, not to Vite's dev page (it injects an inline refresh script). On the Mac every npm command goes
+  through `tools/dashboard-npm` (§4.6.1); CI calls npm directly.
+- `build` writes `share/dashboard/` (a local check; the committed bundle is CI's); `test` runs Vitest; `e2e` runs
+  Playwright against `mu dashboard serve --dev` serving the **built** files with the real headers.
 - A states gallery (`#gallery`, present only in the dev build) shows every component in every state of §5.3 side by
-  side, light and dark, for review. Storybook is optional and not planned.
+  side, light and dark, for review. Because nobody sees the dev build in CI, the `e2e` job also screenshots every
+  scenario in light and dark and uploads them as an artifact (not asserted): that is how the owner reviews the look.
+  Storybook is optional and not planned.
 - The app is built and tested entirely without a real node, which is what lets phase 1a run before the node side
   exists.
 
@@ -671,7 +777,7 @@ Rules:
 - Monospace with tabular figures for ids and numbers. `prefers-reduced-motion` respected.
 - States: the no-token page (§4.6); loading; empty ("no jobs yet: `mu submit --on office-pc -- …`"); refused (exit 5,
   red banner with the CLI's words and "never retried"); "reconnecting…" after a wake; an old node ("update μ on
-  office-pc for live statistics").
+  office-pc for live statistics"); the dashboard server not answering; an unexpected error. The full list is §5.3.
 
 ### 5.2 Later screens
 
@@ -701,6 +807,22 @@ set.
 | Shape | radius 6 px (cards, inputs), 4 px (badges) | — |
 | Motion | 120 ms fades only | None under `prefers-reduced-motion`; numbers never animate |
 
+Every chart and state colour pair (series on `surface`, state text and icon on `surface` and on its badge background)
+is checked for contrast in both themes by a Vitest test that computes it from `tokens.css` (D43), because axe cannot
+see inside a canvas.
+
+**Light and dark.**
+
+- Tailwind's `dark:` variant is bound to an attribute from day one (`@custom-variant dark
+  (&:where([data-theme=dark], [data-theme=dark] *))`), not to the media query alone, so phase 2's toggle needs no
+  restyling.
+- The attribute is set before first paint by `theme.js`, a small external classic script in `<head>` (the CSP forbids
+  the usual inline script): it reads a stored choice from `localStorage` (phase 2) or else `prefers-color-scheme`,
+  sets `data-theme` on `<html>`, and follows system changes. Without it a dark-mode user would see a white flash.
+- `<meta name="color-scheme" content="light dark">`, so form controls and scrollbars match.
+- uPlot draws on a canvas, which CSS cannot restyle: `ResourceChart` and the sparklines read their colours from the CSS
+  variables and redraw when `data-theme` changes. D42 checks both the first paint and the redraw.
+
 **Layout grid.**
 
 - A top bar (48 px): "μ dashboard", the overall node status ("1 of 1 nodes online"), the last update's age.
@@ -716,17 +838,17 @@ set.
 
 | Component | What it shows | Notes |
 |---|---|---|
-| `TopBar` | title, nodes online, age of the last update | the only global status |
+| `TopBar` | title, nodes online, age of the last update | the only global status. The tab title carries the state ("▶ 1 running · μ", "✕ 1 failed · μ"); a μ favicon (SVG, in the build) |
 | `MachineCard` | name, link (`via relay`), state badge, CPU % with a 10-minute sparkline, a memory meter (used, available, job limit), running and queued counts, μ version, "needs attention" lines, the age | one card per machine; node figures labelled "WSL VM" (§9 Q2) |
 | `StateBadge` | icon + word + colour for every job and machine state | the only place state colours are applied |
 | `Meter` | a value against a limit (cores 17.8 / 20, memory 9.8 / 22 GB) | text value always shown beside the bar |
-| `JobTable` | state, short id, name, project, node, wait or elapsed, peak memory, cores | TanStack Table; sortable headers are buttons; a row opens the detail with Enter or a click |
-| `JobHeader` | name, state, full id with copy, node, project @ commit, μ version, attempt, key, times, limits, copy-the-command buttons | — |
-| `LogView` | the log, following, with pause and wrap toggles and its size | monospace; capped lines and total size; text only |
-| `ResourceChart` | cores and memory (working, cache) over the whole run, the limit as a dashed line | uPlot; one cursor across both panes; gaps drawn as gaps; values with units in the legend, not a floating tooltip |
-| `AgeLabel` | "2 s ago", or "stale · as of 10:42:07" | updates every second without being announced to screen readers |
-| `CopyCommand` | a `mu …` command and a copy button | "copied" for 2 s |
-| `Banner` | refused, offline, reconnecting, old node, reload | one at a time per scope (page, card, detail) |
+| `JobTable` | state, short id, name, project, node, wait or elapsed, peak memory, cores | a plain `<table>` of our own in 1a (TanStack Table comes with phase 2's filters); three sortable columns whose headers are buttons with `aria-sort`; the "from" and "node" filters are native `<select>`s; a row opens the detail with Enter or a click |
+| `JobHeader` | name, state, full id with copy, node, project @ commit, μ version, attempt, key, times (absolute, as text), limits, copy-the-command buttons | — |
+| `LogView` | the log, following, with pause and wrap toggles and its size | monospace; text only. Caps: the page keeps the last 5,000 lines or 2 MB, whichever is smaller, and says "earlier lines: `mu log <id>`"; one line is cut at 10 kB with "… N bytes cut". Pause and wrap are `<button aria-pressed>`; the scroll area is native `overflow: auto` |
+| `ResourceChart` | cores and memory (working, cache) over the whole run, the limit as a dashed line | uPlot; one cursor across both panes; gaps drawn as gaps; values with units in our own legend, not a floating tooltip. Colours from the tokens, redrawn on a theme change. An `aria-label` summary ("memory 9.8 GB now, peak 10.3 GB, limit 22 GB; cores 17.8 of 20") and a "show as table" button that lists the samples (thinned to one a minute) as a real table |
+| `AgeLabel` | "2 s ago", or "stale · as of 10:42:07" | updates every second without being announced to screen readers; the absolute time on hover (Radix Tooltip) and in a `<time datetime>` element |
+| `CopyCommand` | a `mu …` command and a copy button | "copied" for 2 s. `navigator.clipboard.writeText` is called inside the click handler itself, before any `await` (WebKit may refuse it outside the user's gesture); `http://127.0.0.1` counts as a secure context; if the call still fails, the command is selected for ⌘C and the button says so (D47) |
+| `Banner` | refused, offline, reconnecting, old node, reload, server not answering | one at a time per scope (page, card, detail) |
 | `EmptyState`, `Skeleton` | what to do next; the shape of the content while loading | — |
 
 **States** (each shown in the states gallery and covered by a Playwright scenario):
@@ -742,7 +864,14 @@ set.
 | Old node | "update μ on office-pc for live statistics" | jobs listed, no live figures | no resource chart; elapsed only |
 | Reconnecting (after a wake) | "reconnecting…" for at most one reconcile | unchanged | unchanged |
 | No token / stale token | the whole page is the no-token page (§4.6), with no data | — | — |
-| Updated server | "reload: the dashboard was updated" | — | — |
+| Updated server, or a lazy chunk 404 | "reload: the dashboard was updated" | — | — |
+| Server not answering (a `fetch` to 127.0.0.1 fails; not a node problem) | page banner "the dashboard server is not running: `mu dashboard on` (or ask Claude)"; every figure turns stale | rows kept, "as of" | as stale |
+| Unexpected error (error boundary) | the whole page: a fixed message, `mu status` and `mu dashboard`, a reload button; **no error text**, which could carry node strings | — | — |
+| No JavaScript, or an older browser | `index.html`'s static text, replaced when the app mounts: "μ dashboard needs JavaScript and Safari 16.4, Chrome 111 or Firefox 128 or newer"; the same in `<noscript>` | — | — |
+
+**The owner's review of the look.** The `e2e` job's screenshots of every scenario in light and dark (§4.8) are the
+review copy. 1a is not done until the owner has looked at them once and the changes asked for are made (½ day
+budgeted).
 
 ## 6. Performance comparison: Mac vs node
 
@@ -825,13 +954,21 @@ injected that must make them fail ("FAILS-OK"), unit level in `tools/test-jobs/`
 - **Python** (`tools/test-dashboard/`, in `job-layer.yml`): the server, token, headers, `NodeReader`, the CLI.
 - **Vitest** (`dashboard/test/`): components and data shaping (decoders, formatting, stale rules, gaps in series).
 - **Playwright** (`dashboard/e2e/`): the built app against `mu dashboard serve --dev` with fake nodes, in headless
-  Chromium (all tests) and WebKit (D05–D07 and D16, since Safari is the Mac's default browser), with axe for
-  accessibility. Every test that checks the page is a Playwright test, and each keeps its injected fault.
+  Chromium (all tests) and WebKit (D05–D07, D16, D29, D42 and D47, since Safari is the Mac's default browser), with
+  axe for accessibility. Every test that checks the page is a Playwright test, and each keeps its injected fault.
 
 ### 7.0 Gates and probes (half a day to a day)
 
-**Before phase 1a (Mac only):** that a process started by a LaunchAgent can read the relay password from the Keychain
-through `mu compute proxy` (the last item of the probe below). Nothing else in 1a depends on the PC.
+**Before phase 1a's release (3.0a: the Mac, plus one job on today's node; no node change, no visit):**
+
+- that a process started by a LaunchAgent can read the relay password from the Keychain through `mu compute proxy`
+  (the auto-update agent runs in the same domain, but has not needed it);
+- **the CPU cost of one verb call on the PC** (sshd session + gate + `bin/mu` + Python): a job on today's node reads
+  `/proc/stat` before and after while the Mac makes 50 `hello` and 50 `list limit=100` calls, and reports the size of
+  one `audit.log` line. It needs only a job, not the scheduler, and it sets 1a's old-node polling step (§4.3: 15 s if
+  a call costs up to about 150 ms of CPU, else 30 s).
+
+Nothing else in 1a depends on the PC.
 
 **Before phase 1b: the gate.** The node's auto-update reports `failed` (`hello.autoupdate.last_result`). New verbs and
 the sampler reach the node only through a release and its auto-update (or `mu update` on the PC). Phase 1b does not
@@ -845,46 +982,53 @@ node's runner, has merged (§7.1).
 - an OOM-killed unit (a job that allocates past `--mem`): what is left of its cgroup directory and of
   `systemctl --user show` (`MemoryPeak`, `CPUUsageNSec`) right after the kill;
 - whether `/proc/<pid>/io` is readable as `mu`;
-- the cost of one sampler pass;
-- **the CPU cost of one verb call on the PC** (sshd session + gate + `bin/mu` + Python), from `/proc/stat` deltas
-  across 50 `hello` calls;
-- on the Mac: that a process started by a LaunchAgent can read the relay password from the Keychain through
-  `mu compute proxy` (the auto-update agent runs in the same domain, but has not needed it).
+- the cost of one sampler pass, with as many jobs running as the scheduler allows;
+- the verb-call cost again, on the scheduler's runner, to confirm 3.0a's figure.
 
 If the OOM probe shows the cgroup survives, the runner-sampled path stays as the fallback; if the verb call costs more
 than about 150 ms of CPU, the traffic plan in §4.3 is revisited before building. The probe runs after the scheduler
 has merged, so it measures the runner that 1b will change.
 
-### 7.1 Phase 1: jobs, nodes and live load on one page (1a: 6–8 days, 1b: 3–4 days)
+### 7.1 Phase 1: jobs, nodes and live load on one page (1a: 8–11 days, 1b: 3½–5 days)
 
 Phase 1 is split so work can start now. **1a** changes nothing on the node and can be built in parallel with the
 concurrent-jobs scheduler. **1b** changes the node's runner, as the scheduler does, so it follows the scheduler's
 merge and the node's auto-update fix. Each ends in its own release.
 
-**Phase 1a: the app, the Mac-side server, fake nodes, the Mac's sampler (6–8 days; starts now).**
+**Phase 1a: the app, the Mac-side server, fake nodes, the Mac's sampler (8–11 days; starts on the owner's
+go-ahead).**
 
-- **Front-end setup:** `dashboard/` with Vite, TypeScript, Tailwind, ESLint (with the §4.6.1 bans), Vitest and
-  Playwright; `.nvmrc`, `.npmrc`, the lockfile; `share/dashboard/` with `BUILD.json` and `THIRD-PARTY.txt`; the CI jobs
-  below; Dependabot. About 1½–2 days, which is what React costs over the first draft's no-build page.
-- **The design system and the page:** the tokens and components of §5.3; the one page of §5.1 with every state;
-  the no-token page; the states gallery. The page is built against fake nodes that already answer `stats`, `watch` and
-  `metrics`, so the node figures, the job's live cores and memory and the resource chart are finished and tested in 1a
-  and only wait for real data.
+- **Front-end setup (3–4 days):** `tools/dashboard-npm` with the pinned Node tarball and the sandbox profile;
+  `dashboard/` with Vite, TypeScript, Tailwind, ESLint (with the §4.6.1 bans), Vitest and Playwright; `.nvmrc`,
+  `.npmrc`, the lockfile with both platforms' native packages; `share/dashboard/` with `BUILD.json` and
+  `THIRD-PARTY.txt`; the CI jobs below with `contents: read`; the licence script; Dependabot and its review flow;
+  `.gitattributes`; the one-time Mac-versus-CI build comparison; tests D28, D34–D36 with their faults.
+- **The design system and the page (3–4 days):** the tokens and the 13 components of §5.3, two themes with the
+  pre-paint script, every state of §5.3 in three scopes; the one page of §5.1; the no-token, error and no-JavaScript
+  pages; the states gallery and the e2e screenshots; axe-clean contrast; the owner's review round (½ day). The page is
+  built against fake nodes that already answer `stats`, `watch` and `metrics`, so the node figures, the job's live
+  cores and memory and the resource chart are finished and tested in 1a and only wait for real data.
+- **The contract:** the golden fixtures of §4.8, emitted by `dashfake.py` and decoded by the app; `now.json`'s shape
+  reviewed by the scheduler's author before it is frozen.
 - **Server and CLI:** `src/mu/dashboard.py` (static serving, API, token, CSP and headers, `Host` check, the lock,
   `run/dashboard.json`); `mu dashboard`, `open`, `on|off`, `serve [--dev]`; the LaunchAgent; the Mac sampler (psutil)
   with 1 h in memory; `src/mu/dashfake.py` with the scenarios of §4.8.
 - **`NodeReader`** (allowlist, own ControlPath, wake handling, battery rule, error classes), already speaking `watch`
-  and `metrics` to fake nodes and, to today's real nodes, only `hello`, `list`, `status` and `log follow=1`. Against the
-  office PC, 1a therefore shows every job under its node with its state, its queue place, its log as it grows and its
-  times; the node card says "update μ on office-pc for live statistics" (the old-node path of D04) until 1b.
+  and `metrics` to fake nodes and, to today's real nodes, only `hello`, `list`, `status` and `log follow=1`, on the
+  old-node budget of §4.3 (D39). Against the office PC, 1a therefore shows every job under its node with its state,
+  its queue place, its log as it grows and its times; the node card says "update μ on office-pc for live statistics"
+  (the old-node path of D04) until 1b.
 - **Mac CLI:** `mu submit` writes `jobs.index` and prints the dashboard line (`jobs.py` `cmd_submit`: a small change;
   if the scheduler also changes `cmd_submit`, the later of the two rebases); the paragraph in `CLAUDE-toolchain.md`.
-- About 1,400 lines of TypeScript/TSX and CSS, 900 of Python in the server and CLI, 1,300 of tests.
+- **Installer:** the three `tar` excludes for `dashboard/node_modules` and Playwright's output (§4.8).
+- **Before the release:** 3.0a (§7.0), which sets the old-node polling step.
+- About 2,500–3,500 lines of TypeScript/TSX and CSS, 900 of Python in the server and CLI, about 2,000 of tests.
 - **Done when** the owner, with nothing started by hand, opens the page during a real job on the office PC and sees
   the job under its node with its state and growing log, This Mac's live load, and the node card's "live statistics
-  after the next node update"; and every 1a test below passes in CI with its fault shown to fail.
+  after the next node update"; the owner has looked at the light and dark screenshots of every state and the changes
+  asked for are in; and every 1a test below passes in CI with its fault shown to fail.
 
-**Phase 1b: the node side (3–4 days, plus one round trip on the PC; after the scheduler and the auto-update fix).**
+**Phase 1b: the node side (3½–5 days, plus one round trip on the PC; after the scheduler and the auto-update fix).**
 
 - **Node:** the runner's sampler (`now.json`, per-job `metrics.jsonl`, running maxima, `rev`); `cgroup` in
   `state.json`; `usage` in `result.json` (shim and runner); the `stats`, `watch` and `metrics id=` verbs;
@@ -895,20 +1039,29 @@ merge and the node's auto-update fix. Each ends in its own release.
   rules. The app already handles several running jobs per node (the `busy` scenario has two).
 - **Mac:** `NodeReader` uses `watch` and `metrics` with real nodes that have the features; `mu fetch` copies `usage`
   into the run record and marks `fetched` in `jobs.index`; `mu compute status --json` adds `stats`.
-- About 350 lines on the node, 150 on the Mac, 500 of tests. The page itself should need no change.
+- **Contract:** the real node's `stats`, `watch` and `metrics` output validated against the golden fixtures (D40);
+  where the scheduler changed a shape after 1a, the fixtures, decoders and page follow in this phase (½–1 day
+  budgeted).
+- About 350 lines on the node, 150 on the Mac, 500 of tests, and whatever page changes the scheduler's shapes need.
 - **Done when** the whole of phase 1's "done when" below holds.
 
-**CI jobs** (`.github/workflows/dashboard.yml`, actions pinned by commit; runs on changes to `dashboard/**`,
-`share/dashboard/**`, `src/mu/dash*.py`, `tools/test-dashboard/**` and the workflow, and weekly on `main`):
+**CI jobs** (`.github/workflows/dashboard.yml`: `permissions: contents: read`, no secrets, no `pull_request_target`,
+actions pinned by commit). `front` and `supply` run on every pull request and every push to `main`, with no path filter
+(about two to three minutes). `e2e` runs on changes to `dashboard/**`, `share/dashboard/**`, `src/mu/**`,
+`tools/test-dashboard/**`, `toolchain/*/env.pip.txt` and the workflow (all of `src/mu`, because the server imports
+`jobs.py` and `proto.py`, and a change to `clean_text` must run the XSS test). All three run weekly on `main`.
 
 | Job | Runner | Steps | Tests |
 |---|---|---|---|
-| `front` | ubuntu-24.04 | `setup-node` from `.nvmrc`; `npm ci --ignore-scripts`; ESLint; `tsc --noEmit`; Vitest; `npm run build`; `git diff --exit-code -- share/dashboard`; bundle budget | D16 (lint part), D28, D36, D37, D38, Vitest units |
-| `supply` | ubuntu-24.04 | `npm ci --ignore-scripts` (fails on lockfile drift); `npm audit --audit-level=high`; `npm audit signatures`; the licence script | D34, D35 |
-| `e2e` | ubuntu-24.04 | Python with psutil 7.2.2 from the pinned `env.pip.txt` (`--require-hashes`); `npx playwright install chromium webkit` (versions fixed by the pinned Playwright); Playwright against `mu dashboard serve --dev` serving the committed build | D05–D08, D14 and D15 (page parts), D16, D26, D29 |
-| existing `job-layer.yml` | ubuntu-24.04, macos-15 | the Python tests, including `BUILD.json` against the source without Node; the LaunchAgent on macOS; in 1b, the node side with a real node | D04, D12–D15, D17–D20, D22–D24, D27; in 1b D01–D03, D09–D11, D21, D25, and D05–D07 again against a real node |
+| `front` | ubuntu-24.04 | `setup-node` from `.nvmrc`; `npm ci --ignore-scripts`; ESLint; `tsc --noEmit`; Vitest; `npm run build`; upload `share/dashboard/` and the size report as an artifact; `git diff --exit-code -- share/dashboard`; bundle budget | D16 (lint part), D28, D36–D38, D41, D43, Vitest units |
+| `supply` | ubuntu-24.04 | `npm ci --ignore-scripts` (fails on lockfile drift); both platforms' native packages in the lockfile; `npm audit --audit-level=high`; `npm audit signatures`; the licence script | D34, D35 |
+| `e2e` | ubuntu-24.04 | Python with psutil 7.2.2 from the pinned `env.pip.txt` (`--require-hashes`); `npx playwright install chromium webkit` (versions fixed by the pinned Playwright); Playwright against `mu dashboard serve --dev` serving the committed build; screenshots of every scenario in light and dark uploaded as an artifact | D04–D08, D14 and D15 (page parts), D16, D18 (page part), D26, D29, D39, D42, D46, D47 |
+| existing `job-layer.yml` | ubuntu-24.04, macos-15 | the Python tests, including `BUILD.json` against the source without Node; the fixtures against the server's responses; the LaunchAgent on macOS; in 1b, the node side with a real node | D12–D15, D17–D20, D22–D24, D27, D38 (Python part); in 1b D01–D03, D09–D11, D21, D25, D40, and D05–D07 again against a real node |
 
-A release is tagged only from a commit on which `dashboard.yml` passed.
+**Release gate.** The `BUILD.json` check in `job-layer.yml` runs on every commit and must pass on the tagged commit.
+Because `mu release` is not built as a command (PLAN §9), the release checklist also checks `gh run list --commit
+<sha> --workflow dashboard.yml` shows success before a tag is made; with `front` running on every push to `main`, there
+is always such a run.
 
 | # | Check | Fault put in → must fail | Phase · level |
 |---|---|---|---|
@@ -940,27 +1093,36 @@ A release is tagged only from a commit on which `dashboard.yml` passed.
 | D26 | **Accessibility** (Playwright, Chromium): every control is reachable with Tab and has an accessible name; every state colour has a text label next to it; no `aria-live` region changes on a routine refresh; axe reports no serious or critical violation (contrast included) in light and dark, in every scenario | `div-button` (a clickable `div`) → unreachable; `faint-text` (state text in `text-faint`) → axe contrast violation | 1a · Playwright + axe |
 | D27 | Two `mu dashboard serve` at once → one serves, the other exits 0 | `no-lock` → two processes | 1a · Python |
 | D28 | **The committed build is the source's.** CI rebuilds `share/dashboard/` and finds no difference; `BUILD.json`'s source hash matches `dashboard/` (checked in Python, without Node) | `stale-build` (change a component, commit without rebuilding) → both checks fail | 1a · CI `front`, Python |
-| D29 | **No CSP violation.** Every Playwright scenario runs with a listener for `securitypolicyviolation` and fails on any event; the served CSP has no `unsafe-inline` or `unsafe-eval` | `style-tag` (a component that inserts a `<style>` element) → violation; `csp-unsafe-inline` → header check fails | 1a · Playwright |
+| D29 | **No CSP or Trusted Types violation.** In Chromium and WebKit, every Playwright scenario registers a `securitypolicyviolation` listener with `addInitScript` (before any page script) and fails on any event; each scenario opens every overlay it has (tooltips, the selects, the chart's table), because a violation fires when an element mounts, not at page load; the served CSP has no `unsafe-inline`, `unsafe-eval`, nonce or hash, and has `require-trusted-types-for 'script'` | `style-tag` (a component that inserts a `<style>` element) → violation; `radix-scrollarea` (use Radix `ScrollArea` in `LogView`) → violation when the log opens; `inner-html-lib` (a helper that sets `innerHTML`, outside lint's reach) → Trusted Types violation; `csp-unsafe-inline` → header check fails | 1a · Playwright (Chromium, WebKit) |
 | D34 | **Licences.** Every package in the lockfile has an allowed licence for its kind (shipped or dev, §4.6.1); `THIRD-PARTY.txt` lists every shipped package | a test lockfile with a GPL-3.0 shipped package → fails; one with no `license` → fails | 1a · CI `supply` |
-| D35 | **Install is locked.** `npm ci --ignore-scripts` succeeds on the committed lockfile; no install script runs (a canary package in a test fixture writes a file if its script runs) | `lock-drift` (a version changed in `package.json` only) → `npm ci` fails; `scripts-on` → the canary file appears | 1a · CI `supply` |
+| D35 | **Install is locked.** `npm ci --ignore-scripts` succeeds on the committed lockfile; no install script runs (a canary package in a test fixture writes a file if its script runs); the lockfile records both the `linux-x64` and the `darwin-arm64` native packages of Rolldown, Lightning CSS and Tailwind's oxide | `lock-drift` (a version changed in `package.json` only) → `npm ci` fails; `scripts-on` → the canary file appears; `mac-only-lock` (a lockfile written on macOS without the Linux bindings) → the platform check fails | 1a · CI `supply` |
 | D36 | **Bundle budget.** First-load JavaScript ≤ 250 kB gzipped, CSS ≤ 30 kB; no source maps and no `data:` assets in `share/dashboard/` | `import-all-icons` (import the whole icon set) → over budget | 1a · CI `front` |
 | D37 | **Gaps stay gaps.** A series with a 30 s hole in 5 s samples is shaped with a break (a `null`), never a straight line across | `interpolate-gap` → no break | 1a · Vitest |
-| D38 | **API contract.** The app's decoders accept the JSON of every fake-node scenario, produced by the Python server; out-of-range numbers are clamped and long strings capped | `rename-field` (rename `mem.avail` in the server) → decoder test fails | 1a · Vitest, Python |
+| D38 | **API contract.** The golden fixtures in `tools/test-dashboard/fixtures/` are what `dashfake.py` emits and what the server returns for every scenario (Python), and the app's decoders accept every one (Vitest); out-of-range numbers are clamped and long strings capped | `rename-field` (rename `mem.avail` in the server) → the Python fixture check and the decoder test fail | 1a · Vitest, Python |
+| D39 | **Old-node budget.** Against the fake `old-node` scenario with a tab visible for 10 min (fake clock): with a running job, at most 45 `list` calls (40 at 15 s plus reconciles) and each state change shown within 20 s; with nothing unfinished, at most 12; with no tab, the §4.3 rules | `poll-list-2s` (poll `list` every 2 s) → about 300 calls | 1a · Python (call count), Playwright (page) |
+| D40 | **Real node matches the fixtures.** In `job-layer.yml`'s real-node run, the node's `stats`, one `watch` line and `metrics` lines validate against the golden fixtures (same keys, types and units) | `rename-field-node` (rename a field in `node.py` only) → validation fails | 1b · Python, node |
+| D41 | **Polling survives "offline".** With TanStack Query's `onlineManager.setOnline(false)`, the overview query keeps fetching on its interval | `network-mode-default` (leave `networkMode` at `'online'`) → fetching stops | 1a · Vitest |
+| D42 | **Theme.** With the browser in dark mode, `<html data-theme="dark">` is set before the app's module script runs (no white first paint); switching the emulated colour scheme redraws the charts in the other theme's colours (pixel colour of a series read from the canvas) | `theme-in-bundle` (set the attribute from the React bundle instead of `theme.js`) → the attribute is missing at first paint; `chart-fixed-colours` → the canvas colour does not change | 1a · Playwright (Chromium, WebKit) |
+| D43 | **Chart and state contrast.** For every chart series and every state colour against its background, in light and dark, computed from `tokens.css`: text and icons ≥ 4.5:1, lines and marks ≥ 3:1 | `faint-series` (cache series at 1.5:1 in dark) → fails | 1a · Vitest |
+| D46 | **Failure states.** Stop the server while the page is open → the "server is not running: `mu dashboard on`" banner, not "node offline"; an exception thrown while rendering the `hostile` job → the error page, which contains none of the job's text; with JavaScript off → the static browser-floor text; a lazy chunk that returns 404 → the reload banner | `boundary-shows-error` (render `error.message`) → the hostile string appears; `server-down-as-offline` → node offline shown instead | 1a · Playwright |
+| D47 | **Copy works in Safari's engine.** In WebKit on `http://127.0.0.1:<port>`, a copy button puts the exact `mu` command on the clipboard (read back in the test), or, if the clipboard is refused, selects it and says so | `copy-after-await` (call `writeText` after an awaited call) → nothing copied and no fallback shown | 1a · Playwright (WebKit) |
 
 **Done when (phase 1 as a whole, after 1b)** the owner, with nothing started by hand, opens the page during a real job
 on the office PC and sees the job under its node, its live cores and memory against the limit, the whole run's chart, and both machines' load with
 their ages; and when, after an `oom` job, its row shows its peak memory; and when `mu compute status office-pc --json`
 gives Claude the same node figures.
 
-### 7.2 Phase 2: history, more screens, benchmark comparison (3–5 days)
+### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 
 **Scope.**
 
 - **Node:** host history files with 7-day retention; the verbs `metrics day=`, `events` and `bench`.
 - **Mac:** the SQLite cache with retention and reconciliation; separate Nodes and This Mac pages; search, filters,
   shortcuts; the job timeline; Compare › Performance on the benchmark suite.
-- **Page:** TanStack Router (hash history, filters in the URL); TanStack Table's filtering and search; a theme toggle;
-  ECharts in a lazy chunk only if the comparison needs more than SVG bars. Page tests are Playwright tests, as in 1a.
+- **Page:** TanStack Router (hash history, filters in the URL); TanStack Table with filtering and search; a theme
+  toggle (the attribute and `theme.js` are already in place); ECharts in a lazy chunk only if the comparison needs more
+  than SVG bars, under the CSP rules of §4.6; `@tanstack/react-virtual` only if 1a's log and table caps prove too
+  small. Page tests are Playwright tests, as in 1a.
 
 | # | Check | Fault → must fail |
 |---|---|---|
@@ -979,7 +1141,7 @@ jobs.
 | D44 | `mu run` with the shim: exit codes 0, 3, 130 (Ctrl-C), 143 (SIGTERM) pass through; stdout bytes identical; `python -c 'input()'` reads from the terminal; a record with `usage` is written, even when the child is killed; without `MU_RUN_RECORD=1` the command is exec'd unchanged; median added time < 80 ms | `swallow-exit` → exit 0 for a failing command; `no-record` → record missing |
 | D45 | Locally, 2 busy processes for 10 s with 1 GB in all: `cpu_s` 20 ± 15 %, peak working memory ≥ 1 GB (the tree, not one process) | `maxrss-as-peak` → about 0.5 GB |
 
-### 7.4 Phase 3: progress and notifications (3–4 days)
+### 7.4 Phase 3: progress and notifications (3–5 days)
 
 **Scope.**
 
@@ -999,10 +1161,11 @@ jobs.
 | D51 | A hostile `MU_PROGRESS` line (2 MB, invalid JSON, HTML, a fraction of 7) is dropped or clamped; memory stays bounded | `no-cap` → memory grows |
 | D52 | During a 60 s FEA job, `mu log` shows ccx's output before ccx ends | `capture` → nothing until the end |
 
-### 7.5 Phase 4: results and more (about 1–1½ weeks, owner's choice)
+### 7.5 Phase 4: results and more (about 1–2 weeks, owner's choice)
 
 - Results as tables with tolerance badges, images, residual and convergence plots, mesh-convergence plots.
-- three.js with react-three-fiber for STL and GLB, in a lazy chunk. STEP is converted on the node.
+- three.js with react-three-fiber for STL and untextured GLB, in a lazy chunk, fetched as bytes through the API
+  client and parsed in the page, with no decoder workers or wasm (§4.6, CSP by phase). STEP is converted on the node.
 - Run-vs-run comparison that shows only the fields that differ.
 - Project result series across commits.
 - Cancel with a confirmation, if the owner wants it. The tests are the same as D12–D17, plus CSRF: a cross-origin
@@ -1012,23 +1175,27 @@ jobs.
 
 ### 7.6 Effort, honestly
 
-Phase 1 is now 9–12 days (1a 6–8, 1b 3–4), against 6–9 before revision 2:
+Phase 1 is now **12–16 days** (1a 8–11, 1b 3½–5), against 6–9 before revision 2 and 9–12 in revision 2, whose
+figures the review found light by 2–3 days:
 
-- **+1½–2 days for React:** the Vite/TypeScript/Tailwind/lint/test setup, the four CI jobs, the supply-chain checks and
-  the committed build. Paid once.
-- **+½–1 day for the look:** the tokens, the components and the states gallery of §5.3, which the first draft left to
-  plain CSS.
+- **Front-end setup, 3–4 days** (was "1½–2"): Vite, TypeScript, Tailwind and lint; four CI jobs; the licence script;
+  D28 and D34–D36 with their faults; Dependabot and its review flow; making the build reproducible across macOS and
+  Linux and the lockfile hold both platforms; the Node install and the sandboxed npm wrapper (½–1 day of this).
+- **The look, 3–4 days** (was "½–1" on top of the page): tokens, 13 components, about 10 states in 3 scopes, two
+  themes with a pre-paint script and charts that follow them, the gallery and screenshots, axe-clean contrast and the
+  chart contrast test, and one review round with the owner (½ day).
+- **The old-node mode and 3.0a, about ½ day:** polling budget, D39, the verb-cost job.
 - **+½ day for the split:** two releases and two reviews instead of one.
-- **+½–1 day for fake nodes** that speak `stats`, `watch` and `metrics`, so the page is finished before the node side
-  exists.
-- **−½ day back:** TanStack Query and Table and Radix replace hand-written polling, table and widget code.
+- **+½–1 day for fake nodes and the golden fixtures,** so the page is finished before the node side exists.
+- **1b +½–1 day** for page and fixture changes after the scheduler's shapes settle (D40).
+- 1a is about 2,500–3,500 lines of TypeScript/TSX and CSS (revision 2 said 1,400), 900 of Python, about 2,000 of
+  tests.
 
-About 3 days more in all.
-
-Later phases get cheaper (phase 2 3–5 days instead of 4–6, phase 3 3–4 instead of 3–5, phase 4 about 1–1½ weeks
-instead of 1–2), because routing, filtering, tables, charts and 3D come from the libraries already in place. All phases
-together are about 3,500–4,500 new lines plus tests. The front end adds a dependency list to keep current (§3.2,
-updated by pull request only). The risky parts are still on the node and in `mu run`, not in the web page:
+**Later phases keep their earlier ranges** (phase 2 4–6 days, phase 3 3–5, phase 4 about 1–2 weeks). Revision 2 cut
+them on the argument that the libraries would make them cheaper; that is not evidenced yet. They are re-estimated
+from 1a's measured pace. All phases together are about 5,000–6,500 new lines plus tests. The front end adds a
+dependency list to keep current (§3.2, updated by pull request only). The risky parts are still on the node and in
+`mu run`, not in the web page:
 
 - the sampler must never slow or block the runner;
 - the shim must never change what `mu run` does, which is why it is opt-in and separate.
@@ -1044,24 +1211,28 @@ reaches the PC only through a release and its auto-update, which is failing toda
 | The runner's samples are the only source for `oom`/`timeout` usage | Up to 5 s missing; a fast spike just before the kill may be missed when `memory.peak` is absent | Use `memory.peak` when the kernel has it (it is a kernel-tracked peak, read every 5 s); label `runner-sampled`; §7.0 checks what survives an OOM kill |
 | `memory.peak` counts page cache | An OpenFOAM job writing fields looks bigger than it is; `--mem` sized from it is too generous | Label it; compare only sampled `anon + shmem`; show cache separately |
 | WSL VM figures, not Windows | Someone using the PC slows a job and the page shows a quiet node | Said on the node card; the owner decides in §9 Q2 whether a root-installed Windows counter is worth it |
-| Per-call cost on the node (sshd + gate + bash + Python) | The dashboard's own load shows up in the figures it reports; audit lines bury the important ones | `watch` and `log follow=1` instead of polling; `list` only on `rev`; no journal line for telemetry verbs; measured in §7.0; D11, D25 |
+| Per-call cost on the node (sshd + gate + bash + Python) | The dashboard's own load shows up in the figures it reports; audit lines bury the important ones | `watch` and `log follow=1` instead of polling; `list` only on `rev`; no journal line for telemetry verbs; for old nodes a stated `list` budget (§4.3, D39); measured on today's node in 3.0a, before 1a ships; D11, D25 |
 | A dashboard call disturbing Claude's ssh sessions | A timed-out call ends Claude's push or fetch | Its own ControlPath; it never closes the CLI's master (D20) |
 | Keychain access from the LaunchAgent | The node worker cannot connect | Checked in §7.0; if it fails, the owner falls back to `mu dashboard open` from a terminal (§9 Q1) |
 | The `mu run` shim changes every local command | A regression in signals, exit codes or TTY behaviour breaks CAD work | Opt-in phase 2b, D44, default only after real use |
 | `list` cost grows with history (stage 1 never deletes jobs) | `list` gets slower on the node, and so does every quick call | `list` only when `rev` moves; `limit=100`; a node job-retention rule is a separate decision (§9 Q9) |
-| `audit.log` is never rotated | It grows without bound | Fewer lines from the dashboard; a rotation rule is part of §9 Q9 |
+| `audit.log` is never rotated | It grows without bound; until 1b, the dashboard's old-node polling adds up to 240 lines an hour while a tab is visible and a job runs (about 50 kB/h) | Monthly rotation, keep 12, ships with step 2's release (§9 Q9), the first release that can reach the node; the old-node budget (§4.3, D39) bounds the lines until then |
 | XSS through node text | Reads job data in the browser | Text only, strict CSP, D16; read-only bounds the damage |
 | Scope creep: the page becomes where things are changed | Two interfaces drift; Claude cannot see what the user did | Read-only until the owner decides; every action stays a `mu` command; node figures also in `mu compute status --json` |
 | More nodes and workstations | Each workstation × node pair holds one `watch` session while visible | Nothing runs with no tab; the relay holds one more WebSocket per workstation and node while active, well within its limits |
 | Battery | ssh keepalives every 15 s for the whole job | No tab + battery → `list` every 5 min and the master expires (D24) |
-| npm supply chain: a compromised or typo-squatted package, or a hijacked maintainer account | Code in the page reads job data and the token, or code at build time runs on a developer's Mac or in CI | Few dependencies (§3.2); exact versions and a committed lockfile; `npm ci --ignore-scripts`, so no install script runs; releases at least 14 days old; updates only by reviewed PR; `npm audit` and `npm audit signatures` in CI and weekly; the server's allowlist and the read-only API bound what a page script can do (§4.6.1, D34, D35) |
+| npm supply chain: a compromised or typo-squatted package, or a hijacked maintainer account, in the page | Code in the page reads job data and the token | Few dependencies (§3.2); exact versions and a committed lockfile; releases at least 14 days old; updates only by a PR whose lockfile diff was read; `npm audit` and `npm audit signatures` in CI and weekly; Trusted Types block HTML and script sinks inside libraries; the server's allowlist and the read-only API bound what a page script can do (§4.6, §4.6.1, D29, D34, D35) |
+| **npm code at build time** (Vite, Rolldown, Tailwind, ESLint, Vitest, Playwright and their dependencies) | `--ignore-scripts` does not apply once `build`, `test`, `lint` or `dev` runs: a malicious new version runs with the rights of whoever builds. On the owner's Mac that is the Keychain's relay password, the node ssh keys and git push rights | Only the 14-day age, the small dependency count and reading the lockfile diff stop the package itself. What it can reach is cut down: on the Mac npm runs only through `tools/dashboard-npm` (scrubbed environment, `sandbox-exec` denying keys, Keychain and `$MU_HOME` secrets, no network outside install); in CI the workflow has `contents: read` and no secrets (§4.6.1). If `sandbox-exec` stops working: a separate macOS user, or the risk accepted here in writing |
 | Dependencies go stale | Security fixes missed; a large jump later | Dependabot's weekly grouped PRs; the weekly audit on `main`; the pins are reviewed at each release that touches the dashboard |
-| The committed build drifts from the source | A release ships a page that is not the reviewed code | CI rebuilds and diffs (D28); `BUILD.json`'s hash checked even by the Python-only CI; a release is tagged only from a commit on which `dashboard.yml` passed |
-| The build is not reproducible across machines (macOS against Linux; native build tools such as Rolldown, Lightning CSS and Tailwind's engine) | D28 fails for a build made on the Mac | Node pinned; the Linux CI build is the reference; if a Mac build ever differs, CI uploads its build as an artifact and that is what gets committed |
+| The committed build drifts from the source | A release ships a page that is not the reviewed code | CI rebuilds and diffs (D28); `BUILD.json`'s hash checked by the Python CI on every commit, the release gate; `front` runs on every push to `main`, and the release checklist confirms its run on the tagged commit (§7.1) |
+| The build is not reproducible across machines (macOS against Linux; native build tools such as Rolldown, Lightning CSS and Tailwind's engine) | D28 fails for a build made on the Mac | The rule, not a fallback: the committed bundle is the Linux `front` job's artifact. Local builds may be committed only if a one-time 1a check shows them byte-identical |
+| A lockfile written on the Mac lacks Linux's native packages | `npm ci` fails in CI | Lockfile changes record both platforms; D35 checks |
 | Bundle size and repository growth | A slow first load; every rebuild adds hashed files to git history | The 250 kB budget (D36); the vendor chunk changes only when dependencies do; no source maps committed; ECharts and three.js lazy. About 0.3–0.5 MB per phase-1 build, mostly unchanged between builds |
 | A library needs `unsafe-inline` or injects `<style>` elements | The CSP has to be loosened, or the page breaks | D29 catches it in CI; such libraries are not adopted, or used in a form that does not (§3.2) |
 | Framework churn (React, Vite and TanStack majors) | Upgrade work every year or two | Exact pins and grouped updates; the decoders keep the server independent of the front end; the app is small |
-| Node.js on the developer's Mac | A second toolchain for whoever works on the page | Only for that work, pinned by `.nvmrc`; users and the node never need it |
+| Node.js on the developer's Mac (the owner's Mac is also the developer's) | A second toolchain on that machine | The official tarball checked against a pinned SHA-256, in `$MU_CACHE/dev/`, never on the global `PATH`, used only through the wrapper; users and the node never need it |
+| uPlot has one maintainer and its last release is from March 2025 | No fixes if a bug appears | It sits behind our own component of about 80 lines; replacing it touches one file. ECharts is the fallback |
+| The scheduler changes `now.json`'s `running` and `queue` shapes after 1a froze them | The page reads fields the real node does not send | The scheduler's author reviews the shape before 1a freezes it; one set of golden fixtures for fake and real nodes (D38, D40); ½–1 day in 1b for the changes |
 | Phase 1b against the scheduler | Both change the node's runner; done in parallel they conflict | 1b starts after the scheduler merges and re-reads its design (§7.1); 1a touches only `cmd_submit` on the Mac side of `jobs.py` |
 
 ## 9. Questions for the owner
@@ -1096,7 +1267,9 @@ reaches the PC only through a release and its auto-update, which is failing toda
    Recommended: no (§3).
 9. **Retention on the node.** Stage 1 keeps every job forever, which slows `list`/`hello` over time, and nothing
    rotates `/srv/mu/audit.log`. Decide a rule for both (e.g. archive finished jobs older than 90 days; rotate the audit
-   log monthly, keep 12), separately from the dashboard.
+   log monthly, keep 12), separately from the dashboard. Default (ROADMAP §2.3): the `audit.log` rotation ships with
+   step 2's release, because the dashboard's old-node polling adds lines from 1a on (§4.3) and step 2's is the first
+   release that can reach the node; job archiving can follow later.
 10. **History length** (phase 2). Mac: raw 48 h, 1-min rollups 90 days. Node host history 7 days. Enough?
 11. **The look** (revision 2). The default is a neutral, technical palette with one blue accent (§5.3). Should the
     page carry Martand's colours or logo instead? If so, send the colour values and a logo file (SVG); they become
@@ -1176,5 +1349,40 @@ and CSP rules (§4.6, §4.6.1); a visual spec (§5.3); phase 1 split into 1a (no
 the concurrent-jobs scheduler) and 1b (after the scheduler and the auto-update fix), re-estimated at 9–12 days in all
 (§7.1, §7.6); page tests moved to Playwright and Vitest with their faults kept, and new tests D28, D29 and D34–D38;
 the CI jobs; new risks (§8); two owner questions (§9 Q11, Q12). Not taken: Next.js (§3.1). Unchanged: everything on
-the node, the transport, the API's routes, the token, the `Host` check and the read-only scope. This revision has not
-yet had an independent review; the front end's setup gets one with phase 1a's code.
+the node, the transport, the API's routes, the token, the `Host` check and the read-only scope. Its review and what
+changed are in §11.2; the front end's setup gets another review with phase 1a's code.
+
+### 11.2 Review of revision 2 and revision 3 (2026-11-14)
+
+An independent review of revision 2 approved it with changes: React + TypeScript + Vite as a committed static bundle
+served by the stdlib server is right for a local, single-user, security-sensitive page, and refusing Next.js is
+correct. It checked the §3.2 versions against the npm registry (all real; none declares an install script), that
+`install/install.sh` copies the whole tree into the recipe (so `share/dashboard/` ships), that `limit` is already in
+`ARG_RULES`, and that no `docs/design/scheduler.md` exists yet (still true at revision 3: there is no `scheduler` branch
+on the remote either). It found as sound, and they are unchanged: the Next.js reasoning and the two CVEs; the fixed
+static-file table, `no-store` on `index.html` and no token in static files; the token in a header; exact pins with the
+14-day rule and `npm audit signatures`; the licence allowlist; no CDN, fonts or source maps; Dependabot rather than a
+third-party app; the dev server limited to fake nodes; the router deferred to phase 2; the 1a/1b boundary; the
+fault-injection style of the new tests.
+
+| Finding | Taken? | Where |
+|---|---|---|
+| **B1** CSP misses Radix `ScrollArea` (renders `<style>`) and modal `DropdownMenu` (scroll lock injects `<style>`) | Yes. `ScrollArea` and `Toggle` dropped; no modal parts ever; of the two options for the filters, native `<select>` chosen over `DropdownMenu modal={false}` (less code, no overlay to test); 1a's Radix is Tooltip only. D29 opens every overlay, listens from `addInitScript`, runs in WebKit too. The fallback is never a nonce, a hash or `unsafe-inline` | §3.2, §4.6, D29 |
+| **B2** CSP for ECharts and three.js asserted, not analysed | Yes. A "CSP by phase" table: ECharts canvas renderer with `richText` or no tooltip; three.js STL and untextured GLB only, bytes fetched through the API client and `parse()`d, no decoder workers or wasm, `blob:` only in `img-src`/`connect-src` if textures are ever wanted; model files treated as hostile input. Trusted Types required from 1a (`trusted-types 'none'`), tested in Chromium and WebKit. One qualification: if the pinned Playwright WebKit build does not enforce Trusted Types, its D29 run checks the CSP only, and the test says so | §3.2, §4.6, §7.5, D29 |
+| **B3** supply chain stops install scripts and drift but not a compromised build-time package; Dependabot flow unspecified | Yes, all of it. Build-time execution stated plainly in §4.6.1 and §8; `dashboard.yml` gets `contents: read`, no secrets, no `pull_request_target`; the committed bundle is always CI's artifact, with a one-time 1a check before local builds may be committed; `tools/dashboard-npm` with a scrubbed environment and a `sandbox-exec` profile is built (½–1 day) rather than the risk accepted, and it also denies the Security server, `/usr/bin/security` and the network outside install, since file rules alone do not stop Keychain calls; the Dependabot flow is artifact → lockfile and changelog review → a person commits, no workflow commits; the "reviewed with its effect on `share/dashboard/`" claim removed; D35 asserts both platforms' native packages; Node from the official tarball with a pinned SHA-256 in `$MU_CACHE/dev/` | §3.2, §4.6.1, §4.8, §8, D35 |
+| **B4** no traffic plan for today's node; the measurement that bounds it scheduled after 1a | Yes, with one change. An old-node row in §4.3 with its cost stated; refined so that 15 s applies only while the node has an unfinished job or this Mac just submitted to it, else 60 s. The review counted "per visible tab"; the server makes the calls once per node however many tabs are open, so the figures are per node. The verb-cost measurement moved into 3.0a (a job on today's node). D39 added with `poll-list-2s`. **Not taken as written:** building `audit.log` rotation *before 1a's release*. Rotation is node code, and node code reaches the PC only through auto-update, which is broken until step 2; a rotation finished before 1a would still not run on the PC sooner. It ships with step 2's release instead, the first that can reach the node, and the old-node budget keeps the added lines to about 50 kB an hour while watched | §4.3, §7.0, §8, §9 Q9, D39; ROADMAP |
+| **S1** fake-node/real-node contract unguarded | Yes. Golden fixtures in `tools/test-dashboard/fixtures/`, emitted by `dashfake.py`, checked against the server (Python) and the decoders (Vitest) in D38, and against the real node in 1b (D40, `rename-field-node`); the scheduler's author reviews `now.json` before 1a freezes it; ½–1 day in 1b; "the page itself should need no change" deleted | §4.8, §7.1, §8 |
+| **S2** TanStack Query pauses offline | Yes: `networkMode: 'always'`, D41 | §3.2, §4.8 |
+| **S3** a dev install copies `dashboard/node_modules` into every toolchain | Yes: three `tar` excludes, a 1a change to `install.sh` (not made in this docs-only revision) | §4.8, §7.1 |
+| **S4** CI gating holes | Yes. `e2e`'s path filter covers `src/mu/**` and `toolchain/*/env.pip.txt`; of the two options, both taken: `front` and `supply` run unfiltered on every PR and push to `main`, and the `BUILD.json` Python check is named the release gate, with the release checklist confirming `dashboard.yml`'s run on the tagged commit; `.gitattributes` and "rebuild after a rebase, never hand-merge" added | §4.6.1, §7.1, §8 |
+| **S5** effort light by 2–3 days | Yes. 1a 8–11 days; lines 2,500–3,500 plus about 2,000 of tests; the owner's review round budgeted; later phases back to their earlier ranges until 1a gives a measured pace. One difference: phase 1 in all is **12–16** days, not the review's 11–15, because S1's ½–1 day in 1b is added to 1b (now 3½–5) | §7.1, §7.6; ROADMAP |
+| **S6** trim the 1a libraries | Yes. TanStack Table moved to phase 2; Radix shrinks to Tooltip; uPlot's single maintainer and 2025 release noted in §3.2 and §8; `LogView` caps stated as numbers (5,000 lines or 2 MB, 10 kB per line) and `@tanstack/react-virtual` listed for phase 2 if needed, not pinned yet because its latest release (2026-11-03) is under 14 days old | §3.2, §5.3, §7.2, §8 |
+| "A little nice": dark-mode mechanics | Yes: `@custom-variant dark` on a `data-theme` attribute; `theme.js` as an external blocking script; `<meta name="color-scheme">`; charts read token colours and redraw; D42 | §4.8, §5.3 |
+| Charts and accessibility | Yes: D43 computes chart and state contrast in both themes; an `aria-label` summary per chart; of the two options, a "show as table" button rather than keyboard cursor movement (a real table serves screen readers better) | §5.3 |
+| Missing states | Yes: server not answering, error boundary with no node text, no-JavaScript and browser-floor page (Safari 16.4, Chrome 111, Firefox 128), lazy chunk 404 via `vite:preloadError`; D46 | §4.8, §5.3 |
+| The owner's review of the look | Yes: `e2e` uploads screenshots of every scenario in light and dark; the owner having looked at them is part of 1a's done-when | §4.8, §5.3, §7.1 |
+| Small additions | Yes: favicon, tab title with the state, absolute time on hover, the WebKit copy test (D47), and the `eslint-plugin-jsx-a11y` note (6.10.2 declares ESLint ≤ 9, checked on the registry) | §3.2, §5.3 |
+
+Rejected outright: nothing. Changed from the review's wording: the timing of `audit.log` rotation (B4) and phase 1's
+total (S5), with the reasons above. The Radix and three.js behaviour the review described is from knowledge of their
+source, not from a run here; D29 in 1a is where it is confirmed.

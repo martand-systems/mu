@@ -48,6 +48,8 @@ from the Mac. Done when both machines run v2026.11.9 **by auto-update**, not by 
 - Find the cause from the node's `state/autoupdate.state` and newest `logs/autoupdate-*.log` (read with a job:
   `mu submit -- bash -c '…'`), fix it in a release, and confirm `hello.autoupdate.last_result` turns `ok` after the
   next daily check. No PC visit, unless the cause is on the Windows side.
+- The same release adds monthly rotation of `/srv/mu/audit.log` (keep 12; §2.3 Q9), because the dashboard's 3.1a
+  polls old nodes with `list`, one audit line per call.
 - Add the cause and the fix to the S3 record and to `docs/install/windows-compute-node.md` §11.
 
 ### Step 3. Dashboard (docs/design/dashboard.md)
@@ -59,19 +61,26 @@ own Python server (owner's direction 2026-11-14, §2.3; design §3.1, §4.8). Ph
   scheduler (being designed on branch `scheduler`): it changes nothing on the node, and needs only the owner's go-ahead.
 - **3.1b waits** for the scheduler to merge (both change the node's runner) and for step 2 (node code reaches the PC
   only by auto-update). Its probe (3.0) runs after the scheduler, so it measures the runner 3.1b will change.
+- Until 3.1b reaches the PC, the dashboard polls the node with `list` on a stated budget (design §4.3: every 15 s
+  while a tab is visible and a job is unfinished, else 60 s; 5 min on battery). Each call leaves one `audit.log` line,
+  so the `audit.log` rotation ships with step 2's release.
+- Review of the plan (revision 3, design §11.2): approved with changes, all applied. On the Mac, npm runs only through
+  a sandboxed wrapper; the committed page is always the one CI built.
 
 | Sub-step | Design § | Effort | Needs the PC? |
 |---|---|---|---|
-| 3.0a Check that the LaunchAgent can read the relay password from the Keychain on the Mac | §7.0 | an hour | No |
-| 3.1a **Phase 1a, starts now:** the React app (design system, the one page with every state), the Mac-side server (token, CSP, `Host` check, static files), `mu dashboard on/off/open`, the LaunchAgent, the Mac's sampler, fake nodes, `jobs.index` from `mu submit`; the front-end CI (build and diff, audit, licences, Playwright, accessibility). Against today's PC it shows every job by node with state and growing log, and This Mac's load; node load says "update μ on office-pc" | §7.1 (1a) | 6–8 days | No; one release, nothing new runs on the PC |
-| 3.0 Gate and probe, **after the scheduler merges and step 2**: one probe job on the PC (cgroup files on the WSL kernel, what survives an `oom`, the CPU cost of one verb call) | §7.0 | ½–1 day | Through jobs only, no visit |
-| 3.1b **Phase 1b:** the node's sampler (for several jobs at once, as the scheduler runs them), the `stats`/`watch`/`metrics` verbs, `usage` in `result.json` and `runs/<id>.json`, `stats` in `mu compute status --json`. The page's live node figures and the whole run's chart, built in 1a against fake nodes, switch on | §7.1 (1b) | 3–4 days | One release, delivered by auto-update |
-| 3.2 Phase 2: history (SQLite on the Mac), Nodes and This-Mac pages, the **Mac vs node comparison** on the benchmark suite | §7.2 | 3–5 days | No |
+| 3.0a Before 3.1a's release: check that the LaunchAgent can read the relay password from the Keychain on the Mac; and measure the CPU cost of one node call (`hello`, `list`) on **today's** PC with one job, which sets the old-node polling step | §7.0 | ½ day | Through one job, no visit; no node change |
+| 3.1a **Phase 1a, starts on the owner's go-ahead:** the React app (design system, light and dark, the one page with every state), the Mac-side server (token, CSP with Trusted Types, `Host` check, static files), `mu dashboard on/off/open`, the LaunchAgent, the Mac's sampler, fake nodes and the golden fixtures, `jobs.index` from `mu submit`, the old-node polling budget, the `install.sh` excludes; the sandboxed npm wrapper and pinned Node on the Mac; the front-end CI (build artifact and diff, audit, licences, Playwright in Chromium and WebKit, accessibility, screenshots for the owner). Against today's PC it shows every job by node with state and growing log, and This Mac's load; node load says "update μ on office-pc". Done includes the owner's look at the screenshots | §7.1 (1a) | 8–11 days | No; one release, nothing new runs on the PC |
+| 3.0 Gate and probe, **after the scheduler merges and step 2**: one probe job on the PC (cgroup files on the WSL kernel, what survives an `oom`, the sampler's cost with several jobs, the verb cost again) | §7.0 | ½–1 day | Through jobs only, no visit |
+| 3.1b **Phase 1b:** the node's sampler (for several jobs at once, as the scheduler runs them), the `stats`/`watch`/`metrics` verbs, `usage` in `result.json` and `runs/<id>.json`, `stats` in `mu compute status --json`. The page's live node figures and the whole run's chart, built in 1a against fake nodes, switch on; the real node's answers checked against the same fixtures, and page changes if the scheduler changed the shapes | §7.1 (1b) | 3½–5 days | One release, delivered by auto-update |
+| 3.2 Phase 2: history (SQLite on the Mac), Nodes and This-Mac pages, the **Mac vs node comparison** on the benchmark suite | §7.2 | 4–6 days | No |
 | 3.3 Phase 2b: recording of local `mu run` work, opt-in, so project jobs can be compared too | §7.3 | 3–4 days | No |
-| 3.4 Phase 3: solver progress (OpenFOAM residuals, CalculiX increments, Gmsh stages) and job-done notifications | §7.4 | 3–4 days | No |
-| 3.5 Phase 4: results views, 3D previews, optionally a cancel button | §7.5 | 1–1½ weeks | No; owner's choice when to start |
+| 3.4 Phase 3: solver progress (OpenFOAM residuals, CalculiX increments, Gmsh stages) and job-done notifications | §7.4 | 3–5 days | No |
+| 3.5 Phase 4: results views, 3D previews, optionally a cancel button | §7.5 | 1–2 weeks | No; owner's choice when to start |
 
-Acceptance: the tests D01–D29 and D34–D38 of the design, each with its fault shown to fail (1a's in CI before its
+Phase 1 in all: 12–16 days. Phases 2–4 keep these ranges until 1a gives a measured pace.
+
+Acceptance: the tests D01–D29, D34–D43, D46 and D47 of the design, each with its fault shown to fail (1a's in CI before its
 release, 1b's after); **done when** the owner, with nothing started by hand, opens the page during a real job on the
 office PC and sees what §7.1 lists for 1a, and then for the whole of phase 1.
 
@@ -91,8 +100,9 @@ step 3 built; it does not build a second source.
 ### Step 5. Ongoing, not scheduled
 
 - The restart tests on the office PC and the first real Windows Update restart (next office visit).
-- A retention rule for finished jobs and `/srv/mu/audit.log` on the node (nothing is deleted today; `list` and
-  `hello` slow down as jobs accumulate). Proposed default below; decide before the node holds about 1,000 jobs.
+- A retention rule for finished jobs on the node (nothing is deleted today; `list` and `hello` slow down as jobs
+  accumulate). Proposed default below; decide before the node holds about 1,000 jobs. (`audit.log` rotation is no
+  longer here: it ships with step 2.)
 - Headscale stays the fallback for the relay and pairing (PLAN §17) if they become a burden.
 
 ## 2. The owner's decisions (2026-11-14)
@@ -132,7 +142,7 @@ Decided by the owner:
 
 | Topic | Decision | Why |
 |---|---|---|
-| Front end (2026-11-14) | **React + TypeScript + Vite**, a static single-page app built in CI; the built files committed in `share/dashboard/` and shipped in each release; μ's stdlib Python server serves them and the API and keeps the token, `Host` check and strict CSP. No Node.js on users' machines. **Not Next.js** | Owner: "a little nice", and room for libraries later. The lead: Next.js's value (server rendering, server components, API routes) needs a Node.js server on every workstation, a second runtime and a second server to secure; a static export is React with a heavier build (design §3.1) |
+| Front end (2026-11-14) | **React + TypeScript + Vite**, a static single-page app built in CI; the built files committed in `share/dashboard/` and shipped in each release; μ's stdlib Python server serves them and the API and keeps the token, `Host` check and strict CSP. No Node.js on users' machines (the owner's Mac, which is also where the page is developed, has a pinned, sandboxed copy for building only). **Not Next.js** | Owner: "a little nice", and room for libraries later. The lead: Next.js's value (server rendering, server components, API routes) needs a Node.js server on every workstation, a second runtime and a second server to secure; a static export is React with a heavier build (design §3.1) |
 
 The other questions have not been answered yet; the lead's defaults below apply until the owner says otherwise.
 
@@ -146,7 +156,7 @@ The other questions have not been answered yet; the lead's defaults below apply 
 | 6 Notifications | Yes, opt-in (phase 3) | Claude drives jobs; a notification tells the owner without asking |
 | 7 Others' jobs | Not relevant until a second workstation; default filter "this workstation" | No new machine soon |
 | 8 Reverse tunnel/exporter on the node | Never | Security model |
-| 9 Retention on the node | Archive finished jobs older than 90 days into `/srv/mu/archive/`; rotate `audit.log` monthly, keep 12. Built with step 2 or 3.1 | Keeps `list`/`hello` fast |
+| 9 Retention on the node | Archive finished jobs older than 90 days into `/srv/mu/archive/`; rotate `audit.log` monthly, keep 12. **The rotation ships with step 2's release** (the first that can reach the node; 3.1a's polling of old nodes adds audit lines); archiving can follow with 3.1b | Keeps `list`/`hello` fast and the audit log bounded |
 | 10 History length | As designed (Mac raw 48 h, 1-min rollups 90 days; node host history 7 days) | Enough for weekly comparisons |
 | 11 The look | A neutral, technical palette with one blue accent, light and dark (design §5.3); Martand's colours or logo if the owner sends them | "A little nice" without a brand decision blocking work |
 | 12 Release 1a on its own | Yes | The owner sees jobs by node and their logs weeks before 1b can reach the PC |
