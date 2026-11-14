@@ -44,6 +44,16 @@ must_fail() {
   else bad "must-fail: $name, with fault $f: nothing failed" "$out"; fi
 }
 
+# must_fail_tagged NAME FAULT PY SECTION...: as must_fail, but only a check tagged with that fault counts (its name ends
+# "(fault F is on: this must FAIL)"): a fault caught only by some other check proves nothing about the tagged one
+must_fail_tagged() {
+  local name="$1" f="$2" py="$3" out n; shift 3
+  out="$(MU_JOBS_FAULT="$f" "$py" -I -S "$HERE/unit.py" "$@" 2>&1)"
+  n="$(printf '%s\n' "$out" | grep -c "^FAIL .*(fault $f is on")"
+  if [ "$n" -gt 0 ]; then ok "must-fail: $name, with fault $f ($n check(s) tagged with it failed, as they must)"
+  else bad "must-fail: $name, with fault $f: no check tagged with it failed" "$(printf '%s\n' "$out" | grep -E '^FAIL|Traceback|Error')"; fi
+}
+
 PYS="${MU_TEST_PYTHONS:-}"
 if [ -z "$PYS" ]; then
   PYS="$(command -v python3)"
@@ -252,17 +262,20 @@ must_fail "runner: results are written once" overwrite-result "$PY1" runner
 for f in one-at-a-time cpus-reused no-core-admission no-mem-admission backfill-ignores-shadow no-head-reservation \
          margin-zero extra-not-reduced no-express express-from-pool express-by-size grantless-counts-zero legacy-sized \
          hold-ignored bands-ignored walk-by-accepted-ns priority-to-front no-auth-check owner-acts-not-sticky no-others-guard \
-         no-capacity-check; do
-  must_fail "scheduler: plan, walk, authorisation, the workstation's sizing" "$f" "$PY1" sched
+         no-capacity-check no-size-bounds; do
+  must_fail_tagged "scheduler: plan, walk, authorisation, the workstation's sizing" "$f" "$PY1" sched
 done
-for f in cpus-reused margin-zero extra-not-reduced express-from-pool hold-ignored; do
-  must_fail "scheduler: the randomised simulation" "$f" "$PY1" sched-sim
+for f in cpus-reused margin-zero extra-not-reduced express-from-pool hold-ignored no-head-reservation; do
+  must_fail_tagged "scheduler: the randomised simulation" "$f" "$PY1" sched-sim
 done
 for f in one-at-a-time cpus-from-plan-cache mem-max-is-capacity no-thread-env grant-in-memory-only free-on-cancel-request \
          requeue-new-ns keep-tmp-on-rerun stamp-before-checkout grantless-counts-zero no-express-quota hold-ignored \
          rebuild-held-as-queued holds-in-order-file-only walk-by-accepted-ns partial-order-write drop-field no-auth-check \
-         no-others-guard owner-acts-not-sticky bands-ignored queue-project-filter; do
-  must_fail "scheduler: the runner's passes and the queue verbs" "$f" "$PY1" sched-runner
+         no-others-guard owner-acts-not-sticky bands-ignored queue-project-filter no-size-bounds no-display-check \
+         runner-ignores-start-lock start-lock-pid-only starts-after-switch no-needed-versions free-on-result \
+         keep-usage-on-rerun audit-terse no-cancel-auth update-always-force grant-after-systemd-run \
+         unconfirmed-as-interrupted no-note-active owner-from-node-json; do
+  must_fail_tagged "scheduler: the runner's passes and the queue verbs" "$f" "$PY1" sched-runner
 done
 
 section "chisel pins agree (apps.toml, relay/Dockerfile, the distro script)"

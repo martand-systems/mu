@@ -26,6 +26,7 @@ Test faults (durable.fault; each must make a unit test or an e2e row fail, sched
   no-auth-check           every key may arrange every job
   owner-acts-not-sticky   a job's own workstation may undo an owner's hold or band
   no-others-guard         jobs of other projects may be arranged without others=1
+  no-size-bounds          a request's sizes are not bounded (MAX_*): a huge --time overflows the plan
 """
 from mu.durable import fault
 
@@ -40,14 +41,25 @@ MARGIN_S = START_WAIT_S + SLACK_S
 VALVE_S = 60            # a unit this long past its end bound opens the valve: no time-based backfill
 DEFAULT_TIME_S = 12 * 3600
 MIN_MEM = 256 << 20
+# the largest sizes a spec may carry (node.check_spec, and resolve() for jobs already on disk): beyond them the plan's
+# float arithmetic and the wall-clock times of status overflow (security review, 2026-11-15)
+MAX_CORES = 4096
+MAX_MEM_BYTES = 1 << 50
+MAX_TIME_S = 365 * 86400
 
 
 class TooBig(Exception):
     """A request larger than the node (scheduler.md §4.3)."""
+    error = "too-big"
 
     def __init__(self, what, cap):
         Exception.__init__(self, what)
         self.what, self.cap = what, cap
+
+
+class BadSpec(TooBig):
+    """A job on disk whose request cannot be worked out (it fails; the pass goes on with the others)."""
+    error = "bad-spec"
 
 
 def _pos_int(v):
@@ -98,6 +110,10 @@ def resolve(spec, cap):
     lim = spec.get("limits") if isinstance(spec.get("limits"), dict) else {}
     c, m = cap["cores"], cap["mem_bytes"]
     fc, fm, ft = _pos_int(lim.get("cores")), _pos_int(lim.get("mem_bytes")), _pos_int(lim.get("time_s"))
+    if not fault("no-size-bounds"):
+        for flag_, v, mx in (("--cores", fc, MAX_CORES), ("--mem", fm, MAX_MEM_BYTES), ("--time", ft, MAX_TIME_S)):
+            if v is not None and v > mx:
+                raise TooBig("%s %d > %d (the largest a job may ask for)" % (flag_, v, mx), cap)
     new_ws = bool(spec.get("sched"))
     if new_ws and lim.get("quick") is True and not fault("no-express"):
         return {"cores": 1, "mem_bytes": EXPRESS["mem_bytes"], "time_s": EXPRESS["time_s"], "class": "express",
@@ -150,7 +166,7 @@ def walk(items, order):
 def end_bound(grant):
     """The latest CLOCK_MONOTONIC second a running job's unit can still hold its grant (§3.2), or None."""
     t = grant.get("time_s")
-    if not isinstance(t, (int, float)):
+    if not isinstance(t, (int, float)) or isinstance(t, bool) or not 0 <= t <= MAX_TIME_S:
         return None
     if isinstance(grant.get("active_mono"), (int, float)):
         return grant["active_mono"] + t + SLACK_S

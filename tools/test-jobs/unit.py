@@ -575,7 +575,9 @@ Result=success
 ActiveState=%s
 SubState=x
 Result=%s
-' "$2" "$3" ;;
+ActiveEnterTimestampMonotonic=%s
+ControlGroup=/user.slice/test/%s
+' "$2" "$3" "${4:-0}" "$1" ;;
   is-active) echo active ;;
   *) echo "$@" >> "$STUB_DIR/calls" ;;
 esac

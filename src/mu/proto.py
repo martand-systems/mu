@@ -62,6 +62,19 @@ def iso(t=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t if t is not None else time.time()))
 
 
+def one_line(v, n=200):
+    """A display string one workstation's spec puts in front of another (name, project, submitted host and user, in
+    mu queue and status): never a control or format character (no forged lines, no terminal escapes), at most N
+    characters; None stays None, anything else becomes its JSON text (security review of the scheduler, 2026-11-15).
+    Unlike clean_text below, newline and tab go too: one line per job."""
+    import unicodedata
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        v = json.dumps(v, ensure_ascii=True)
+    return "".join(" " if unicodedata.category(c) in ("Cc", "Cf", "Cs", "Zl", "Zp") else c for c in v[:n])
+
+
 def safe_relpath(p):
     """A path relative to the project root: not absolute, no '..', no empty or '.' parts beyond a lone '.', no
     backslash or NUL. Returns the normalised form ('' for the root) or None."""

@@ -155,6 +155,20 @@ def size_hint(root, name, given):
 
 
 # ------------------------------------------------------------------------------------------------ commands
+def tidy(j):
+    """A job from the node, as shown here: its free text (name, project, key, submitted host and user) without control
+    characters, whatever the node sent (another workstation's spec, an older node)."""
+    if not isinstance(j, dict):
+        return {}
+    for k in ("name", "project", "key"):
+        if k in j:
+            j[k] = proto.one_line(j[k])
+    if "submitted" in j:
+        sub = j["submitted"] if isinstance(j["submitted"], dict) else {}
+        j["submitted"] = {k: proto.one_line(sub.get(k)) for k in ("host", "user") if k in sub}
+    return j
+
+
 def project_id():
     from mu import jobs
     try:
@@ -188,7 +202,8 @@ def cmd_queue(a):
         ans = conn.call("list", limit=0)   # an older node: all its jobs, without order or bands
         ans = {"ok": True, "node": conf["name"], "fallback": "list", "jobs": ans.get("jobs", []),
                "note": "%s is older than the scheduler: the list of its jobs, without order or bands" % conf["name"]}
-    jobs_ = ans.get("jobs") or []
+    jobs_ = [tidy(j) for j in ans.get("jobs") or [] if isinstance(j, dict) and isinstance(j.get("job_id"), str)]
+    ans["jobs"] = jobs_
     for j in jobs_:
         j["this_project"] = bool(frm) and j.get("project_id") == frm
     if a.mine:
@@ -255,6 +270,7 @@ def cmd_arrange(op, a):
         raise too_old(conf, "queue control")
     ans = conn.call(op, **args)
     ans.setdefault("exit", 0)
+    ans["delays"] = [tidy(d) for d in ans.get("delays") or [] if isinstance(d, dict)]
     ans.update(node=conf["name"], next="mu queue --json")
     if a.json:
         proto.emit_json(ans)

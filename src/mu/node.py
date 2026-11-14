@@ -65,6 +65,21 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   queue-project-filter    `queue` lists only the caller's project
   drop-field              the arranging answers lack `place` (the JSON-shape check must notice)
   held-as-queued          a hold is written as state "queued" with a flag (the previous release's runner starts it)
+ the review of 2026-11-15 (docs/design/scheduler.md "Release 1 as built"), each undoing one fix:
+  no-size-bounds          a spec's sizes are not bounded (a huge --time overflows every plan: no start, no status)
+  no-display-check        name, project and submitted are stored and shown as sent (forged lines, crashes)
+  runner-ignores-start-lock  the runner starts jobs while an update holds the start lock
+  start-lock-pid-only     a start lock whose pid is alive is held, whatever process now has that pid or boot it is
+  starts-after-switch     the runner goes on starting jobs after the default moved, until its restart
+  no-needed-versions      the runner does not write $MU_HOME/state/needed-versions (gc may remove a held job's μ)
+  free-on-result          a finished job's grant is freed at its result, before its unit has ended
+  keep-usage-on-rerun     a re-run keeps attempt 1's usage.json (attempt 2 reports its figures)
+  no-cancel-auth          any paired key may cancel any job
+  audit-terse             refused arranging lines leave out what was asked; band changes show the new band only
+  update-always-force     `update` runs `mu autoupdate run --force` for every key
+  grant-after-systemd-run the grant reaches state.json only after systemd-run (a unit can exist without it)
+  unconfirmed-as-interrupted  a start whose unit never came counts as an interrupted attempt (not a failed start)
+  no-note-active          the runner never records a unit's activation (end bound, cgroup, start_unconfirmed)
 """
 import fcntl
 import hashlib
@@ -483,13 +498,33 @@ def grant_of(j):
     return g if isinstance(g, dict) and isinstance(g.get("cpus"), list) else None
 
 
-def running_info(jobs, here_only=False):
+DRAIN_S = 60                  # a result this recent: its unit may still be stopping what the job left (TimeoutStopSec=5)
+
+
+def draining(j):
+    """A job whose shim wrote its result while its unit still runs (stopping leftover processes): its grant stays
+    counted until systemd says the unit ended (§9; review 2026-11-15). Only results of the last DRAIN_S seconds are
+    asked about, so finished jobs of the past cost no systemctl call."""
+    st = j["state"] or {}
+    if not j["result"] or st.get("state") != "running" or not grant_of(j) or st.get("unit") in (None, "session"):
+        return False
+    if fault("free-on-result"):
+        return False
+    try:
+        if time.time() - os.path.getmtime(os.path.join(j["dir"], "result.json")) > DRAIN_S:
+            return False
+    except OSError:
+        return False
+    return not unit_ended(unit_props(st["unit"]))
+
+
+def running_info(jobs, here_only=False, drain=()):
     """[{id, grant, end, started_epoch}] of the running jobs, for the plan (§3.2): grants come from state.json every
-    pass; a running job without one holds the whole node."""
+    pass; a running job without one holds the whole node. DRAIN: jobs with a result whose unit has not ended yet."""
     out = []
     for j in jobs:
         st = j["state"] or {}
-        if j["result"] or st.get("state") != "running":
+        if (j["result"] and j["id"] not in drain) or st.get("state") != "running":
             continue
         if fault("free-on-cancel-request") and os.path.exists(os.path.join(j["dir"], "cancel")):
             continue
@@ -508,7 +543,21 @@ def queue_items(w, cap):
             out.append({"id": it["id"], "held": it["held"], "req": sched.resolve(it["j"]["job"], cap)})
         except sched.TooBig as e:
             out.append({"id": it["id"], "held": it["held"], "error": e})
+        except Exception as e:  # noqa: one job whose request cannot be worked out fails; it never stops the pass
+            out.append({"id": it["id"], "held": it["held"], "error": sched.BadSpec("%s: %s" % (type(e).__name__, e), cap)})
     return out
+
+
+def safe_plan(now, cap, running, items, disk):
+    """sched.plan(), or, should it raise, a plan in which nothing starts (every running job holding the node): a
+    status, queue or hello still answers, and the runner's pass goes on (security review, 2026-11-15)."""
+    try:
+        return sched.plan(now, cap, running, items, disk)
+    except Exception:  # noqa
+        if fault("runner-pass-aborts") or fault("no-size-bounds"):
+            raise
+        journal_once("plan", "runner: the plan failed, nothing starts: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
+        return sched.plan(now, cap, [{"id": r["id"], "grant": None, "end": None} for r in running], [], disk)
 
 
 def disk_block(node):
@@ -529,13 +578,16 @@ def view(jobs=None, node=None):
     order = read_order()
     w = walk_jobs(jobs, order)
     now = time.monotonic()
-    pl = sched.plan(now, cap, running_info(jobs), queue_items(w, cap), disk_block(node))
+    pl = safe_plan(now, cap, running_info(jobs), queue_items(w, cap), disk_block(node))
     return {"plan": pl, "cap": cap, "walk": w, "now": now, "wall": time.time(), "jobs": jobs, "order": order}
 
 
 def wall_of(v, mono):
     """A monotonic bound as wall-clock ISO time at answer time (§7.1), or None."""
-    return proto.iso(v["wall"] + (mono - v["now"])) if isinstance(mono, (int, float)) else None
+    try:
+        return proto.iso(v["wall"] + (mono - v["now"])) if isinstance(mono, (int, float)) else None
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def waiting_text(v, jid):
@@ -571,14 +623,14 @@ def status_of(j, v=None):
         log_size = os.path.getsize(os.path.join(j["dir"], "log"))
     except OSError:
         log_size = 0
-    out = {"ok": True, "job_id": j["id"], "name": job.get("name"), "project_id": job.get("project_id"),
+    out = {"ok": True, "job_id": j["id"], "name": shown(job.get("name")), "project_id": job.get("project_id"),
            "state": state, "attempt": (res or st).get("attempt", st.get("attempt", 1)),
            "position": pl.get("position", {}).get(j["id"]) if not res and state == "queued" else None,
            "queued_at": job.get("accepted_at"), "started_at": (res or {}).get("started_at") or st.get("started_at"),
            "ended_at": (res or {}).get("ended_at"), "exit_code": (res or {}).get("exit_code"), "log_size": log_size,
            "note": (res or {}).get("note") or st.get("note"), "unit": st.get("unit"),
            "cancel_requested": os.path.exists(os.path.join(j["dir"], "cancel")),
-           "project": job.get("project"), "key": job.get("key"), "band": sched.band_of(st, job)}
+           "project": shown(job.get("project")), "key": job.get("key"), "band": sched.band_of(st, job)}
     if res:
         if not fault("no-usage"):
             out["usage"] = res.get("usage")
@@ -864,10 +916,13 @@ def check_spec(spec, job_id):
     lim = spec.get("limits")
     if not isinstance(lim, dict):
         bad("limits", "must be an object")
+    bounds = {"mem_bytes": sched.MAX_MEM_BYTES, "time_s": sched.MAX_TIME_S, "cores": sched.MAX_CORES}
     for k in ("mem_bytes", "time_s", "cores"):
         v = lim.get(k)
         if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
             bad("limits." + k, "must be null or a positive integer")
+        if v is not None and v > bounds[k] and not fault("no-size-bounds"):
+            bad("limits." + k, "must be at most %d" % bounds[k])
     if lim.get("quick") not in (None, False, True):
         bad("limits.quick", "must be true, false or absent")
     if lim.get("quick") is True and any(lim.get(k) for k in ("mem_bytes", "time_s", "cores")):
@@ -882,6 +937,33 @@ def check_spec(spec, job_id):
         bad("rerun", "must be true or false")
     if not isinstance(spec.get("name", ""), str) or len(spec.get("name", "")) > 200:
         bad("name", "must be a string of at most 200 characters")
+    if fault("no-display-check"):
+        return
+    # what other workstations see of this job (mu queue, status): strings of bounded length; control characters are
+    # replaced when the job is stored (display_fields), so an older workstation's multi-line command still submits
+    if spec.get("project") is not None and (not isinstance(spec["project"], str) or len(spec["project"]) > 200):
+        bad("project", "must be a string of at most 200 characters")
+    sub = spec.get("submitted")
+    if sub is not None:
+        if not isinstance(sub, dict):
+            bad("submitted", "must be an object")
+        for k in ("at", "host", "user"):
+            if sub.get(k) is not None and (not isinstance(sub[k], str) or len(sub[k]) > 200):
+                bad("submitted." + k, "must be a string of at most 200 characters")
+
+
+def display_fields(spec):
+    """The spec as stored: name, project and submitted's strings without control or format characters (§20.4: every
+    workstation sees them in mu queue, and Claude reads mu queue --json)."""
+    if fault("no-display-check"):
+        return spec
+    out = dict(spec)
+    for k in ("name", "project"):
+        if isinstance(out.get(k), str):
+            out[k] = shown(out[k])
+    if isinstance(out.get("submitted"), dict):
+        out["submitted"] = {k: shown(v) if isinstance(v, str) else v for k, v in out["submitted"].items()}
+    return out
 
 
 def check_snapshot(spec):
@@ -904,6 +986,25 @@ def check_snapshot(spec):
     if v != spec["mu_version"]:
         raise NodeError(proto.NODE_USAGE, "bad-spec", "", message="job spec: mu_version %s is not [mu] version of the "
                         "snapshot's mu.toml (%s)" % (spec["mu_version"], v), field="mu_version")
+
+
+def needed_path():
+    return os.path.join(mu_home(), "state", "needed-versions")
+
+
+def write_needed(versions):
+    """$MU_HOME/state/needed-versions: the μ version of every unfinished job (queued, held, running), one per line;
+    bin/mu's gc keeps them. Written when it changes (review 2026-11-15: held jobs alone leave the node idle, and a
+    project's pin moves on with its next submit, so gc could remove the version a held job still needs)."""
+    if fault("no-needed-versions"):
+        return
+    text = "".join("%s\n" % v for v in sorted(set(versions)) if isinstance(v, str) and proto.VERSION.match(v))
+    if read_text(needed_path(), None) != text:
+        try:
+            os.makedirs(os.path.dirname(needed_path()), exist_ok=True)
+            durable.write_durable(needed_path(), text, 0o644)
+        except OSError as e:
+            journal_once("needed", "runner: could not write %s: %s" % (needed_path(), e))
 
 
 def register_pin(project_id, version):
@@ -997,7 +1098,7 @@ def verb_submit(key, args):
         shutil.rmtree(tmp, ignore_errors=True)
         os.mkdir(tmp, 0o700)
         now_ns = next_accept_ns()
-        job = dict(spec, job_id=job_id, accepted_ns=now_ns, accepted_at=proto.iso(now_ns / 1e9), key=key,
+        job = dict(display_fields(spec), job_id=job_id, accepted_ns=now_ns, accepted_at=proto.iso(now_ns / 1e9), key=key,
                    node=node.get("name"))
         durable.write_record(os.path.join(tmp, "job.json"), job)
         st0 = {"state": "queued", "attempt": 1, "updated": proto.iso()}
@@ -1013,6 +1114,7 @@ def verb_submit(key, args):
                 st0.update(state="held", held={"by": key, "at": proto.iso(), "owner": key in own})
         durable.write_record(os.path.join(tmp, "state.json"), st0)
         register_pin(spec["project_id"], spec["mu_version"])   # before the job exists: auto-update keeps its version
+        write_needed(read_text(needed_path()).split() + [spec["mu_version"]])   # and gc, until the runner's next pass
         os.rename(tmp, d)
         durable.sync_dir(p("jobs"))
         journal("submit id=%s key=%s project=%s accepted%s" % (job_id, key, spec["project_id"], "".join(
@@ -1031,8 +1133,9 @@ def verb_submit(key, args):
     if sizing:
         out["sizing"] = {k: v for k, v in sizing.items() if k != "env_cores"}
     if delays:
-        out["delays"] = [{"job_id": x["id"], "name": x["j"]["job"].get("name"), "project": x["j"]["job"].get("project"),
-                          "key": x["j"]["job"].get("key")} for x in delays]
+        out["delays"] = [{"job_id": x["id"], "name": shown(x["j"]["job"].get("name")),
+                          "project": shown(x["j"]["job"].get("project")), "key": x["j"]["job"].get("key")}
+                         for x in delays]
     return out
 
 
@@ -1199,6 +1302,14 @@ def verb_cancel(key, args):
     d = j["dir"]
     if j["result"]:
         return {"ok": True, "job_id": j["id"], "state": j["result"]["state"], "note": "already finished"}
+    # the rule of hold and move (§20.4): the job's own workstation or an owner key (review 2026-11-15: cancel was the
+    # one act any paired key could do to any job). Older workstations send no from=, so no --others guard here
+    if not fault("no-cancel-auth") and key not in owners() and j["job"].get("key") != key:
+        journal("queue: refused cancel id=%s by=%s not-allowed (the job belongs to workstation %s)" % (
+            j["id"], key, j["job"].get("key")))
+        raise NodeError(proto.NODE_NOPERM, "not-allowed", "ask the owner of the node, or cancel it from %s" %
+                        j["job"].get("key"), message="cancel %s refused: the job belongs to workstation %s" % (
+                            j["id"], j["job"].get("key")))
     durable.write_durable(os.path.join(d, "cancel"), "cancel asked by %s at %s\n" % (key, proto.iso()))
     event(d, "cancel asked by %s" % key)
     with Lock():
@@ -1218,11 +1329,18 @@ def verb_cancel(key, args):
 
 
 # ------------------------------------------------------------------------------------------------ queue control
+def shown(v):
+    """Free text of a job's spec as answers show it (proto.one_line; the fault no-display-check shows it raw)."""
+    return v if fault("no-display-check") else proto.one_line(v)
+
+
 def queue_entry(j, v, frm):
     s = status_of(j, v)
     job = j["job"]
-    s.update(project=job.get("project"), key=job.get("key"),
-             submitted={k: (job.get("submitted") or {}).get(k) for k in ("host", "user")},
+    sub = job.get("submitted") if isinstance(job.get("submitted"), dict) or fault("no-display-check") else {}
+    sub = sub or {}
+    s.update(project=shown(job.get("project")), key=job.get("key"),
+             submitted={k: shown(sub.get(k)) for k in ("host", "user")},
              this_project=bool(frm) and job.get("project_id") == frm)
     for k in ("unit", "log_size", "cancel_requested"):
         s.pop(k, None)
@@ -1256,9 +1374,11 @@ def verb_queue(key, args):
             "jobs": jobs}
 
 
-def arrange_refuse(op, jid, key, frm, others, why, touch=()):
-    journal("queue: refused %s id=%s by=%s%s%s %s (%s)" % (op, jid, key, " from=%s" % frm if frm else "",
-                                                          " others=1" if others else "", why[0], why[1]))
+def arrange_refuse(op, jid, key, frm, others, why, touch=(), asked=""):
+    """ASKED: what was asked (" to=front", " before=K", " class=high"), so a refused line says what it refused."""
+    journal("queue: refused %s id=%s%s by=%s%s%s %s (%s)" % (op, jid, "" if fault("audit-terse") else asked, key,
+                                                            " from=%s" % frm if frm else "", " others=1" if others
+                                                            else "", why[0], why[1]))
     rc = proto.NODE_NOPERM if why[0] == "not-allowed" else proto.NODE_USAGE
     raise NodeError(rc, why[0], "", message="%s %s refused: %s" % (op, jid, why[1]),
                     would_touch=[x["id"] for x in touch])
@@ -1322,10 +1442,11 @@ def verb_arrange(key, args, op):
         passes = sched.passed(w0, w1, jid) if op in ("move", "priority") else []
         pinfo = [{"key": x["j"]["job"].get("key"), "project_id": x["j"]["job"].get("project_id"), "id": x["id"]}
                  for x in passes]
+        asked = " %s=%s" % (how, ref) if ref else (" to=%s" % how if how else (" class=%s" % new_band if new_band else ""))
         if changed:
             why = sched.authorise(op, info, key, own, frm, others, pinfo, new_band if op in ("move", "priority") else None)
             if why:
-                arrange_refuse(op, jid, key, frm, others, why, passes)
+                arrange_refuse(op, jid, key, frm, others, why, passes, asked)
         was = {"place": v0["plan"]["place"].get(jid), "band": it["band"]}
         is_owner = key in own
         if changed:
@@ -1370,17 +1491,17 @@ def verb_arrange(key, args, op):
                 x["id"] in sb0 and (x["id"] not in sb1 or (sb1[x["id"]] is None and sb0[x["id"]] is not None) or (
                     sb1[x["id"]] is not None and sb0[x["id"]] is not None and sb1[x["id"]] > sb0[x["id"]] + 1)))
             if changed and worse:
-                delays.append({"job_id": x["id"], "name": x["j"]["job"].get("name"),
-                               "project": x["j"]["job"].get("project"), "key": x["j"]["job"].get("key"),
+                delays.append({"job_id": x["id"], "name": shown(x["j"]["job"].get("name")),
+                               "project": shown(x["j"]["job"].get("project")), "key": x["j"]["job"].get("key"),
                                "starts_by_was": wall_of(v0, sb0.get(x["id"])), "starts_by": wall_of(v1, sb1.get(x["id"]))})
         jn = next(x for x in v1["jobs"] if x["id"] == jid)
         s1 = status_of(jn, v1)
         if changed:
             journal("queue: %s id=%s%s by=%s%s%s%s place %s->%s band %s%s" % (
-                op, jid, " %s=%s" % (how, ref) if ref else (" to=%s" % how if how else (" class=%s" % new_band if new_band
-                                                                                     else "")),
-                key, " (owner)" if is_owner else "", " from=%s" % frm if frm else "", " others=1" if others else "",
-                was["place"], s1.get("place"), s1.get("band"),
+                op, jid, asked, key, " (owner)" if is_owner else "", " from=%s" % frm if frm else "",
+                " others=1" if others else "", was["place"], s1.get("place"),
+                s1.get("band") if fault("audit-terse") or was["band"] == s1.get("band") else "%s->%s" % (
+                    was["band"], s1.get("band")),
                 " delays=%s" % ",".join(d["job_id"] for d in delays) if delays else ""))
             for d in delays:
                 event(job_dir(d["job_id"]), "delayed by %s of %s by %s%s" % (op, jid, key, " from=%s" % frm if frm else ""))
@@ -1425,20 +1546,25 @@ def verb_update(key, args):
     log = p("maint", "update-%s.log" % time.strftime("%Y%m%d-%H%M%S", time.gmtime()))
     home = mu_home()
     systemctl("reset-failed", UPDATE_UNIT, timeout=15)
+    # an owner key forces it (also with auto-update off, and past a release's failed tries); another key runs the
+    # check as the hourly timer would, now (review 2026-11-15: any paired key could repeat a failing install)
+    force = key in owners() or fault("update-always-force")
     cmd = [os.environ.get("MU_SYSTEMD_RUN") or "systemd-run", "--user", "--quiet", "--collect", "--unit=" + UPDATE_UNIT,
            "--description=μ update (mu compute update, by %s)" % key, "-p", "Type=exec", "-p", "Nice=10",
            "-p", "StandardOutput=append:%s" % log, "-p", "StandardError=append:%s" % log,
-           "--setenv=MU_HOME=" + home, "--", os.path.join(home, "bin", "mu"), "autoupdate", "run", "--force"]
+           "--setenv=MU_HOME=" + home, "--", os.path.join(home, "bin", "mu"), "autoupdate", "run"] + (
+        ["--force"] if force else [])
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=user_env(), stdin=subprocess.DEVNULL)
         rc, err = r.returncode, r.stderr.strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         rc, err = 1, str(e)
-    journal("update by=%s: %s" % (key, "started %s, log %s" % (UPDATE_UNIT, log) if rc == 0 else "failed: %s" % err[:300]))
+    journal("update by=%s%s: %s" % (key, " (owner, --force)" if force else "", "started %s, log %s" % (UPDATE_UNIT, log)
+                                     if rc == 0 else "failed: %s" % err[:300]))
     if rc != 0:
         raise NodeError(proto.NODE_INTERNAL, "update-failed", "", message="could not start the update unit: %s" % err[:300])
     return {"ok": True, "changed": True, "unit": UPDATE_UNIT, "state": "started", "log": log, "started_at": proto.iso(),
-            "default": default_version(), "autoupdate": autoupdate_info()}
+            "default": default_version(), "autoupdate": autoupdate_info(), "forced": force}
 
 
 VERBS = {"hello": verb_hello, "receive-pack": verb_receive_pack, "submit": verb_submit, "status": verb_status,
@@ -1574,7 +1700,8 @@ def start_job(j, grant, S=None):
         stamp()
     os.makedirs(os.path.join(d, "tmp"), mode=0o700, exist_ok=True)   # removed with the result and before a re-run
     st["start_unconfirmed"] = True   # until systemd-run says it started the unit
-    durable.write_record(os.path.join(d, "state.json"), st)
+    if not fault("grant-after-systemd-run"):   # the grant on disk before the unit can exist (§9, e2e Q16)
+        durable.write_record(os.path.join(d, "state.json"), st)
     STARTED_HERE.add(j["id"])
     event(d, "start attempt %d as %s: granted cores=%d cpus=%s mem=%s time=%s class=%s" % (
         attempt, unit, g["cores"], sched.fmt_cpus(g["cpus"]), sched.human_gb(g["mem_bytes"]),
@@ -1604,6 +1731,8 @@ def start_job(j, grant, S=None):
         rc, err = r.returncode, r.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         rc, err = 1, str(e)
+    if fault("grant-after-systemd-run"):
+        durable.write_record(os.path.join(d, "state.json"), st)
     if rc == 0:
         st.pop("start_unconfirmed", None)
         durable.write_record(os.path.join(d, "state.json"), st)
@@ -1661,6 +1790,7 @@ def interrupted(j, why):
     if st.get("attempt", 1) == 1 and j["job"].get("rerun", True):
         requeue_front(j)   # queue.json first, then state.json (§20.8 write order)
         for f in ("work", "index") + (() if fault("keep-tmp-on-rerun") else ("tmp",)) + (
+                () if fault("keep-usage-on-rerun") else ("usage.json",)) + (
                 ("log",) if fault("log-truncate-on-rerun") else ()):
             x = os.path.join(j["dir"], f)
             if os.path.isdir(x):
@@ -1731,7 +1861,7 @@ def classify(j, props):
     st = j["state"] or {}
     unit = st.get("unit")
     res = props.get("Result", "")
-    if props.get("LoadState") == "not-found" and st.get("start_unconfirmed"):
+    if props.get("LoadState") == "not-found" and st.get("start_unconfirmed") and not fault("unconfirmed-as-interrupted"):
         start_failed(j, "the unit did not start (systemd-run failed and systemd does not know it)")
         return
     if os.path.exists(os.path.join(j["dir"], "logcap")):
@@ -1844,6 +1974,8 @@ def check_running(j, first, cap):
 def note_active(j, props):
     """The first pass that sees a job's unit active: its activation time (the end bound counts from it, §3.2), its
     cgroup (for the sampler, never guessed), and start_unconfirmed cleared (an adopted job kept it forever before)."""
+    if fault("no-note-active"):
+        return
     st = j["state"] or {}
     g = grant_of(j)
     try:
@@ -1865,20 +1997,24 @@ def note_active(j, props):
     j["state"] = st
 
 
-def step(first=False, stop=None):
+def step(first=False, stop=None, started=None):
     """One pass of the runner under the lock. -> True while a job is queued or running (held jobs alone do not keep the
     node busy, §20.6). A failure with one job is journalled and the pass goes on with the others (review: durability
     4). Once STOP[0] is set (SIGTERM), no job is started. What starts is decided by sched.plan() from the grants in
-    the running jobs' state.json, rebuilt every pass (scheduler.md §3.2, §9)."""
+    the running jobs' state.json, rebuilt every pass (scheduler.md §3.2, §9). STARTED: the default this runner
+    started with; once the default is another (an update moved it), nothing more starts until the runner restarts."""
     with Lock():
         jobs = scan_jobs()
         node = node_info()
         cap_log = log_cap_bytes(node)
-        running = []
+        running, drain = [], set()
         for j in jobs:
             try:
                 rebuild_state(j)
                 st = j["state"] or {}
+                if j["result"] and draining(j):
+                    drain.add(j["id"])
+                    continue
                 if j["result"] or st.get("state") != "running":
                     continue
                 if check_running(j, first, cap_log):
@@ -1909,13 +2045,14 @@ def step(first=False, stop=None):
                 if fault("runner-pass-aborts"):
                     raise
                 journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
-        busy = bool(running or any(not it["held"] for it in w))
+        busy = bool(running or drain or any(not it["held"] for it in w))
+        write_needed([j["job"].get("mu_version") for j in jobs if not j["result"]])
         if stop and stop[0]:
             return busy
         cap = capacity(node)
         disk = disk_block(node)
-        pl = sched.plan(time.monotonic(), cap, running_info(jobs, here_only=fault("grant-in-memory-only")),
-                        queue_items(w, cap), disk)
+        pl = safe_plan(time.monotonic(), cap, running_info(jobs, here_only=fault("grant-in-memory-only"), drain=drain),
+                       queue_items(w, cap), disk)
         by_id = {j["id"]: j for j in jobs}
         if disk:   # the head says why it waits (as before), once
             head = next((it["j"] for it in w if not it["held"]), None)
@@ -1926,8 +2063,10 @@ def step(first=False, stop=None):
                 event(head["dir"], note)
         for jid, e in pl["fail"]:
             try:
-                write_result(by_id[jid], "failed", "runner", note="too-big: %s (the node's capacity was lowered after "
-                             "the job was accepted)" % e, error="too-big")
+                kind = getattr(e, "error", "too-big")
+                write_result(by_id[jid], "failed", "runner", note="%s: %s%s" % (kind, e, " (the node's capacity was lowered "
+                             "after the job was accepted)" if kind == "too-big" and "largest a job" not in str(e) else ""),
+                             error=kind)
             except Exception:  # noqa
                 journal("runner: job %s: %s" % (jid, traceback.format_exc().replace("\n", " | ")[-800:]))
         if pl["starts"]:
@@ -1936,9 +2075,15 @@ def step(first=False, stop=None):
                              % start_lock_path())
                 return busy
             try:
+                dv = default_version()
+                if started and dv and dv != started and not fault("starts-after-switch"):
+                    # the update moved the default: the next start is the new runner's (review 2026-11-15)
+                    journal_once("switch", "runner: the default is now μ %s: no job starts before the restart" % dv)
+                    return busy
                 for x in pl["starts"]:
                     if stop and stop[0]:
                         break
+                    refresh_start_lock()
                     try:
                         if start_job(by_id[x["id"]], x["grant"], x["S"]):
                             busy = True
@@ -1997,6 +2142,9 @@ def check_invariants(cap):
     return bad
 
 
+START_LOCK_STALE_S = 960      # a start lock not refreshed for this long is stale, whoever holds it (MU_SWITCH_WAIT_S + 60)
+
+
 def start_lock_path():
     return os.path.join(mu_home(), "state", "start.lock")
 
@@ -2011,37 +2159,108 @@ def pid_alive(pid):
         return True
 
 
+def proc_start(pid):
+    """A process's start time (/proc/PID/stat field 22, clock ticks since boot): with the boot id, it tells the process
+    that wrote a lock from a later one given the same pid (or a thread id, which kill(0) also accepts). '' where there
+    is no /proc (macOS)."""
+    try:
+        t = read_text("/proc/%d/stat" % pid)
+        return t[t.rindex(")") + 2:].split()[19] if t else ""
+    except (ValueError, IndexError):
+        return ""
+
+
+def lock_identity():
+    """What a start lock's pid file holds: pid, boot id, start time (bin/mu au_take_start_lock writes the same)."""
+    return "%d\n%s\n%s\n" % (os.getpid(), boot_id(), proc_start(os.getpid()))
+
+
+def start_lock_holder(d):
+    """-> (state, why): "free" (no lock), "live" (held by a live process of this boot that wrote it and refreshed it
+    within START_LOCK_STALE_S), "taking" (made in the last minute, its pid not written yet) or "stale" (the lock of
+    a process that is gone: another boot, its pid now someone else's, or not refreshed for too long; review
+    2026-11-15: a lock left by a killed runner or updater stopped every start and every switch)."""
+    if not os.path.isdir(d):
+        return "free", ""
+    f = os.path.join(d, "pid")
+    lines = read_text(f).split("\n")
+    pid = lines[0].strip()
+    try:
+        age = time.time() - os.stat(f if os.path.exists(f) else d).st_mtime
+    except OSError:
+        age = 0
+    if not pid.isdigit():
+        return ("taking", "") if age < 60 else ("stale", "no pid written for %d s" % age)
+    if not pid_alive(int(pid)):
+        return "stale", "pid %s has exited" % pid
+    if fault("start-lock-pid-only"):   # the first form: a live pid holds the lock, whoever it now is
+        return "live", ""
+    b = lines[1].strip() if len(lines) > 1 else ""
+    if b and b != "unknown" and boot_id() != "unknown" and b != boot_id():
+        return "stale", "from another boot"
+    t = lines[2].strip() if len(lines) > 2 else ""
+    now_t = proc_start(int(pid))
+    if t and now_t and t != now_t:
+        return "stale", "pid %s is now another process" % pid
+    if age > START_LOCK_STALE_S:
+        return "stale", "not refreshed for %d s" % age
+    return "live", ""
+
+
 def take_start_lock():
     """The lock an update takes to move the default between two starts (scheduler.md §9 "Version switch"; bin/mu
-    au_switch): a folder with the holder's pid. The runner holds it while it starts jobs; a stale one is removed."""
+    au_switch): a folder with the holder's identity. The runner holds it while it starts jobs, refreshing it before
+    each start; a stale one is removed (journalled)."""
+    if fault("runner-ignores-start-lock"):
+        return True
     d = start_lock_path()
-    os.makedirs(os.path.dirname(d), exist_ok=True)
+    try:
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+    except OSError:
+        return True   # no MU_HOME state folder (tests): nothing to coordinate with
     for _ in range(3):
         try:
             os.mkdir(d)
             with open(os.path.join(d, "pid"), "w") as f:
-                f.write("%d\n" % os.getpid())
+                f.write(lock_identity())
             return True
         except FileExistsError:
-            pid = read_text(os.path.join(d, "pid")).strip()
-            if pid.isdigit() and int(pid) != os.getpid() and pid_alive(int(pid)):
+            state, why = start_lock_holder(d)
+            pid = read_text(os.path.join(d, "pid")).split("\n")[0].strip()
+            if state == "live" and pid != str(os.getpid()):
                 return False
-            try:
-                age = time.time() - os.stat(d).st_mtime
-            except OSError:
-                age = 0
-            if not pid and age < 60:
-                return False   # being taken right now
+            if state == "taking":
+                return False
+            if state == "stale":
+                journal("runner: removed a stale start lock (%s)" % why)
             shutil.rmtree(d, ignore_errors=True)
         except OSError:
-            return True   # no MU_HOME state folder (tests): nothing to coordinate with
+            return True
     return False
+
+
+def refresh_start_lock():
+    """Before each start: the lock's age shows the runner still works through its starts."""
+    try:
+        os.utime(os.path.join(start_lock_path(), "pid"))
+    except OSError:
+        pass
 
 
 def drop_start_lock():
     d = start_lock_path()
-    if read_text(os.path.join(d, "pid")).strip() == str(os.getpid()):
+    if read_text(os.path.join(d, "pid")).split("\n")[0].strip() == str(os.getpid()):
         shutil.rmtree(d, ignore_errors=True)
+
+
+def clear_stale_start_lock():
+    """At the runner's start: a lock nobody live holds (a runner or updater killed while holding it) goes now."""
+    d = start_lock_path()
+    state, why = start_lock_holder(d)
+    if state == "stale" or (state == "live" and read_text(os.path.join(d, "pid")).split("\n")[0].strip() ==
+                            str(os.getpid())):
+        shutil.rmtree(d, ignore_errors=True)
+        journal("runner: removed a stale start lock at start (%s)" % (why or "its own pid"))
 
 
 def recover():
@@ -2185,11 +2404,12 @@ def run_runner():
     if (node.get("selftest") or {}).get("boot_id") != boot_id():
         selftest()
     recover()
+    clear_stale_start_lock()
     first = True
     n = 0
     while not stop[0]:
         try:
-            busy = step(first, stop)
+            busy = step(first, stop, started)
         except Exception:  # noqa
             journal("runner error: %s" % traceback.format_exc().replace("\n", " | ")[-1500:])
             busy = True

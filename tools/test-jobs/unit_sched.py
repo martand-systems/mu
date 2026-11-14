@@ -114,9 +114,16 @@ def t_sched():
     pl = sched.plan(now, cap, [run("A", [0, 1], 512 * MI, 180, now - 10)],
                     [{"id": "H", "req": req(4, 512 * MI)}, {"id": "q", "req": quick()}])
     check("an express job does not change the head's starts_by and takes nothing from the pool" + flag("express-from-pool"),
-          ids(pl) == ["q"] and pl["starts_by"]["H"] == S and pl["free"]["cores"] == 2, pl)
+          ids(pl) == ["q"] and pl["starts_by"].get("H") == S and pl["free"]["cores"] == 2, pl)
     r = sched.resolve({"sched": 1, "limits": {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60}}, cap)
     check("explicit --cores 1 --mem 256M --time 1m is not express" + flag("express-by-size"), r["class"] == "normal", r)
+    try:
+        sched.resolve({"sched": 1, "limits": {"time_s": 10 ** 400}}, cap)
+        tb = None
+    except sched.TooBig as e:
+        tb = e
+    check("a --time past MAX_TIME_S (365 days) is too-big in resolve(): the plan never adds a huge number to a float" +
+          flag("no-size-bounds"), tb is not None and "--time" in str(tb), tb)
     r = sched.resolve({"sched": 1, "limits": {"quick": True}}, cap)
     check("--quick is express: 1 core, 512 MiB, 10 min" + flag("no-express"),
           r["class"] == "express" and (r["cores"], r["mem_bytes"], r["time_s"]) == (1, 512 * MI, 600), r)
@@ -268,7 +275,7 @@ def t_sched_sim(steps=3000, seed=20261115):
     cap = cap_of(cores=8, mem=16 * G, rex=1 * G)
     now = 0.0
     queue, running, done = [], {}, set()
-    first_S, violations, head_late, held_started = {}, [], [], []
+    first_S, violations, head_late, held_started, no_promise = {}, [], [], [], []
     next_arrival = 0.0
     n_jobs = 0
     counts = {"starts": 0, "backfilled": 0, "express": 0, "requeued": 0, "acts": 0, "cancels": 0}
@@ -339,6 +346,11 @@ def t_sched_sim(steps=3000, seed=20261115):
         h = pl["head"]
         if h and pl["starts_by"].get(h) is not None:
             first_S.setdefault(h, pl["starts_by"][h])
+        # no grant-less job, no disk limit, no unit past its bound here: whenever a job that may start does not, the
+        # plan names a head and promises it a start (a scheduler without the reservation promises nothing)
+        left_ = {q["id"] for q in w if not q["held"]} - {x["id"] for x in pl["starts"]}
+        if left_ and (not h or pl["starts_by"].get(h) is None):
+            no_promise.append((step, sorted(left_)[:3], h))
         for x in pl["starts"]:
             q = next(qq for qq in queue if qq["id"] == x["id"])
             if q["held"]:
@@ -363,6 +375,8 @@ def t_sched_sim(steps=3000, seed=20261115):
     check("simulation: every head starts no later than the first starts_by announced for it" + flag("margin-zero") +
           flag("extra-not-reduced") + flag("express-from-pool"), not head_late, head_late[:5])
     check("simulation: no held job ever starts" + flag("hold-ignored"), not held_started, held_started[:5])
+    check("simulation: while jobs wait, there is a head with a starts_by" + flag("no-head-reservation"),
+          not no_promise, no_promise[:5])
     check("simulation: no job waits forever (all ended or held when arrivals stop)", not left and not running,
           (left[:5], list(running)[:5]))
     check("simulation: backfill and the express lane were exercised", counts.get("backfilled", 0) > 20 and
@@ -382,6 +396,7 @@ if grep -q "^$u active" "$STUB_DIR/units" 2>/dev/null; then echo "Unit $u was al
 [ -f "$STUB_DIR/run-nocreate" ] || echo "$u active success" >> "$STUB_DIR/units"
 echo "start $u" >> "$STUB_DIR/calls"
 printf '%s\n' "$@" > "$STUB_DIR/args-$u"
+for a in "$@"; do case "$a" in --setenv=MU_JOB_DIR=*) cp "${a#--setenv=MU_JOB_DIR=}/state.json" "$STUB_DIR/state-at-run-$u" ;; esac; done
 rc=$(cat "$STUB_DIR/run-rc" 2>/dev/null || echo 0); [ "$rc" = 0 ] || echo "Failed to start transient service unit" >&2
 exit $rc
 """
@@ -461,6 +476,9 @@ def t_sched_runner(base, stubs_text):
     def S(jid):
         return node.load_job(jid)["state"] or {}
 
+    def at_run(jid):   # the job's state.json as it was when systemd-run was called
+        return durable.read_record(os.path.join(st["stub"], "state-at-run-mu-job-%s.service" % jid)) or {}
+
     def violation():
         f = os.path.join(node.ROOT, "state", "invariant-violation")
         return open(f).read() if os.path.exists(f) else ""
@@ -487,6 +505,11 @@ def t_sched_runner(base, stubs_text):
           and "--setenv=PYTHON_CPU_COUNT=2" in a0 and "--setenv=CCX_NPROC_EQUATION_SOLVER=2" in a0 and
           any(x.startswith("--setenv=TMPDIR=") and x.endswith("/tmp") for x in a0) and
           os.path.isdir(os.path.join(node.job_dir(J[0]), "tmp")), a0)
+    r0 = at_run(J[0])
+    check("the grant is in state.json before systemd-run is called (running, its CPUs, start_unconfirmed): a unit "
+          "never exists without it (e2e Q16, unit level)" + flag("grant-after-systemd-run"),
+          r0.get("state") == "running" and (r0.get("grant") or {}).get("cpus") == g0.get("cpus") and
+          r0.get("start_unconfirmed") is True, r0)
 
     # 2. a restart of the runner: grants come back from state.json, nothing is over-committed
     node.STARTED_HERE.clear()
@@ -516,9 +539,13 @@ def t_sched_runner(base, stubs_text):
     node.step(first=True)
     with open(os.path.join(st["stub"], "units"), "w") as f:
         f.write("")
-    for i in range(3):
+    for i in range(3):   # (makedirs: under the fault one-at-a-time only the first of them started)
+        os.makedirs(os.path.join(node.job_dir(J[i]), "tmp"), exist_ok=True)
         open(os.path.join(node.job_dir(J[i]), "tmp", "scratch"), "w").close()
     mkjob(J[4], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 600})
+    for i in range(3):   # attempt 1's figures from the sampler
+        with open(os.path.join(node.job_dir(J[i]), "usage.json"), "w") as f:
+            json.dump({"cpu_s": 99.0, "mem_peak_bytes": 1 << 30}, f)
     for i in range(3):   # the same as the runner adopting nothing: the units are gone
         node.interrupted(node.load_job(J[i]), "the node stopped")
     w = [x["id"] for x in node.walk_jobs(node.scan_jobs())]
@@ -526,6 +553,8 @@ def t_sched_runner(base, stubs_text):
           w[:3] == J[:3] and all(S(J[i]).get("attempt") == 2 and not S(J[i]).get("grant") for i in range(3)), w)
     check("their TMPDIR is gone before the re-run" + flag("keep-tmp-on-rerun"),
           not any(os.path.exists(os.path.join(node.job_dir(J[i]), "tmp")) for i in range(3)))
+    check("and attempt 1's sampled usage: attempt 2's result carries its own figures" + flag("keep-usage-on-rerun"),
+          not any(os.path.exists(os.path.join(node.job_dir(J[i]), "usage.json")) for i in range(3)))
 
     # 5. a start whose unit never came (runner killed between grant and systemd-run): back to the queue, grant dropped
     fresh("unconfirmed")
@@ -537,10 +566,11 @@ def t_sched_runner(base, stubs_text):
     mkjob(J[1], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 600})
     node.step(first=True)
     s1 = S(J[0])
-    check("a grant written before a systemd-run that never ran: the job is start_failed, back in the queue, grant "
-          "dropped, never counted twice", s1.get("state") in ("queued", "running") and
-          (s1.get("state") == "queued" and not s1.get("grant") or J[0] in started()) and not violation(),
-          (s1, started(), violation()))
+    check("a grant written before a systemd-run that never ran (the runner died between): a failed start, not an "
+          "attempt; back in the queue and started again once, in this pass, on the cores its stale grant had; the "
+          "4-core job waits" + flag("unconfirmed-as-interrupted"),
+          started() == [J[0]] and s1.get("attempt") == 1 and s1.get("start_failures") == 1 and
+          S(J[1]).get("state") == "queued" and not violation(), (s1, started(), violation()))
 
     # 6. the backfill re-check after a slow checkout
     fresh("recheck")
@@ -553,6 +583,25 @@ def t_sched_runner(base, stubs_text):
     check("a backfilled job whose checkout outlasts its slack is not started: nothing written, still queued" +
           flag("stamp-before-checkout"), ok is False and S(J[0]).get("state") == "queued" and
           not S(J[0]).get("grant") and started() == [], (ok, S(J[0]), started()))
+
+    # 6b. the first pass that sees the unit active records its activation (the end bound counts from it, e2e Q21),
+    # its cgroup, and clears start_unconfirmed (an adopted start whose systemd-run reply was lost)
+    fresh("active")
+    d = mkjob(J[0], two)
+    t0 = time.monotonic()
+    durable.write_record(os.path.join(d, "state.json"), {
+        "state": "running", "attempt": 1, "unit": "mu-job-%s.service" % J[0], "start_unconfirmed": True,
+        "started_epoch": time.time(), "grant": {"cores": 2, "cpus": [0, 1], "mem_bytes": 512 * MI, "time_s": 600,
+                                                "class": "normal", "start_mono": t0 - 50, "boot_id": node.boot_id()}})
+    unit_line(J[0], "active", "success %d" % int((t0 - 20) * 1e6))
+    node.step(first=True)
+    s1 = S(J[0])
+    g1 = s1.get("grant") or {}
+    check("the first pass that sees the unit active: active_mono from systemd, the end bound from it (not from the "
+          "start + 60 s), the cgroup recorded, start_unconfirmed cleared" + flag("no-note-active"),
+          abs((g1.get("active_mono") or 0) - (t0 - 20)) < 0.01 and
+          abs(sched.end_bound(g1) - (t0 - 20 + 600 + sched.SLACK_S)) < 0.01 and
+          s1.get("cgroup", "").endswith(J[0] + ".service") and "start_unconfirmed" not in s1, s1)
 
     # 7. a running job without a grant (the previous release) holds the node; express still runs
     fresh("grantless")
@@ -594,7 +643,7 @@ def t_sched_runner(base, stubs_text):
     w = [(x["id"], x["held"]) for x in node.walk_jobs(node.scan_jobs())]
     node.step()
     check("queue.json zeroed: the walk is FIFO within bands, holds and bands kept, the file moved aside once" +
-          flag("holds-in-order-file-only"),
+          flag("holds-in-order-file-only") + flag("bands-ignored"),
           w == [(J[2], False), (J[0], True), (J[3], False)] and J[0] not in started() and
           any(x.startswith("queue.json.unreadable") for x in os.listdir(node.ROOT)), (w, started()))
     rel = serve(node, "ci-owner", "cancel", "id=" + J[0])
@@ -645,6 +694,234 @@ def t_sched_runner(base, stubs_text):
               "not-queued": (nr, ("ok", "error", "message", "state"))}
     miss = {k: [f for f in fields if f not in a] for k, (a, fields) in shapes.items()}
     check("answer shapes: every field of §20.9 present" + flag("drop-field"), not any(miss.values()), miss)
+    ur = serve(node, "ci-other", "priority", "id=" + E, "class=urgent", "from=p2-0123456789ab", rc=77)
+    audit = open(os.path.join(node.ROOT, "audit.log")).read()
+    check("audit lines say what was asked (a refused priority: class=urgent) and a band change as old->new" +
+          flag("audit-terse"), ur.get("error") == "not-allowed" and
+          "queue: refused priority id=%s class=urgent by=ci-other" % E in audit and
+          ("queue: priority id=%s class=high by=ci-owner" % C) in audit and "band normal->high" in audit,
+          [x for x in audit.splitlines() if "queue:" in x][-4:])
+    cn = serve(node, "ci-other", "cancel", "id=" + B, rc=77)
+    check("cancel follows the same rule: another workstation's key cannot cancel the owner's job (exit 77)" +
+          flag("no-cancel-auth"), cn.get("error") == "not-allowed" and S(B).get("state") == "queued" and
+          not os.path.exists(os.path.join(node.job_dir(B), "cancel")), cn)
+    cs = serve(node, "ci-other", "cancel", "id=" + E)
+    co = serve(node, "ci-owner", "cancel", "id=" + D)
+    check("  its own job it may cancel; an owner key any job", cs.get("state") == "cancelled" and
+          co.get("state") == "cancelled", (cs, co))
+
+    # 10. hostile specs (security review 2026-11-15): sizes that overflow, free text that forges lines or crashes
+    fresh("hostile")
+    base_spec = {"schema": 1, "job_id": J[0], "project_id": "p1-0123456789ab", "snapshot": "a" * 40, "tree": "b" * 40,
+                 "head": "c" * 40, "mu_version": "v1", "argv": ["true"], "cwd": "", "outputs": [], "sched": 1,
+                 "limits": {"cores": None, "mem_bytes": None, "time_s": None}}
+
+    def refused(**kw):
+        spec = json.loads(json.dumps(base_spec))
+        for k, v in kw.items():
+            if k.startswith("limits_"):
+                spec["limits"][k[7:]] = v
+            else:
+                spec[k] = v
+        try:
+            node.check_spec(spec, J[0])
+            return None
+        except node.NodeError as e:
+            return e.error
+    r1 = refused(limits_time_s=10 ** 400)
+    r2 = refused(limits_mem_bytes=1 << 60)
+    check("check_spec: limits.time_s = 10**400 and mem_bytes = 2**60 are bad-spec" + flag("no-size-bounds"),
+          r1 == "bad-spec" and r2 == "bad-spec", (r1, r2))
+    r3, r4, r5 = refused(project={"a": 1}), refused(submitted="x"), refused(submitted={"host": ["h"]})
+    r6 = refused(name="ok\n  1 urgent FORGED LINE \x1b[2J")
+    check("check_spec: a project that is not a string, a submitted that is not an object, a host that is not a string "
+          "are bad-spec; a name with a newline (an older workstation's multi-line command) is accepted" +
+          flag("no-display-check"), (r3, r4, r5, r6) == ("bad-spec", "bad-spec", "bad-spec", None), (r3, r4, r5, r6))
+    stored = node.display_fields(dict(base_spec, name="ok\n  1 urgent FORGED \x1b[2J\u202e", project="p\r",
+                                      submitted={"host": "h\x07", "user": "u", "at": "t"}))
+    check("the stored spec's name, project, host carry no control or format character" + flag("no-display-check"),
+          not any(c in json.dumps(stored, ensure_ascii=False) for c in "\n\r\x1b\x07\u202e") and
+          stored["name"].startswith("ok "), stored)
+    # jobs already on disk (or from a node without these checks): the plan, hello and queue still work
+    mkjob(J[0], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 10 ** 400})
+    mkjob(J[1], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+    d2 = mkjob(J[2], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60}, key="ci-other", project="p2-0123456789ab")
+    jj = durable.read_record(os.path.join(d2, "job.json"))
+    jj.update(name="ok\n  1 urgent FORGED LINE \x1b[2J", project={"a": 1}, submitted="x")
+    durable.write_record(os.path.join(d2, "job.json"), jj)
+    try:
+        node.step(first=True)
+        err = None
+    except Exception as e:  # noqa
+        err = "%s: %s" % (type(e).__name__, e)
+    r0 = node.load_job(J[0])["result"] or {}
+    check("a job on disk with time_s 10**400: the pass goes on, that job fails too-big, the next starts" +
+          flag("no-size-bounds"), err is None and r0.get("state") == "failed" and r0.get("error") == "too-big" and
+          J[1] in started(), (err, r0.get("note"), started()))
+    ql = serve(node, "ci-owner", "queue")
+    txt = json.dumps(ql, ensure_ascii=False)
+    check("mu queue with a job whose name forges lines, project is an object and submitted a string: answered, the "
+          "free text without control characters" + flag("no-display-check"),
+          ql.get("ok") is True and "\n" not in txt.replace("\\n", "") and "\x1b" not in txt and
+          any(x["job_id"] == J[2] for x in ql.get("jobs", [])), ql)
+
+    # 11. the start lock (scheduler.md §9 "Version switch"; review 2026-11-15): an update holds it while it moves the
+    # default; a lock left by a process that is gone (killed, another boot, its pid reused) must not stop every start
+    fresh("startlock")
+    real_boot = node.boot_id
+    node.boot_id = lambda: "boot-this"
+    lk = node.start_lock_path()
+    holder = os.getppid()   # a live process that is not this one (the shell that runs the tests)
+
+    def lock(pid, boot="boot-this", start=None, age=0):
+        os.makedirs(lk, exist_ok=True)
+        with open(os.path.join(lk, "pid"), "w") as f:
+            f.write("%d\n%s\n%s\n" % (pid, boot, node.proc_start(pid) if start is None else start))
+        if age:
+            t = time.time() - age
+            os.utime(os.path.join(lk, "pid"), (t, t))
+    try:
+        mkjob(J[0], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+        lock(holder)
+        node.step(first=True)
+        held = started() == [] and os.path.isdir(lk)
+        shutil.rmtree(lk)
+        node.step()
+        check("the runner starts nothing while an update holds the start lock (a live process of this boot); once it "
+              "is gone the job starts" + flag("runner-ignores-start-lock"), held and started() == [J[0]],
+              (held, started()))
+        mkjob(J[1], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+        lock(holder, boot="boot-before-the-restart")
+        node.step()
+        other_boot = J[1] in started() and not os.path.isdir(lk)
+        mkjob(J[2], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+        lock(holder, age=node.START_LOCK_STALE_S + 60)
+        node.step()
+        old = J[2] in started()
+        check("a lock naming a live pid but written in another boot, or not refreshed for START_LOCK_STALE_S, is stale: "
+              "removed, and the jobs start" + flag("start-lock-pid-only"), other_boot and old, (other_boot, old, started()))
+        if node.proc_start(holder):   # Linux: the pid's start time differs (a reused pid, or a thread id)
+            mkjob(J[3], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+            lock(holder, start="1")
+            node.step()
+            check("a lock whose pid is now another process (start time differs) is stale" + flag("start-lock-pid-only"),
+                  J[3] in started(), started())
+        lock(holder, boot="boot-before-the-restart")
+        node.clear_stale_start_lock()
+        gone = not os.path.isdir(lk)
+        lock(holder)
+        node.clear_stale_start_lock()
+        check("at the runner's start a stale lock is removed and a live one kept" + flag("start-lock-pid-only"),
+              gone and os.path.isdir(lk), gone)
+        shutil.rmtree(lk)
+        # the default moved under the runner (au_switch dropped the lock right after): nothing more starts before
+        # the runner restarts on the new default
+        mkjob(J[4], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
+        os.makedirs(os.environ["MU_HOME"], exist_ok=True)
+        with open(os.path.join(os.environ["MU_HOME"], "default"), "w") as f:
+            f.write("v2\n")
+        node.step(started="v1")
+        check("once the default is not the one the runner started with, it starts nothing more (the new runner will)" +
+              flag("starts-after-switch"), J[4] not in started() and not os.path.isdir(lk), started())
+        node.step(started="v2")
+        check("  the runner on the new default starts it", J[4] in started(), started())
+    finally:
+        node.boot_id = real_boot
+
+    # 15. the parts of §20 the e2e rows Q23, Q24, Q26 leave out: move --after and --back, a held job as the
+    # reference, a re-run passed by --front; an interrupted low job back at the front of low; one key, no owners file
+    fresh("moves")
+    mkjob(J[0], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 600})
+    for x in J[1:6]:
+        mkjob(x, {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60})
+    node.step(first=True)   # J0 runs
+    A, B, C, D, E = J[1:6]
+    fr = "from=p1-0123456789ab"
+
+    def order():
+        return [x["id"] for x in node.walk_jobs(node.scan_jobs())]
+    serve(node, "ci-owner", "move", "id=" + A, "after=" + C, fr)
+    o1 = order()
+    serve(node, "ci-owner", "move", "id=" + B, "to=back", fr)
+    o2 = order()
+    serve(node, "ci-owner", "hold", "id=" + D, fr)
+    mh = serve(node, "ci-owner", "move", "id=" + E, "before=" + D, fr)
+    o3 = order()
+    check("move A --after C: B C A D E; B --back: C A D E B; E --before the held D: C A E D B" +
+          flag("walk-by-accepted-ns"), o1 == [B, C, A, D, E] and o2 == [C, A, D, E, B] and o3 == [C, A, E, D, B] and
+          mh.get("changed") is True, (o1, o2, o3, mh))
+    node.interrupted(node.load_job(J[0]), "the node stopped")   # J0: attempt 2, at the front
+    o4 = order()
+    serve(node, "ci-owner", "move", "id=" + B, "to=front", fr)
+    o5 = order()
+    check("an interrupted job goes to the front (J0 C A E D B); a later move --front passes it (B J0 C ...): the "
+          "re-run is a place in the order, not a tier" + flag("walk-by-accepted-ns"),
+          o4 == [J[0], C, A, E, D, B] and o5 == [B, J[0], C, A, E, D], (o4, o5))
+    fresh("lowband")
+    mkjob(J[0], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 600}, band="low")
+    node.step(first=True)   # the low job runs
+    mkjob(J[1], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60}, band="low")
+    mkjob(J[2], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60})
+    node.interrupted(node.load_job(J[0]), "the node stopped")
+    o6 = order()
+    check("an interrupted low job goes back to the front of low: behind the normal job, ahead of the other low one" +
+          flag("requeue-new-ns"), o6 == [J[2], J[0], J[1]], o6)
+    keys = os.path.join(base, "keys1")
+    with open(keys, "w") as f:
+        f.write("restrict ssh-ed25519 AAAAx avi-mac\n")
+    old = dict((k, os.environ.get(k)) for k in ("MU_NODE_OWNERS", "MU_NODE_KEYS"))
+    os.environ.update(MU_NODE_OWNERS=os.path.join(base, "no-owners-file"), MU_NODE_KEYS=keys)
+    one = node.owners()
+    with open(keys, "a") as f:
+        f.write("restrict ssh-ed25519 AAAAy ci-other\n")
+    two = node.owners()
+    for k, v in old.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    check("no owners file and one key: that key is the owner; two keys: none" + flag("owner-from-node-json"),
+          one == ["avi-mac"] and two == [], (one, two))
+
+    # 13. a job whose shim wrote its result keeps its grant until its unit has ended (it may still be stopping
+    # what the job left behind; review 2026-11-15)
+    fresh("drain")
+    mkjob(J[0], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60})
+    node.step(first=True)
+    node.write_result(node.load_job(J[0]), "succeeded", "shim", exit_code=0)
+    mkjob(J[1], {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60})
+    busy = node.step()
+    early = J[1] in started()
+    unit_line(J[0], "inactive", "success")
+    node.step()
+    check("the next whole-node job waits while the finished job's unit is still stopping, and starts once it ended" +
+          flag("free-on-result"), busy and not early and J[1] in started() and not violation(), (early, started()))
+
+    # 14. mu compute update: --force (auto-update off, a release's failed tries) only for an owner key
+    fresh("update")
+    open(os.path.join(st["stub"], "units"), "w").close()
+    u1 = serve(node, "ci-other", "update")
+    a1 = open(os.path.join(st["stub"], "args-mu-update.service")).read().split()
+    open(os.path.join(st["stub"], "units"), "w").close()
+    u2 = serve(node, "ci-owner", "update")
+    a2 = open(os.path.join(st["stub"], "args-mu-update.service")).read().split()
+    check("mu compute update by another workstation's key runs `mu autoupdate run` without --force; by the owner's "
+          "with it" + flag("update-always-force"), u1.get("forced") is False and "--force" not in a1 and
+          a1[-2:] == ["autoupdate", "run"] and u2.get("forced") is True and a2[-1] == "--force", (u1, a1[-3:], a2[-3:]))
+
+    # 12. the versions unfinished jobs need, for bin/mu's gc (review 2026-11-15): a held job alone leaves the node idle
+    fresh("needed")
+    for jid, ver, state in ((J[0], "v2026.11.8", "held"), (J[1], "v2026.11.9", "queued")):
+        d = mkjob(jid, {"cores": 4, "mem_bytes": 256 * MI, "time_s": 60}, state=state)
+        jj = durable.read_record(os.path.join(d, "job.json"))
+        durable.write_record(os.path.join(d, "job.json"), dict(jj, mu_version=ver))
+    node.step(first=True)
+    node.write_result(node.load_job(J[1]), "succeeded", "shim", exit_code=0)
+    unit_line(J[1], "inactive", "success")
+    busy = node.step()
+    need = open(node.needed_path()).read() if os.path.exists(node.needed_path()) else None
+    check("with only a held job left the node is idle for updates, and $MU_HOME/state/needed-versions lists its "
+          "version for gc" + flag("no-needed-versions"), busy is False and need == "v2026.11.8\n", (busy, need))
 
 
 def serve(node, key, verb, *args, rc=0):
