@@ -574,7 +574,9 @@ expires, answer_by, confirm_by, version`.
 `too-many-invites`, `too-many-clients`, `inviter-unknown`, `role-mismatch`; 410 `invite-expired`, `invite-aborted`,
 `invite-locked`; 413 `too-large`; 429 `rate-limited` (with `Retry-After`); 500 `internal`; 503 `store-unwritable`,
 `store-damaged`. A right claim token on a terminal invite answers its state (410, or 409 `invite-used` when finished,
-unconfirmed or held by another session).
+unconfirmed or held by another session). The 409 `invite-used` answer to a **right** claim token also carries `offer`
+and `offer_mac`: the refused claimer proved the code, checks the offer's MAC and needs its digest for its contest
+(§5.2, §12.1). A wrong token never sees it.
 
 ### 6.3 Checks at invite creation
 
@@ -1198,25 +1200,38 @@ Every guarded check also runs with its fault put in and must fail, as in the job
 `mu-relayd` **only when built with `-tags faults`** (the production image is built without the tag, so it has no fault
 code at all); `MU_PAIR_FAULT` in `pair.py` (as `MU_JOBS_FAULT`); `S4_BREAK` in the replica.
 
-### 13.1 `mu-relayd` unit tests (`go test -race ./...` in `relay/control`; CI job in `s4-relay.yml`)
+### 13.1 `mu-relayd` unit tests (`relay/control`, `go test -race ./...`; CI job `control` in `s4-relay.yml`)
+
+Built; `relay/control/must-fail.sh` runs each fault below with `-tags faults` and checks that every test named for it
+fails. With `MU_RELAYD_CHISEL` set (CI downloads the pinned chisel 1.12.0) the integration test runs mu-relayd and the
+real chisel on loopback.
 
 | Test | Passes when | Fault → must fail |
 |---|---|---|
-| Rules equal the entrypoint's | the merged file for static-only input equals `entrypoint.sh`'s `users.json` for the same `RELAY_CLIENTS`, for every vector of `tools/s4/test-config.sh` (one shared fixture file) | `unanchored-rule` (drops `^`/`$`) |
-| Dynamic rules | compute → one `R:` rule on its port; workstation → its ports only; refused: names, ports, passwords outside the entrypoint's rules | `wide-ports` (workstation rule allows 7001–7999) |
-| Unique names and ports in the merged file | a dynamic client overrides a static one of the same role only; a different role, or a port another compute client has, is refused | `override-any-role`, `no-port-check` |
-| Tombstones | a deleted static client is absent from the merged file | `ignore-tombstones` |
-| Store writes | 200 writes killed at random points (a child process, `SIGKILL`) always load as the old or the new generation; `.prev` is used when `state.json` is missing | `no-prev` (rename without keeping `.prev`) |
-| Damaged store | both files garbage → static clients only, 503 `store-damaged`, `reset` works | `damaged-starts-empty` |
-| State machine | every transition of §5.4 and every refused one, with a fake clock for each deadline | `reclaim-after-answer`, `no-expiry` |
-| Lockout | the 5th wrong claim locks; the right claim then gets 410 | `no-lockout` |
-| Contested | a second claim from another address marks `contested` | `no-contest` |
-| Rate limits | 21st unauthenticated request in a minute from one address → 429; another address unaffected; the address is XFF's second-to-last | `xff-first` (takes the client-supplied first entry) |
-| Admin auth | wrong token → 403; 5 failures → 429; constant-time compare (by reading) | `admin-prefix` (compares only the first 8 characters) |
-| Body limits, strict JSON | 16 KiB + 1 → 413; unknown member → 400 | `allow-unknown` |
-| Eviction | a removal or a password change restarts the (fake) chisel once; an addition does not; two changes in 10 s → one restart | `no-evict` |
-| Auth file write | written by rename, never truncated in place; reload delay honoured | `write-in-place` |
-| No secrets in logs | every log line of a full scripted run is free of the token, claim tokens, sessions, passwords and MACs | `log-claim` (logs the claim token) |
+| `TestRulesEqualEntrypoint` | for each vector, the auth file mu-relayd writes from the entrypoint's `static.tsv` equals the legacy entrypoint's `users.json` (sentinel aside) | `unanchored-rule` |
+| `TestRuleSemantics` | the two rule shapes allow exactly their tunnels (Go's `regexp`, as chisel matches); 20 denied addresses | `unanchored-rule`, `wide-ports` |
+| `TestCheckAuthFileRefuses` | the last check refuses `{}`, no sentinel, `""`, `*`, unanchored, other address, port 8080, two rules, none, duplicate keys, a name or a port twice, a short password, wide ports, an opened sentinel | — (direct) |
+| `TestDynamicClientChecks` | `PUT` refuses bad passwords, ports, roles, names, a static compute port; a dynamic workstation's rule lists its ports | `wide-ports`, `no-port-check` |
+| `TestRoleMismatch`, `TestCreateChecks` | a dynamic client never takes a name of another role; every §6.3 check | `override-any-role`, `no-port-check` |
+| `TestInviteNodeEndToEnd` | create, claim, offer, answer (client in the auth file, port granted, no restart), retry, second answer refused, accept, finish, result, `?secret=1` | `no-reload` |
+| `TestOfferAndAnswerUnchanged` | the relay returns offer and answer byte for byte | `tamper-offer`, `tamper-answer` |
+| `TestWrongCodeSameAsUnknownAndLockout` | unknown id and wrong code: identical answers; 20 wrong claims lock; the right code then gets 410 | `no-lockout` |
+| `TestWrongClaimsDoNotLockAClaimedInvite`, `TestPerAddressHoldOff` | a claimed invite is never locked by guesses; 10 wrong claims hold one address off, not another | — |
+| `TestSessionContinuityAndContested` | the same session resumes from any address; another session with the right code, same address: 409, contested, gets the offer, never the session | `reclaim-replaces`, `no-contest` |
+| `TestContestRemovesClient` | a contest with the right code removes the invite's client and restarts chisel; a wrong code cannot contest | `no-contest`, `no-evict` |
+| `TestReplaceSwapsAtAccept` | `replace`: nothing changes at the answer; finish before accept is 409; accept swaps and restarts; abort restores the static client | `replace-at-answer`, `no-evict` |
+| `TestDeadlines` | 30 min unclaimed → expired; claimed, unanswered after 60 min → expired; answered → `unconfirmed` after 24 h with the client kept; purged 24 h later | `no-expiry` |
+| `TestAbort` | the claimer may abort only before answering; reasons are a fixed list; an admin abort removes the client | `no-evict` |
+| `TestDeleteAndLastClient`, `TestAuthFileNeverEmpty` | delete (dynamic, tombstone), the last client refused, the sentinel always there, also with every static client revoked | `allow-empty`, `ignore-tombstones`, `ignore-revoked`, `no-evict` |
+| `TestRevokedAtStart`, `TestShadowedStatic`, `TestPortStrippedWhenComputeDeleted`, `TestGrantsNeverCopyPasswords` | §6.5's rules | `ignore-revoked`, `copy-static-password` |
+| `TestStrictRequests`, `TestUpgradeRefused` | duplicate or unknown members, trailing data → 400; 16 KiB + 1 → 413; an `Upgrade` → 400 | `allow-unknown`, `allow-upgrade` |
+| `TestRateLimitAndAddress`, `TestAddressTableCapped`, `TestAdminAuth` | 31st unauthenticated request → 429 by XFF's second-to-last entry; the table capped; admin: 401, 403 for a token with the right first 8 characters, 10 failures hold the address off | `xff-first`, `admin-prefix` |
+| `TestLongPoll` | a long poll answers within a second of the change | — |
+| `TestNoSecretsInLogs`, `TestErrorTextIsFixed` | no token, claim token, session, password, MAC or sentinel in the logs or `events.log`; fixed error text | `log-secrets`, `evil-text` |
+| `TestStorePersistsAcrossRestart`, `TestStorePrevUsedWhenCurrentIsDamaged`, `TestStoreDamagedAndReset`, `TestEmptyVolumeIsANewStore`, `TestStoreUnwritable` | §6.6 | `no-prev` |
+| `TestStoreSurvivesKills` | 40 writer processes killed at random points: the store always loads, at the last acknowledged generation or one more | — |
+| `TestEvictionRestartsChiselOnceAndBatches`, `TestChiselDyingIsReported` | the supervisor with a stand-in chisel: one restart, batched within 10 s, after its answer went out; chisel's own exit reported | — |
+| `TestIntegrationWithChisel` (real chisel) | I1 the API through `--backend`; I3 a `PUT` client accepted within 3 s, no restart, no tunnel dropped; I4 a grant reaches the new port; I5 a dynamic workstation and compute client get nothing more than their rule; I6 removal cuts the session, refuses the client, the others return; I7 removing the last client refused, an unknown client refused | I3 `no-reload`, I5 `wide-ports`, I6 `no-evict`, I7 `allow-empty` |
 
 ### 13.2 `pair.py` and the Mac commands (`tools/test-pair/`, from `tools/test-jobs/run.sh`; macOS bash 3.2 and Linux)
 
@@ -1233,20 +1248,27 @@ code at all); `MU_PAIR_FAULT` in `pair.py` (as `MU_JOBS_FAULT`); `S4_BREAK` in t
 
 ### 13.3 The S4 replica (`tools/s4/run.sh`, three Traefik versions)
 
-The main relay runs in admin mode (token in its env file), the second ("silent") relay stays in the legacy mode, so both
-paths are tested in every run and all existing rows (A, X, I, R) keep running. New rows:
+The main relay runs in pairing mode (its token made by `gen-credentials.sh admin-token`), the second ("silent") relay
+stays in the legacy mode, so both paths are tested in every run and all existing rows (A, W, E, D, X, L, I, R) keep
+running; X14 now also checks the one mount (the named volume). The P rows run last, from the probe container (an
+outside client through Traefik), with a reference implementation of §4–§5 (`tools/s4/client/pair_ref.py`, standard
+library only) playing the Mac and the PC; `S4_BREAK` runs only the routing, tunnel, access and pairing groups.
 
-| Row | Passes when | Fault (`S4_BREAK`) → must fail |
+| Row | Passes when | `S4_BREAK` → must fail |
 |---|---|---|
-| P1 | `https://relay…/mu/v1/` through Traefik answers the service's JSON; `/health` `OK` with the backend; the silent relay's `/health` still from chisel | `backend` (no `--backend`) |
-| P2 | a client created with `PUT /clients` connects within 2 s; the container's `StartedAt` unchanged | `noreload` (auth file written outside the watched directory) |
-| P3 | a deleted client's open reverse tunnel ends within 5 s, a new connection is refused, the other clients are back within 20 s | `noevict` |
-| P4 | the X rows' negative checks against **dynamic** clients: a workstation reaches no unlisted port, a compute client binds no other port | `wideacl` |
-| P5 | `docker compose up -d --force-recreate` (as a Dokploy deploy) keeps dynamic clients and a half-done invite | `novolume` (the volume line removed) |
-| P6 | a fresh volume is writable by 65532 and an invite can be made; with the image's directory owned by root, `/mu/v1/` answers 503 `store-unwritable` and the static clients' tunnels still work | `rootvolume` |
-| P7 | the service sees the client container's address; an `X-Forwarded-For` the client sends is not used | — (covered by the unit fault `xff-first`) |
-| P8 | the 33rd concurrent long poll from one address gets 429 from Traefik's middleware | — |
-| P9 | legacy mode: the silent relay's arguments and auth file are byte-identical to today's (no `--backend`, no `mu-relayd` process) | — |
+| P1 | `/mu/v1/` answers through Traefik on the relay's one route; `/health` OK; the legacy relay has no `/mu/v1/` | — |
+| P2 | the admin API: no token 401, a token with the right first 8 characters 403, the right one 200 | `adminprefix` |
+| P3 | an invite end to end (code typed with CR LF): created, claimed, offer verified, answered, answer verified, accepted, finished, confirm verified | — |
+| P4 | the new client connects within seconds with no container or chisel restart; avi-mac reaches it on the granted port; the static tunnels' connect counts unchanged | `noreload` |
+| P5 | `rawchan` as a dynamic workstation opens its port only (not 7001, 8080, 8081, Traefik); as the dynamic compute client no channel; chisel's client cannot listen elsewhere | `noreload`, `wideacl` (with X16) |
+| P6 | unknown id and wrong code: the same 403; a used code `invite-used`; an expired one `invite-expired`; 30 requests a minute from one address, the 31st 429 | — |
+| P7 | an offer changed on the way is refused by the claimer, an answer by the inviter (both abort, no client stays); a second claimer is refused, contests, and the inviter refuses to finish | `skipmac` (the reference client's `MU_PAIR_FAULT=skip-mac`) |
+| P8 | `DELETE` cuts the node's open tunnel within seconds, it is refused afterwards, avi-mac loses the port, the static tunnels come back | `noreload`, `noevict` |
+| P9 | `up -d --force-recreate` (a Dokploy deploy): same store id, the dynamic client accepted, a half-done invite still open | `novolume` (with X14) |
+| P10 | the volume deleted: a new store, the dynamic client refused, the static ones unaffected | — |
+| P11 | removing every client stops at the last one; the auth file keeps its sentinel; a client with no valid password is refused | `allowempty` |
+| P12 | a state directory not writable by 65532: `/mu/v1/` says `unwritable`, the admin API 503, the static clients connect | — |
+| P13 | legacy mode is today's relay (chisel the main process, no `--backend`, no sentinel); pairing mode runs mu-relayd | — |
 
 ### 13.4 The job layer's end-to-end run (`tools/test-jobs/e2e.sh`, `ubuntu-24.04`)
 
@@ -1349,7 +1371,7 @@ does not pass on a client's `X-Forwarded-For`; read timeout 60 s.
 
 | Step | Files | Done when |
 |---|---|---|
-| P1a, the relay | `relay/control/` (Go: `main.go`, `store.go`, `rules.go`, `api.go`, `limits.go`, `chisel.go`, `faults.go` with build tag, tests), `relay/entrypoint.sh` (admin mode, `static.tsv`), `relay/Dockerfile`, `relay/compose.yaml`, `relay/.dockerignore`, `relay/gen-credentials.sh` (`admin-token`, `login-bundle`, `export`/`import`, `env`), `relay/README.md`; `tools/s4/` (admin-mode env, P rows, faults), `tools/s4/test-config.sh`; `.github/workflows/s4-relay.yml` (a `go test` job) | §13.1, §13.3 and the existing S4 rows green on three Traefik versions |
+| P1a, the relay (built on branch `pairing`) | `relay/control/` (Go: `main.go`, `relay.go`, `invites.go`, `api.go`, `rules.go`, `store.go`, `limits.go`, `chisel.go`, `strictjson.go`, `faults.go`/`nofaults.go`, tests, `must-fail.sh`), `relay/entrypoint.sh` (pairing mode, `static.tsv`, `relayd.conf`, `RELAY_REVOKED`), `relay/Dockerfile`, `relay/compose.yaml`, `relay/.dockerignore`, `relay/gen-credentials.sh` (`admin-token`, `revoke`/`unrevoke`, `login-bundle`, `env`), `relay/README.md` §6; `tools/s4/` (pairing mode, P rows, `pair_ref.py`, the overrides), `tools/s4/test-config.sh`; `.github/workflows/s4-relay.yml` (job `control`, seven pairing must-fail runs). Not built: `mu relay export`/`gen-credentials.sh import` (§11 "going back") | §13.1, §13.3 and the existing S4 rows green on three Traefik versions |
 | P1b, the clients | `src/mu/pair.py`; `src/mu/jobs.py` (`compute invite`, `compute remove --relay`, `relay …`, `mu compute add` split); `src/mu/cli.py` and `bin/mu` (route `relay`); `src/mu/node.py` (`host-script`, `keyreq`, `keyreq-status`); `install/hosts/wsl2/mu-node-gate` (the two verbs); `mu-wsl2-distro.sh` (`pair`, `keyreq apply`, `ensure_self` + `mu-pair.py`, `ensure_keyreq` units, uninstall); `mu-wsl2-host.ps1` (`pair`, `-Relay`, staging, `Copy-HostScripts` + `pair.py`); `tools/test-pair/`, `tools/test-jobs/e2e.sh`, `.github/workflows/job-layer.yml`; `claude/CLAUDE-toolchain.md` (Claude's use of `--no-wait`/`--wait`); `docs/design/first-job-checklist.md` (the short visit first, the present path kept as the fallback) | §13.2, §13.4 Q1–Q12 and every existing job-layer row green |
 | P2 | `src/mu/jobs.py` (`invite --workstation`, `join`, `grant`, `revoke`) | Q13 green |
 
