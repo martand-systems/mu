@@ -913,3 +913,254 @@ the signature verifies against a key in `/etc/mu/authorized_keys/mu`.
 - **Why this is no new power:** a paired workstation key can already run anything as `mu`, and so could hand its own
   access to anyone. A job cannot forge a request (it has no workstation's private key) and can only delete pending ones.
   The new risk is root parsing input `mu` can write; it is kept to the strict parser above and `ssh-keygen`'s verify.
+
+## 10. A second workstation (stage P2)
+
+Laptop B joins from paired Mac A; nobody visits the PC. The protocol is §5 with `kind` `workstation`; the node-side
+step is the signed key request of §9.6, which the first visit already installed.
+
+```
+A$ mu compute invite --workstation bob-mbp            # all nodes A has paired, or --nodes office-pc,lab-pc
+invite Q2W8 for workstation bob-mbp (nodes office-pc), from avi-mac, valid until 16:40 (30 min)
+On bob-mbp, with μ installed, type:  mu compute join      and when it asks, the pairing code:  Q2W8-…-…
+Waiting …
+  16:12:03  claimed by bob-mbp (192.0.2.50)
+  16:12:04  bob-mbp's keys arrived, authenticated by the code
+  16:12:09  office-pc: bob-mbp's key authorised (signed request, applied by the node's root)
+paired bob-mbp with office-pc
+
+B$ mu compute join
+Pairing code (from the other computer): ************************** 
+  code accepted: this computer becomes workstation bob-mbp for office-pc, invited by avi-mac
+  waiting for avi-mac … confirmed
+  office-pc: up · 1.8 s · μ v2026.11.NN · runner active
+paired with office-pc
+```
+
+- **Offer** (`K_ic`): `enc(LABEL, "offer", id, "workstation", relay_url, relay_fingerprint, new_name, ports
+  ("7001+7002"), inviter_name, nodes, created, expires, mu_version)`, where `nodes` is one line per node, sorted by
+  name: `<node> <port> ssh-ed25519 <base64>` (A's pinned host keys, which B therefore receives authenticated).
+- **Answer** (`K_ci`): `enc(LABEL, "answer", id, offer_digest, "workstation", new_name, keys)`, `keys` one line per
+  node, sorted: `<node> ssh-ed25519 <base64>` (B makes one key per node, as `mu compute add` does). B's relay password
+  goes to R only; R creates the workstation client `new_name` with the invite's ports.
+- **A**, after verifying: for each node, a signed `authorize new_name <B's key for it>` request (§9.6) over A's own ssh
+  connection, then `keyreq-status` until `applied` (30 s). A node that is offline is reported and left for `mu compute
+  grant NODE new_name` later (A keeps B's public keys in `$MU_HOME/relay/workstations/<name>.json`).
+- **Confirm** (`K_ic`): outcome `ok`, or `partial:office-pc=ok,lab-pc=offline`.
+- **B**, on the confirm: writes one `compute/<node>/` per node (known_hosts from the offer, ssh_config, node.conf with
+  `relay_user = new_name`), stores its relay password in its Keychain, runs `hello` on each, prints `paired with …`.
+- **B gets no admin token.** It can submit jobs, not invite or remove (§14 Q4).
+- **Revoking B:** `mu relay remove bob-mbp` (immediate: no relay access, so no node is reachable) and `mu compute revoke
+  office-pc bob-mbp` (a signed `revoke` request; the key line goes).
+
+## 11. Migration
+
+Today: the relay runs chisel alone with the static clients `office-pc` (compute, 7001) and `avi-mac` (workstation,
+7001). No node is paired; the PC has never received a credential.
+
+1. **The lead merges `pairing` and releases it.** The merge touches `relay/**`, so Dokploy redeploys the relay from
+   `main`: the new image, with no `RELAY_ADMIN_TOKEN`, runs chisel exactly as before (`entrypoint.sh` takes today's path;
+   the S4 rows prove it, §13.3). The empty volume is created and not used. The Mac's tunnel (if open) drops for about
+   13 s. The release must reach the PC by auto-update before the visit (checklist §0).
+2. **The one last Dokploy edit** (§3.1): `admin-token`, `remove-client office-pc` (recommended; without it the dynamic
+   `office-pc` simply takes precedence, §6.5), `env`, paste three lines, Save, Deploy. Nothing else in Dokploy changes:
+   not the Domains entry, not Advanced. The changed environment makes Docker replace the container; it starts with
+   `mu-relayd`, a new store and the static `avi-mac`.
+3. **`mu relay login`** on the Mac (§3.1).
+4. **The visit** (§3.2): `mu compute invite office-pc`; two lines at the PC.
+
+From then on, clients change through the API and the Mac (`mu compute invite`, `mu relay remove`), with no Dokploy
+edit. `avi-mac` stays static: its password is in `relay.env` and the Keychain already; when a second node is paired R
+gives it a dynamic override with both ports (§6.5). Rotating the relay key or the admin token, or changing a static
+client, is still `gen-credentials.sh` and a Dokploy edit.
+
+**Going back:** remove `RELAY_ADMIN_TOKEN` in Dokploy and deploy: chisel alone again, with the static clients only, so
+every dynamic client stops working. To keep the paired PC working, first move its client to the static list:
+`mu relay export office-pc | relay/gen-credentials.sh import` (both refuse a terminal; the entry travels through the
+pipe), then `env` and the Dokploy edit.
+
+## 12. Threat model
+
+| Who | Before (the checklist: stick, fingerprints by eye) | After (one code) |
+|---|---|---|
+| **The network** between either machine and the server | Nothing: TLS to Traefik, chisel's pinned fingerprint. The stick could be lost with the node's relay password on it (FAT does not erase) | Nothing: TLS, and every key MAC'd. No stick |
+| **The relay or the server, compromised** (root, Docker, Dokploy) | Has every relay credential and the relay key. Cannot substitute keys: they travel by stick and are compared by eye — **if** the owner compares | Has every relay credential, the relay key, the admin token (in the environment) and the dynamic passwords (on the volume): **no new power**, since it could always edit its own auth file. Sees offers, answers (public keys only), claim tokens, the PC's address. **Cannot** make the Mac pin another host key, the PC authorise another workstation key, or the PC pin another relay fingerprint: each needs the 80-bit secret within 60 minutes (2^-21.7 with 10^4 GPUs, §4.3). Can deny service: refuse, delay, lock or expire invites, drop the confirm, restart chisel |
+| **A stolen admin token** (from the Mac) | The equivalent was `relay.env` plus Dokploy access | Create and delete relay clients, read every relay password, create invites, restart chisel. A client it creates reaches a node's `sshd` login, which is key-only: nothing more. **Cannot** authorise a key on any node, or pair a PC without someone typing a code there. Rotate: `gen-credentials.sh admin-token --rotate`, `env`, Dokploy edit, `mu relay login` |
+| **The code, observed or stolen** within its 30–60 minutes (over the shoulder, from Claude Code's transcript, a photo of the Mac's screen) | — | Whoever claims **and answers first** becomes "office-pc" to the Mac: the Mac would pin the thief's host key. It cannot make the real PC trust a wrong workstation key (that needs the relay too). Visible: the real PC then gets `invite-used`, and the Mac's events show the claim's address. A claim from a second address makes the invite `contested` and the Mac refuses to finish it (§12.1). After use or expiry the code is worthless |
+| **A shoulder-surfer at the PC** | Fingerprints are public; the no-stick fallback asks the relay password hidden | The code is not echoed at the PC |
+| **A stolen Mac** | Its node keys and relay password: job power until revoked on the node | The same, plus the admin token. From elsewhere: `mu relay remove avi-mac` needs the admin token too; without the Mac, rotate the token in Dokploy and remove `avi-mac` from `RELAY_CLIENTS` (a Dokploy edit, as before) |
+| **A job on the node** | Everything `mu` can do (job-layer §14) | The same. It cannot read `/var/lib/mu-wsl2/pair/` (root 0600) or reach `C:\Mu\host` (after §13.4); it can rewrite the release folder, which an administrator therefore runs only before any job (§9.1); it can delete pending key requests, not forge them (§9.6) |
+
+### 12.1 Contested invites
+
+R records the address of every claim. A second claim (allowed while `claimed`, for a re-run at the PC) from a different
+address than the first marks the invite `contested`; it can still be answered, but the Mac aborts at the answer with
+`invite 7K3M was claimed from two addresses (198.51.100.23, 203.0.113.9): nothing was paired; make a new invite`.
+An office behind several public addresses would see that too (§14 Q5).
+
+## 13. Tests
+
+Every guarded check also runs with its fault put in and must fail, as in the job layer. Fault hooks: `MU_RELAY_FAULT` in
+`mu-relayd` **only when built with `-tags faults`** (the production image is built without the tag, so it has no fault
+code at all); `MU_PAIR_FAULT` in `pair.py` (as `MU_JOBS_FAULT`); `S4_BREAK` in the replica.
+
+### 13.1 `mu-relayd` unit tests (`go test -race ./...` in `relay/control`; CI job in `s4-relay.yml`)
+
+| Test | Passes when | Fault → must fail |
+|---|---|---|
+| Rules equal the entrypoint's | the merged file for static-only input equals `entrypoint.sh`'s `users.json` for the same `RELAY_CLIENTS`, for every vector of `tools/s4/test-config.sh` (one shared fixture file) | `unanchored-rule` (drops `^`/`$`) |
+| Dynamic rules | compute → one `R:` rule on its port; workstation → its ports only; refused: names, ports, passwords outside the entrypoint's rules | `wide-ports` (workstation rule allows 7001–7999) |
+| Unique names and ports in the merged file | a dynamic client overrides a static one of the same role only; a different role, or a port another compute client has, is refused | `override-any-role`, `no-port-check` |
+| Tombstones | a deleted static client is absent from the merged file | `ignore-tombstones` |
+| Store writes | 200 writes killed at random points (a child process, `SIGKILL`) always load as the old or the new generation; `.prev` is used when `state.json` is missing | `no-prev` (rename without keeping `.prev`) |
+| Damaged store | both files garbage → static clients only, 503 `store-damaged`, `reset` works | `damaged-starts-empty` |
+| State machine | every transition of §5.4 and every refused one, with a fake clock for each deadline | `reclaim-after-answer`, `no-expiry` |
+| Lockout | the 5th wrong claim locks; the right claim then gets 410 | `no-lockout` |
+| Contested | a second claim from another address marks `contested` | `no-contest` |
+| Rate limits | 21st unauthenticated request in a minute from one address → 429; another address unaffected; the address is XFF's second-to-last | `xff-first` (takes the client-supplied first entry) |
+| Admin auth | wrong token → 403; 5 failures → 429; constant-time compare (by reading) | `admin-prefix` (compares only the first 8 characters) |
+| Body limits, strict JSON | 16 KiB + 1 → 413; unknown member → 400 | `allow-unknown` |
+| Eviction | a removal or a password change restarts the (fake) chisel once; an addition does not; two changes in 10 s → one restart | `no-evict` |
+| Auth file write | written by rename, never truncated in place; reload delay honoured | `write-in-place` |
+| No secrets in logs | every log line of a full scripted run is free of the token, claim tokens, sessions, passwords and MACs | `log-claim` (logs the claim token) |
+
+### 13.2 `pair.py` and the Mac commands (`tools/test-pair/`, from `tools/test-jobs/run.sh`; macOS bash 3.2 and Linux)
+
+| Test | Passes when | Fault → must fail |
+|---|---|---|
+| Code | round trip; aliases O/I/L; separators; every single-symbol substitution and adjacent transposition of 2000 random codes is caught by the check at least 1 - 2^-9 of the time; a wrong length or symbol is a typo | `no-check` |
+| Known answers | fixed id and S give fixed `K_claim`, `claim_hash`, offer, answer and confirm MACs (vectors in the test, computed once by hand with `openssl dgst -hmac`) | `key-label-swap` |
+| Every field bound | changing any one field of the offer, the answer or the confirm (each in turn) makes verification fail | `skip-field` (one field left out of `enc`) |
+| Reflection | an offer MAC does not verify as an answer or a confirm, nor in the other direction | `one-key` (`K_ic` used both ways), `no-type-label` |
+| Offer checks of §5.3 | each refused: other URL than the one contacted, bad fingerprint, two keys, a non-ed25519 key, R's name differs from the offer's | `trust-relay-fields` |
+| Mac commands | `relay login` (refuses a terminal; stores via a `security` stub; refused token stores nothing), `invite --no-wait`/`--wait`/`--cancel`, `--replace` rollback on failure, `remove --relay` — against `mu-relayd` and chisel on 127.0.0.1 behind a test CA (`tools/test-pair/local.sh`) | `no-rollback` |
+| Secrets | the code, S, the session and every password appear in no argv (`ps` sampled during a run), no log, no `--json` output except `code` in `invite --no-wait` | `code-in-argv` |
+| Dispatcher | `mu relay …` routes to the default toolchain under bash 3.2 | — |
+
+### 13.3 The S4 replica (`tools/s4/run.sh`, three Traefik versions)
+
+The main relay runs in admin mode (token in its env file), the second ("silent") relay stays in the legacy mode, so both
+paths are tested in every run and all existing rows (A, X, I, R) keep running. New rows:
+
+| Row | Passes when | Fault (`S4_BREAK`) → must fail |
+|---|---|---|
+| P1 | `https://relay…/mu/v1/` through Traefik answers the service's JSON; `/health` `OK` with the backend; the silent relay's `/health` still from chisel | `backend` (no `--backend`) |
+| P2 | a client created with `PUT /clients` connects within 2 s; the container's `StartedAt` unchanged | `noreload` (auth file written outside the watched directory) |
+| P3 | a deleted client's open reverse tunnel ends within 5 s, a new connection is refused, the other clients are back within 20 s | `noevict` |
+| P4 | the X rows' negative checks against **dynamic** clients: a workstation reaches no unlisted port, a compute client binds no other port | `wideacl` |
+| P5 | `docker compose up -d --force-recreate` (as a Dokploy deploy) keeps dynamic clients and a half-done invite | `novolume` (the volume line removed) |
+| P6 | a fresh volume is writable by 65532; with the image's directory owned by root the service refuses with its message | `rootvolume` |
+| P7 | the service sees the client container's address; an `X-Forwarded-For` the client sends is not used | — (covered by the unit fault `xff-first`) |
+| P8 | the 33rd concurrent long poll from one address gets 429 from Traefik's middleware | — |
+| P9 | legacy mode: the silent relay's arguments and auth file are byte-identical to today's (no `--backend`, no `mu-relayd` process) | — |
+
+### 13.4 The job layer's end-to-end run (`tools/test-jobs/e2e.sh`, `ubuntu-24.04`)
+
+S3 (`mu compute add` + `authorize`) is replaced by the pairing: the replica relay in admin mode; `ws` runs `relay login`
+(bundle from the replica's `gen-credentials.sh`), `invite --no-wait --json`; root runs `mu-wsl2-distro pair run` with
+the code on stdin (CI has no PowerShell side); `ws` runs `invite --wait`. Every R and H row then runs as before against
+the node paired this way. New rows:
+
+| Row | Passes when | Fault → must fail |
+|---|---|---|
+| Q1 | both sides say paired; the relay client is dynamic; `status` says `ready for jobs: yes` and lists `avi-mac` | — |
+| Q2 | a code with a wrong check character: exit 2, the relay saw nothing | `MU_PAIR_FAULT=no-check` |
+| Q3 | a valid check with another secret: exit 5 `wrong-code`, the counter at 1; 5 of them lock | relay `no-lockout` (faults build) |
+| Q4 | expiry (TTL 20 s in the test): exit 9 on both sides, the PC rolled back | relay `no-expiry` |
+| Q5 | the relay changes one byte of the offer's key (relay fault `tamper-offer`, the attack): the PC refuses, exit 5, nothing authorised | `MU_PAIR_FAULT=skip-offer-mac` |
+| Q6 | the relay changes the answer's host key (`tamper-answer`): the Mac refuses, no node folder, the client removed | `MU_PAIR_FAULT=skip-answer-mac` |
+| Q7 | `--replace` with a regenerated node host key: the Mac pins the new key; the old tunnel session is evicted | `no-evict` |
+| Q8 | `mu relay remove office-pc`: the Mac's next `compute status` is exit 4 `node-offline` within 20 s | `no-evict` |
+| Q9 | relay stopped while the Mac waits: `relay unreachable, trying again`, and it completes when the relay is back | — |
+| Q10 | a `pair` run killed after `answer` resumes with the same line and finishes | `MU_PAIR_FAULT=no-resume` |
+| Q11 | a claim from a second address (a second container) marks the invite contested; the Mac aborts | relay `no-contest` |
+| Q12 | no secret in any log, journal, container log, run record or sampled argv of the whole run | `code-in-argv` |
+| Q13 (P2) | `invite --workstation` + `join` as a second user; the node applies the signed request; a request signed by an unknown key, replayed, expired or for another node is refused | `MU_KEYREQ_FAULT=no-verify` |
+
+`.github/workflows/job-layer.yml` runs on branch `job-layer` only; it gets `pairing` added.
+
+### 13.5 The rest
+
+- `tools/s4/test-config.sh`: the entrypoint in admin mode (token format refused without printing it; `static.tsv`
+  written; the legacy path unchanged when the token is empty); `gen-credentials.sh admin-token`, `login-bundle` (refuses
+  a terminal), `env` with three lines — on macOS bash 3.2 too.
+- `tools/test-wsl2-host`: `pair` parses under PowerShell 5.1's rules and is ASCII; its argument handling and the
+  staging path function under pwsh; the distro script's `pair` and `keyreq apply` on a test folder (as `authorize` is
+  tested today).
+
+## 14. Not tested, and open questions
+
+**Not tested until the PC or the server:**
+
+- Windows: the `pair` action under Windows PowerShell 5.1 (only parsed), `-ExecutionPolicy Bypass -File (…)` with a
+  `\\wsl.localhost` path, the staging copy surviving the restart, `Read-Host -AsSecureString` piped into `wsl.exe`,
+  `WSL_DISTRO_NAME` in a `wsl -u mu` process, the distro restart in the middle.
+- Root's Python reaching `https://relay.martand.systems` from WSL through the office network (CI uses a test CA and no
+  proxy), and the real Let's Encrypt chain in Ubuntu's CA store.
+- Dokploy keeping the volume across a real deploy, and Docker's copy-up of the mount point's owner on the server's
+  Docker version: read in Dokploy's source and tested on CI's Docker only.
+- chisel's eviction restart behind the real Traefik and with real latency.
+- The real Keychain (a stub stands in, as for the job layer); a store write under a power cut (fsync is not testable
+  here, as in the job layer).
+- How long typing 22 hidden characters takes the owner.
+
+**Open questions:**
+
+- **Q1.** The PC visit is two commands because the second line is only as good as the release installed. Accept, or
+  insist on one (only possible from the next release on, through a stable launcher in `C:\Mu\host`)?
+- **Q2.** With Claude Code driving the Mac, the code passes through its transcript (§3.3). Print by default (simplest;
+  the code is single use and short-lived) or make `--show-code dialog` the default?
+- **Q3.** If 22 characters prove too long: scrypt (N=2^17, r=8, about 0.3 s on both machines, `hashlib.scrypt`) on S
+  would make 64 bits enough and save 3 characters. Not proposed now.
+- **Q4.** Should a second workstation also become an admin (the token sent under a key from S)? Python's standard
+  library has no cipher; HMAC-SHA-256 in counter mode with a MAC is sound but hand-built. Proposed: no.
+- **Q5.** An office with several public addresses would make every re-run at the PC `contested` (§12.1). Accept (make
+  a new invite) or drop the rule?
+- **Q6.** How `C:\Mu\host` gets newer root-side scripts after jobs have run, without trusting the release folder: an
+  open point of the job layer that this design inherits.
+- **Q7.** `mu compute remove` leaves the relay client unless `--relay`. Should it remove it when this Mac created it
+  and no other workstation uses the node?
+- **Q8.** A lost volume revives tombstoned static clients until the README's rule is followed (§6.5). Accept?
+
+## 15. Read in sources
+
+chisel v1.12.0 (`fe4f4fe`, the release the relay and clients pin):
+
+- `share/settings/users.go`: the auth-file watcher watches the file's **directory** ("so the watch survives editors and
+  orchestrators which replace the file rather than write to it"), debounces events for 100 ms, then reloads; a read,
+  JSON or regex error returns before the swap, so the old users stay. Users are kept in a map keyed by name, so two
+  entries with one name leave one of them at random: the merged file must have unique names.
+- `server/server_handler.go`: the user is re-resolved **per channel** from the live index, so a reload applies to new
+  tunnels of connected clients; a user removed during a handshake is refused. Nothing ends an established session or a
+  reverse listener (also stated in the `--authfile` help and in `.github/releases/1.12-changes.md`: "removed users
+  lose new tunnels but established ones aren't cut"). Hence the eviction restart (§6.7).
+- `server/server_handler.go`, `server/server.go`: with `--backend` set, every request that is not a chisel WebSocket
+  (`Upgrade: websocket` and the `chisel-v3` subprotocol) goes to the backend, `/health` and `/version` included; the proxy
+  is `httputil.NewSingleHostReverseProxy` with the path kept and `Host` rewritten, so `X-Forwarded-For` gains Traefik's
+  address.
+- `share/cnet/http_server.go`: chisel's HTTP server sets no header timeout (the README's existing note); a `SIGTERM`
+  drains for `CHISEL_SHUTDOWN_GRACE` (5 s by default) before it closes.
+
+Dokploy (`42fe79c`, 2026-11-13), `packages/server/src`:
+
+- `utils/builders/compose.ts`: a compose deploy is `docker compose -p <appName> [--project-directory <repo>] --env-file
+  … -f <compose path> up -d --build --remove-orphans`; `--project-directory` is added only when the service has Dokploy
+  Mounts.
+- `services/compose.ts`: `down --volumes` only on a deploy with fresh volumes, and on delete only when "delete volumes"
+  is chosen.
+- `utils/docker/collision.ts`, `utils/docker/compose.ts`: Isolated Deployment (with isolated volumes) and Randomize
+  Compose add a suffix to every volume name.
+
+`tools/s4/traefik/traefik.yml` (Dokploy's static Traefik configuration): no `forwardedHeaders.trustedIPs`, so Traefik
+does not pass on a client's `X-Forwarded-For`; read timeout 60 s.
+
+## 16. Files, and the order of work
+
+| Step | Files | Done when |
+|---|---|---|
+| P1a, the relay | `relay/control/` (Go: `main.go`, `store.go`, `rules.go`, `api.go`, `limits.go`, `chisel.go`, `faults.go` with build tag, tests), `relay/entrypoint.sh` (admin mode, `static.tsv`), `relay/Dockerfile`, `relay/compose.yaml`, `relay/.dockerignore`, `relay/gen-credentials.sh` (`admin-token`, `login-bundle`, `export`/`import`, `env`), `relay/README.md`; `tools/s4/` (admin-mode env, P rows, faults), `tools/s4/test-config.sh`; `.github/workflows/s4-relay.yml` (a `go test` job) | §13.1, §13.3 and the existing S4 rows green on three Traefik versions |
+| P1b, the clients | `src/mu/pair.py`; `src/mu/jobs.py` (`compute invite`, `compute remove --relay`, `relay …`, `mu compute add` split); `src/mu/cli.py` and `bin/mu` (route `relay`); `src/mu/node.py` (`host-script`, `keyreq`, `keyreq-status`); `install/hosts/wsl2/mu-node-gate` (the two verbs); `mu-wsl2-distro.sh` (`pair`, `keyreq apply`, `ensure_self` + `mu-pair.py`, `ensure_keyreq` units, uninstall); `mu-wsl2-host.ps1` (`pair`, `-Relay`, staging, `Copy-HostScripts` + `pair.py`); `tools/test-pair/`, `tools/test-jobs/e2e.sh`, `.github/workflows/job-layer.yml`; `claude/CLAUDE-toolchain.md` (Claude's use of `--no-wait`/`--wait`); `docs/design/first-job-checklist.md` (the short visit first, the present path kept as the fallback) | §13.2, §13.4 Q1–Q12 and every existing job-layer row green |
+| P2 | `src/mu/jobs.py` (`invite --workstation`, `join`, `grant`, `revoke`) | Q13 green |
+
+`docs/PLAN.md` and `README.md` are updated by the lead at the merge. The merge to `main` redeploys the relay (legacy
+mode until the Dokploy edit of §11 step 2).
