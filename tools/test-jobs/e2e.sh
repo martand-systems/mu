@@ -252,13 +252,14 @@ f_bare_off() { WSF=""; close_master; }
 
 r_nosecret() {
   close_master
-  local pw cpw hits=0 i
+  local pw cpw hits=0 i scan
   pw="$(sudo sed -n 's/^avi-mac://p' "$WSH/compute/office-pc/relay.auth")"
   cpw="$(sed -n 's/^RELAY_PASSWORD=//p' "$S4W/env/compute.env")"
   ws compute status office-pc --json >/dev/null 2>&1   # a master (and its proxy and chisel) now stays for 300 s
   ws status --json > /dev/null 2>&1 &
   for i in $(seq 1 30); do
-    if sudo sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " < "$f" 2>/dev/null; echo; done' | grep -qF -e "$pw" -e "$cpw"; then hits=$((hits + 1)); fi
+    scan="$(sudo sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " < "$f" 2>/dev/null; echo; done')"
+    case "$scan" in *"$pw"*|*"$cpw"*) hits=$((hits + 1)) ;; esac   # (not grep -q in a pipe: with pipefail, its early exit reads as no match)
     sleep 0.1
   done
   wait
