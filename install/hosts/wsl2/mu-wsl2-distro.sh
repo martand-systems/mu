@@ -1683,6 +1683,7 @@ status_jobs() {
     else check fail updates "unattended-upgrades: Unattended-Upgrade '$v', not security: '$(printf '%s' "$bad" | tr '\n' ' ')', apt-daily-upgrade.timer $u (run install)"; fi
   else check fail updates "unattended-upgrades or $UU_CONF missing (run install)"; fi
   if [ -e "$TEST_FAULT" ]; then check fail test-fault "$TEST_FAULT exists: a test hook that must never be on a real node (rm $TEST_FAULT)"; fi
+  if [ -e "$ETC_MU/test-hooks" ]; then check fail test-fault "$ETC_MU/test-hooks exists: root's pairing client then obeys MU_PAIR_* test hooks, which must never happen on a real node (rm $ETC_MU/test-hooks)"; fi
   # the runner, the limits, the gate's answer
   if ! mu_job_layer; then
     check warn node.runner "μ of $MU_USER has no job layer yet (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu update; then install again)"

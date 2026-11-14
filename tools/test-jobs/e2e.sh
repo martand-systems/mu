@@ -149,7 +149,10 @@ noderun() {   # noderun ACTION [ARGS]: mu-wsl2-distro pair ACTION as root, the c
   # HOOKSFORCE=1: with it regardless, Q14's must-fail)
   if [ -z "$NOHOOKS" ] || [ -n "$HOOKSFORCE" ]; then sudo install -m 644 -o root -g root /dev/null /etc/mu/test-hooks
   else sudo rm -f /etc/mu/test-hooks; fi
-  sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@"
+  local rc=0
+  sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@" || rc=$?
+  sudo rm -f /etc/mu/test-hooks   # never left behind: status fails while it exists (H1)
+  return $rc
 }
 PF=""; PCW=""; NOHOOKS=""; HOOKSFORCE=""
 invite_new() {   # invite_new NODE [OPTS]: sets INV (the id) and CODE; the invite's JSON is kept without the code
@@ -808,6 +811,8 @@ hf_gate_on() { sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.good"; echo '#
 hf_gate_off() { sudo cp "$WORK/gate.good" /usr/local/lib/mu/mu-node-gate; }
 hf_testfault_on() { echo nothing | sudo tee /etc/mu/test-fault > /dev/null; }
 hf_testfault_off() { sudo rm -f /etc/mu/test-fault; }
+hf_testhooks_on() { sudo install -m 644 -o root -g root /dev/null /etc/mu/test-hooks; }
+hf_testhooks_off() { sudo rm -f /etc/mu/test-hooks; }
 hf_envmode_on() { sudo chmod 644 /etc/mu/tunnel.env; }
 hf_envmode_off() { sudo chmod 640 /etc/mu/tunnel.env; }
 hf_22_on() { sudo sh -c 'nohup python3 -m http.server 22 --bind 127.0.0.1 > /dev/null 2>&1 & echo $! > /tmp/mu-port22.pid'; sleep 1; }
@@ -819,6 +824,7 @@ host_faults() {
   must_fail H8 "the default release read as root" hf_pairver_on hf_pairver_off h_pairver
   must_fail H1 "a line added to the gate" hf_gate_on hf_gate_off h_status
   must_fail H1 "/etc/mu/test-fault present" hf_testfault_on hf_testfault_off h_status
+  must_fail H1 "/etc/mu/test-hooks present" hf_testhooks_on hf_testhooks_off h_status
   must_fail H1 "tunnel.env readable by everyone (0644)" hf_envmode_on hf_envmode_off h_status
   must_fail H1 "something listening on port 22" hf_22_on hf_22_off h_status
   must_fail H1 "the tunnel stopped" hf_tunnel_on hf_tunnel_off h_status
@@ -1017,7 +1023,7 @@ qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_no
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
 EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 check_ran() {
   local want got
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"
