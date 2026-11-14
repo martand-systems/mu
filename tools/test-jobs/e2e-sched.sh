@@ -158,21 +158,19 @@ print(int(f(sys.argv[1]) <= f(sys.argv[2]) + 1))' "$hst" "$sb")" = 1 ]
   qend $?
 }
 q06() {
-  qpre; local w e q1 q2 q3 t0 dt ca es q3s
-  w="$(submit -- sleep 90)"   # whole node; idle CPUs, so a quick job without its quota would take more than one
+  qpre; local w e q1 q2 q3 q1s ca es q3s
+  w="$(submit -- sleep 120)"   # whole node; idle CPUs, so a quick job without its quota would take more than one
   wait_state "$w" running 60; sleep 2
   e="$(submit --cores 1 --mem 256M --time 1m -- true)"
-  t0="$(date +%s)"
-  q1="$(submit --quick -- sh -c 'for i in 1 2 3 4; do timeout 8 sh -c "while :; do :; done" & done; wait; exit 0')"
-  q2="$(submit --quick -- sleep 30)"
+  q1="$(submit --quick -- sh -c 'for i in 1 2 3 4; do timeout 20 sh -c "while :; do :; done" & done; wait; exit 0')"
+  q2="$(submit --quick -- sleep 40)"
   q3="$(submit --quick -- true)"
-  sleep 3; es="$(jobstate "$e")"; q3s="$(jobstate "$q3")"
-  wait_state "$q1" "succeeded failed" 30; dt=$(( $(date +%s) - t0 ))
+  sleep 4; q1s="$(jobstate "$q1")"; es="$(jobstate "$e")"; q3s="$(jobstate "$q3")"
+  ws cancel "$w" --json >/dev/null   # an ordinary core frees while both lane slots are still taken
+  wait_state "$q3" "succeeded failed" 60; wait_state "$e" "succeeded failed" 60; wait_state "$q1" "succeeded failed" 60
   ca="$(jobstate "$q1" usage.cores_avg)"
-  ws cancel "$w" --json >/dev/null
-  wait_state "$q3" "succeeded failed" 60; wait_state "$e" "succeeded failed" 60
-  M="beside a whole-node job: quick $(jobstate "$q1") in ${dt}s, class $(jobstate "$q1" grant.class), cores_avg $ca (4 busy threads); explicit 1-core job $es; 3rd quick $q3s then class $(jobstate "$q3" grant.class)"
-  [ "$(jobstate "$q1")" = succeeded ] && [ "$dt" -le 30 ] && [ "$(jobstate "$q1" grant.class)" = express ] && \
+  M="beside a whole-node job, seconds after submit: quick $q1s (class $(jobstate "$q1" grant.class)), then $(jobstate "$q1") with cores_avg $ca (4 busy threads); explicit 1-core job $es; 3rd quick $q3s, then class $(jobstate "$q3" grant.class)"
+  [ "$q1s" = running ] && [ "$(jobstate "$q1")" = succeeded ] && [ "$(jobstate "$q1" grant.class)" = express ] && \
     [ -n "$ca" ] && lt "$ca" 1.25 && [ "$es" = queued ] && [ "$q3s" = queued ] && [ "$(jobstate "$q3" grant.class)" = normal ]
   qend $?
 }

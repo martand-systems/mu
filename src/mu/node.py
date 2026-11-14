@@ -2341,7 +2341,7 @@ def run_job(job_id):
         state, ec, sig = ("oom" if cgroup_oom_kills() else "failed"), None, -rc
     else:
         state, ec, sig = "failed", rc, None
-    j["state"] = st
+    j["state"] = durable.read_record(os.path.join(d, "state.json")) or st   # the runner's since the start (affinity_widened)
     usage = None if fault("no-usage") else own_usage(j, time.time() - t0)
     try:
         write_result(j, state, "shim", unit_result="success" if state == "succeeded" else None, exit_code=ec, signal=sig,
