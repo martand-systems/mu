@@ -1,0 +1,129 @@
+# The job layer, stage 1 (docs/design/job-layer.md §16). Nothing here contacts the real relay, the server or the
+# office PC: the relay is the S4 replica (tools/s4/run.sh relay) on the runner, relay.martand.systems resolves to
+# 127.0.0.1 there, and every credential is made for the run and thrown away.
+#
+#   fast-linux, fast-macos  unit level: tools/test-jobs/run.sh (each guarded check also run with its fault, and must
+#                           fail) and local.sh (a user-level sshd and chisel, stub systemd); macOS for bash 3.2 and
+#                           the Mac's OpenSSH; Linux also runs the other suites bin/mu and the installer have
+#   probe                   what §18 only read: systemd, cgroup v2, delegation, an oom-kill, mu-sshd with PAM
+#   e2e                     every row of §16 on real systemd through the relay, then each row with its fault
+# In probe and e2e the node is made by the host script itself (install/hosts/wsl2/mu-wsl2-distro.sh install --no-wsl,
+# run three times, the relay credential through `tunnel credential` on stdin); e2e then checks the script's status
+# (H rows, each status check shown to fail with its fault), and ends with its uninstall and a reinstall.
+name: job-layer
+on:
+  push:
+    branches: ["job-layer"]
+    paths:
+      - "src/mu/**"
+      - "bin/mu"
+      - "install/**"
+      - "toolchain/apps.toml"
+      - "relay/**"
+      - "tools/s4/**"
+      - "tools/test-jobs/**"
+      - "tools/test-autoupdate/**"
+      - "tools/test-wsl-disk/**"
+      - "tools/test-wsl2-host/**"
+      - ".github/workflows/job-layer.yml"
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: job-layer-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  fast-linux:
+    name: fast tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: chisel from the apps.toml pin
+        run: |
+          url="$(awk -F'"' '/^\[chisel.linux-64\]/ { s = 1 } s && /^url/ { print $2; exit }' toolchain/apps.toml)"
+          sum="$(awk -F'"' '/^\[chisel.linux-64\]/ { s = 1 } s && /^sha256/ { print $2; exit }' toolchain/apps.toml)"
+          curl -fsSL -o /tmp/chisel.gz "$url"; echo "$sum  /tmp/chisel.gz" | sha256sum -c -
+          gunzip -c /tmp/chisel.gz > /tmp/chisel; chmod 755 /tmp/chisel; /tmp/chisel --version
+          [ -x /usr/sbin/sshd ] || { sudo apt-get install -y -q openssh-server; }
+          sudo apt-get install -y -q dash git-lfs >/dev/null
+      - name: tools/test-jobs/run.sh
+        run: /bin/bash tools/test-jobs/run.sh
+      - name: tools/test-jobs/local.sh (user-level sshd and chisel, stub systemd)
+        run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
+      - name: the other suites (test-autoupdate runs on macOS, where it is kept green; test-fetch, timing-sensitive and untouched here, is not run)
+        run: |
+          /bin/bash tools/test-wsl-disk/run.sh
+          /bin/bash tools/test-wsl2-host/run.sh
+
+  fast-macos:
+    name: fast tests (macOS, bash 3.2)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: The bash that /bin/bash is, and chisel from the apps.toml pin
+        run: |
+          v="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')"; echo "bash $v; $(python3 --version); $(ssh -V 2>&1)"
+          [ "$v" = 3.2 ] || { echo "::error::expected /bin/bash 3.2, found $v"; exit 1; }
+          url="$(awk -F'"' '/^\[chisel.osx-arm64\]/ { s = 1 } s && /^url/ { print $2; exit }' toolchain/apps.toml)"
+          sum="$(awk -F'"' '/^\[chisel.osx-arm64\]/ { s = 1 } s && /^sha256/ { print $2; exit }' toolchain/apps.toml)"
+          curl -fsSL -o /tmp/chisel.gz "$url"; echo "$sum  /tmp/chisel.gz" | shasum -a 256 -c -
+          gunzip -c /tmp/chisel.gz > /tmp/chisel; chmod 755 /tmp/chisel; /tmp/chisel --version
+      - name: tools/test-jobs/run.sh
+        run: /bin/bash tools/test-jobs/run.sh
+      - name: tools/test-jobs/local.sh
+        run: CHISEL=/tmp/chisel /bin/bash tools/test-jobs/local.sh
+      - name: tools/test-autoupdate/run.sh (bin/mu)
+        run: /bin/bash tools/test-autoupdate/run.sh
+      - name: tools/test-wsl2-host/run.sh (the host scripts' pure functions under bash 3.2; pwsh for the Windows one)
+        run: /bin/bash tools/test-wsl2-host/run.sh
+
+  probe:
+    name: probe (systemd, cgroup v2, delegation, oom-kill, mu-sshd)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: e2e.sh probe
+        run: tools/test-jobs/e2e.sh probe
+      - name: Summary
+        if: always()
+        run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: job-layer-probe
+          # logs and results only: the throw-away relay credentials (.scratch/s4/env, cred) are not uploaded
+          path: |
+            .scratch/jobs/summary.md
+            .scratch/jobs/results.tsv
+            .scratch/jobs/logs/
+            .scratch/s4/logs/
+          include-hidden-files: true
+          retention-days: 14
+
+  e2e:
+    name: end to end (§16 rows, then each with its fault)
+    needs: probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: e2e.sh all
+        run: tools/test-jobs/e2e.sh all
+      - name: Summary
+        if: always()
+        run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: job-layer-e2e
+          path: |
+            .scratch/jobs/summary.md
+            .scratch/jobs/results.tsv
+            .scratch/jobs/logs/
+            .scratch/jobs/out/
+            .scratch/s4/logs/
+          include-hidden-files: true
+          retention-days: 14

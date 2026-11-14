@@ -25,6 +25,8 @@ CHECKS = [
     ("cam-python",   ["cam-python", "-c", "import FreeCAD,ocp_freecad_cam,cadquery;print(FreeCAD.Version()[0]+'.'+FreeCAD.Version()[1], cadquery.__version__)"], "2.8"),
     ("openfoam",     ["openfoam", "-c", "echo $WM_PROJECT_VERSION"], "2606"),
     ("git-lfs",      ["git-lfs", "version"], "git-lfs/"),
+    # the job layer's relay client (docs/design/job-layer.md §5.4)
+    ("chisel",       [os.path.join(os.environ.get("MU_TOOLCHAIN", ""), "libexec", "chisel"), "--version"], "1.12.0"),
 ]
 
 def _env_registered(out):

@@ -19,7 +19,9 @@
 # MU_FREE_NOTE ("6 GB free on C: if the WSL disk is there (why)") with MU_FREE_NOTE_GB, when it is below the VHD figure.
 # No drvfs mount for the drive: only the VHD is measured, and MU_FREE_WHERE says so. A df that fails (a drive gone
 # away) is skipped.
-# Test hooks: MU_WSL=1|0 forces WSL detection, MU_WSL_REG replaces reg.exe, MU_PROC_MOUNTS replaces /proc/mounts.
+# The drive the host script recorded (/var/lib/mu-wsl2/host-drive, "C /mnt/c") is read before reg.exe and counts as sure.
+# Test hooks: MU_WSL=1|0 forces WSL detection, MU_WSL_REG replaces reg.exe, MU_PROC_MOUNTS replaces /proc/mounts,
+# MU_WSL_HOST_DRIVE replaces the host-drive record.
 
 # >>> mu_disk_free (keep identical in install/disk.sh and bin/mu)
 _mu_is_wsl() {
@@ -73,6 +75,14 @@ _mu_wsl_drives() {
       print ((m || (want == "" && k == 1)) ? "sure" : "unsure") out
     }'
 }
+# _mu_host_drive: the drive letter the host script recorded as holding this distro (root-owned, one line "C /mnt/c";
+# MU_WSL_HOST_DRIVE names another file), or nothing. Read first and taken as sure: interop may be off (design §13.4)
+_mu_host_drive() {
+  local l="" r f="${MU_WSL_HOST_DRIVE:-/var/lib/mu-wsl2/host-drive}"
+  if [ -r "$f" ]; then { read -r l r < "$f"; } 2>/dev/null || true; fi
+  case "${l:-}" in [A-Za-z]) printf '%s' "$l" | tr 'a-z' 'A-Z' ;; esac
+  return 0
+}
 # mu_disk_free DIR: sets MU_FREE_GB (the free GB to check; empty if df failed), MU_FREE_WHERE (where: empty unless WSL)
 # and, when the Windows drive could not be confirmed and has less free space than the virtual disk, MU_FREE_NOTE_GB and
 # MU_FREE_NOTE (that drive's free GB, to show or warn about but not to enforce)
@@ -84,7 +94,9 @@ mu_disk_free() {
   kb="$(_mu_kb_free "$d")"
   [ -z "$kb" ] || MU_FREE_GB=$((kb / 1048576))
   _mu_is_wsl || return 0
-  ans="$(_mu_wsl_drives)"; state="${ans%% *}"; drives="${ans#"$state"}"
+  l="$(_mu_host_drive)"
+  if [ -n "$l" ]; then ans="sure $l"; else ans="$(_mu_wsl_drives)"; fi
+  state="${ans%% *}"; drives="${ans#"$state"}"
   case "$state" in
     sure) ;;
     unsure) why="WSL_DISTRO_NAME is not set"; [ -z "${WSL_DISTRO_NAME:-}" ] || why="no distro named $WSL_DISTRO_NAME in the registry" ;;

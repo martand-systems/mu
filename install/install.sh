@@ -33,7 +33,7 @@ set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
 FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
                               # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
-DISPATCHER_REV=6              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=8              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
@@ -303,7 +303,7 @@ PYAPI=openvsp; [ -z "$(app openvsp-api 1)" ] || PYAPI=openvsp-api
 ENV_KEY="$(layer_key env "$(appkey $PYAPI) mm:$(app micromamba 4) uv:$(app uv 4)" \
   $OS/env.explicit.txt $OS/env.pip.txt toolchain/pins.toml toolchain/patches toolchain/pip-stubs $OS/pip-stubs)"
 CAM_KEY="$(layer_key cam "$(appkey freecad) uv:$(app uv 4)" $OS/cam-venv.pip.txt toolchain/pip-stubs)"
-APP_NAMES="$(awk -F'\t' '$5!="binary" && $5!="tar.bin" && $1!="uv"{print $1}' "$WORK/apps.tsv")"
+APP_NAMES="$(awk -F'\t' '$5!="binary" && $5!="tar.bin" && $5!="gz.bin" && $1!="uv"{print $1}' "$WORK/apps.tsv")"
 LAYERS="$ENV_KEY $CAM_KEY"; for a in $APP_NAMES; do LAYERS="$LAYERS $(appkey "$a")"; done
 printf '%s\n' $LAYERS > "$T/LAYERS"   # written early: `mu gc` never removes layers an install is using
 # download-cache entries this version pins (mu gc keeps them while the version is installed): "flatpak REF@COMMIT"
@@ -456,6 +456,11 @@ f="$(fetch "$(app uv 2)" "$(app uv 3)" "$(app uv 4)" 2>&5)"
 tar -xzf "$f" -C "$WORK"
 install -m 755 "$WORK/$(app uv 6)/uv" "$T/libexec/uv"
 UV="$T/libexec/uv"
+# the job layer's relay client (docs/design/job-layer.md §5.4): a pinned binary in libexec, in no layer
+f="$(fetch "$(app chisel 2)" "$(app chisel 3)" "$(app chisel 4)" 2>&5)"
+gunzip -c "$f" > "$T/libexec/chisel.tmp" && chmod 755 "$T/libexec/chisel.tmp" && mv "$T/libexec/chisel.tmp" "$T/libexec/chisel"
+CHISEL_VERSION="$(awk -F'"' '/^\[/ { s = ($0 == "[chisel]") } s && /^version / { print $2; exit }' "$R/toolchain/apps.toml")"
+[ "$("$T/libexec/chisel" --version 2>&1)" = "$CHISEL_VERSION" ] || fail "the chisel client does not report version $CHISEL_VERSION"
 
 export MU_TOOLCHAIN="$T" MU_HOME MU_CACHE MU_INSTALLING=1
 set +u; . "$R/lib/mu-env.sh"; set -u
