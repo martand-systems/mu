@@ -57,9 +57,10 @@ def sec_code():
     # every single-symbol substitution and adjacent transposition of 2000 random codes: caught at least 1 - 2^-9
     rnd = random.Random(7)
     tried = caught = 0
-    for _ in range(2000):
-        c, _, _ = pair.make_code()
-        s = c.replace("-", "")
+    for _ in range(2000):   # fixed codes (seeded): a sample of 4000 typos is stable run to run
+        i4 = "".join(rnd.choice(pair.ALPHABET) for _ in range(4))
+        s18 = "".join(rnd.choice(pair.ALPHABET) for _ in range(18))
+        s = pair.format_code(i4, s18).replace("-", "")
         i = rnd.randrange(24)
         alt = rnd.choice([x for x in pair.ALPHABET if x != s[i]])
         sub = s[:i] + alt + s[i + 1:]
