@@ -12,7 +12,7 @@ Sections: [0 After the review](#0-after-the-review) · [1 Summary](#1-summary) �
 [9 PC](#9-the-pc-side) · [10 Second workstation](#10-a-second-workstation-stage-p2) · [11 Migration](#11-migration) ·
 [12 Threat model](#12-threat-model) · [13 Tests](#13-tests) · [14 Not tested, open questions](#14-not-tested-and-open-questions) ·
 [15 Read in sources](#15-read-in-sources) · [16 Files and order of work](#16-files-and-the-order-of-work) ·
-[17 Review](#17-review)
+[17 Review](#17-review) · [18 P1b as built](#18-p1b-as-built-the-clients)
 
 ## 0. After the review
 
@@ -228,9 +228,10 @@ then repeats `mu compute invite --wait 7K3M --json --timeout 540` while it exits
 the last event). The final object is `{"ok": true, "node": "office-pc", "state": "finished", "host_key_fingerprint":
 …, "hello": {…}}`. Claude shows the owner the code and the two PC lines, and nothing else secret is ever in its output.
 
-The code itself does pass through Claude's transcript this way. That is accepted (it is single use, worthless once used
-or after 60 minutes, §12), and `--show-code dialog` keeps it out: the code then appears only in a macOS dialog
-(`osascript display dialog`) and the JSON carries `"code": null` (§14 Q2).
+*As built (the lead's answer to Q2, §18):* with `--json`, or without a terminal, the code is **not** printed: it
+appears in a macOS dialog (`osascript`, the script on its stdin, so the code is in no argument list) and the JSON
+carries `"code": null`. Off macOS the command refuses (exit 2 `code-not-shown`) unless `--show-code stdout` is given.
+At a terminal it is printed, as in §3.2.
 
 ### 3.4 Errors, as each side prints them
 
@@ -281,8 +282,8 @@ same code. No visit to the PC.
 
 | Command | What it does |
 |---|---|
-| `mu compute remove office-pc` | As today: this Mac forgets the node (folder, Keychain item, ControlMaster). Prints the revoke command for the PC |
-| `mu compute remove office-pc --relay` | Also deletes the relay client `office-pc` (the node can no longer reach the relay: decommissioning). Asks for the admin token from the Keychain |
+| `mu compute remove office-pc` | This Mac forgets the node (folder, ControlMaster; the relay password's Keychain item only when nothing else uses it) and, *as built (lead's answer to Q7)*, deletes the relay client `office-pc` when this Mac holds the admin token for that relay. Prints the revoke command for the PC |
+| `mu compute remove office-pc --keep-relay-client` | Leaves the relay client (the node keeps reaching the relay) |
 | `mu relay remove <name>` | Deletes a dynamic client, or masks a static one with a tombstone (§6.5). chisel is restarted: every session of that client ends now, every other client reconnects within about 2 s (§6.7). A workstation removed here can reach no node's `sshd` any more: they listen on loopback behind the relay |
 | `mu relay clients` | The clients (static, dynamic, tombstoned), roles, ports, who created them, never a password |
 | `mu compute revoke office-pc bob-mbp` (P2) | Removes bob-mbp's ssh key on the node by a signed request (§10) |
@@ -954,7 +955,8 @@ the job layer applies, no Linux process reaches `C:`). Hence:
 only; not `%TEMP%`, which a non-elevated process of the same user could rewrite between the copy and the run, review
 finding 13) and runs that copy in the same window (`Start-Process
 -NoNewWindow -Wait`, as `Invoke-As64Bit` does): the restart in the middle of `pair` takes `\\wsl.localhost` away for a
-minute. Not elevated: the existing `Invoke-Elevated` (a new window; `Read-Host` works there).
+minute. Not elevated: *as built* `pair` refuses (`open Terminal (Admin) and run the same line there`) instead of
+`Invoke-Elevated`, which copies a UNC script to `%TEMP%` (§18).
 
 ### 9.2 `mu-wsl2-host.ps1 pair` (Windows PowerShell 5.1, ASCII only)
 
@@ -1326,14 +1328,15 @@ the node paired this way. New rows:
 **Open questions, answered by the lead after the review:**
 
 - **Q1.** The PC visit is two commands: accepted.
-- **Q2.** The code is printed by default (the owner may follow the Mac only through Claude's remote session, where a
-  macOS dialog is invisible); `--show-code dialog` stays an option. Session continuity and the authenticated contest
-  (§12.1) are what make printing acceptable.
+- **Q2.** *Changed by the lead for P1b:* with `--json` or without a terminal (Claude Code) the code is never printed to
+  stdout: a macOS dialog shows it; elsewhere refused unless `--show-code stdout`. At a terminal it is printed (§3.3,
+  §18).
 - **Q3.** No scrypt. The secret is 90 bits instead of 80 (two more characters), because the Mac now verifies up to 24 h.
 - **Q4.** No admin token for a second workstation.
 - **Q5.** Gone: addresses no longer decide anything (§12.1).
 - **Q6.** How `C:\Mu\host` gets newer root-side scripts after jobs have run: inherited from the job layer, still open.
-- **Q7.** `mu compute remove` removes the relay client only with `--relay`.
+- **Q7.** *Changed by the lead for P1b:* `mu compute remove` deletes the node's relay client by default when the admin
+  token is available; `--keep-relay-client` skips it.
 - **Q8.** A lost volume no longer revives a revoked client: `RELAY_REVOKED` (§6.5).
 
 ## 15. Read in sources
@@ -1405,3 +1408,78 @@ correctly in F2: a contest without a valid claim token must be refused, and it i
 the visit stays on the manual path of `first-job-checklist.md` until P1b is released. Merging this branch to `main`
 redeploys the production relay (Dokploy watches `relay/**`); without `RELAY_ADMIN_TOKEN` it runs chisel exactly as
 before (S4 legacy rows), with an unused empty volume.
+
+## 18. P1b as built (the clients)
+
+P1b was built on branch `pairing` after §17. Where the code differs from the sections above, the code is right and
+this list says so; the sections were corrected where it was a sentence (§3.3, §3.7, §9.1, §14 Q2 and Q7).
+
+**Files.** `src/mu/pair.py` (the protocol and the claimer: root runs its copy `/usr/local/lib/mu/mu-pair.py`);
+`src/mu/invite.py` (the Mac: `mu compute invite`, `mu relay login|status|clients|remove|backup|restore`, the relay half
+of `mu compute remove`); `src/mu/jobs.py` (dispatch, `compute remove`), `src/mu/node.py` (`mu node host-script`),
+`src/mu/cli.py`, `bin/mu` (route `relay`; dispatcher rev 9); `install/hosts/wsl2/mu-wsl2-distro.sh` (`pair
+claim|finish|run|abort|status`, `--relay`, `ensure_self` installs `mu-pair.py`, `status` warns of a half-done
+pairing), `install/hosts/wsl2/mu-wsl2-host.ps1` (`pair`, `-Relay`, `Stop-WslAsSystem` shared with `test-stop`,
+`C:\Mu\host\mu-pair.py`); `tools/test-pair/` (`run.sh`, `unit.py`, `fakerelay.py`); `tools/test-jobs/e2e.sh` (S3 and
+the Q rows), `tools/test-jobs/node-setup.sh` (no credential); `tools/s4/run.sh` (`S4_PAIRING_E2E=1`); relay faults
+for the clients' tests (below); `docs/design/first-job-checklist.md` (rewritten); `claude/CLAUDE-toolchain.md`.
+
+**Differences from the design, each deliberate:**
+
+| # | Design | As built | Why |
+|---|---|---|---|
+| D1 | The Mac's commands in `jobs.py`; `mu compute add` split so invite reuses it | `invite.py`, which uses `jobs.py`'s helpers (`ssh_config_text`, `store_secret`, `hello`, `Conn`); `compute add` unchanged | `jobs.py` is 2,000 lines; no change to the tested manual path |
+| D2 | With the file store the relay password is `relay.auth` in each node folder | `mu relay login` keeps it in `$MU_HOME/relay/relay.auth` (0600) and an invite copies it into the node's folder | at login there is no node folder yet |
+| D3 | The code printed by default, `--show-code dialog` optional | `--show-code auto` (default): printed at a terminal; with `--json` or no terminal a macOS dialog and `"code": null`; elsewhere refused (exit 2 `code-not-shown`) unless `--show-code stdout` | the lead's answer to Q2 |
+| D4 | `mu compute remove --relay` | deleted by default with the admin token; `--keep-relay-client`. The relay password's Keychain item is deleted only when no other keychain node and no `mu relay login` uses it (it is one item per relay host and user) | the lead's answer to Q7; the shared item was a bug the design did not see |
+| D5 | §9.5: after the confirm, the same line gets `invite-used` | the node records the invites it finished (`done.json`, 48 h) and answers `already-paired` (exit 5) without contacting the relay | found by `tools/test-pair`: otherwise the paired PC, running its line once more, posts a contest that the relay accepts, and **undoes its own pairing** (§12.1) |
+| D6 | `pair` elevates itself (`Invoke-Elevated`) | refuses without an elevated window | `Invoke-Elevated` copies a UNC script to `%TEMP%` (review finding 13), and the code is typed in the window that runs it |
+| D7 | The ps1 writes the code to `claim` and again to `finish` | the code is asked once; its bytes stay in the ps1's memory across the restart and are cleared after `finish`; `finish` runs without `--json` so its lines appear as they happen | one prompt for the owner; §9.2 already said the code lives in PowerShell's memory |
+| D8 | The summary line `paired with avi-mac · ready for jobs: yes` | `paired with avi-mac \| ready for jobs: yes` | the ps1 is ASCII only |
+| D9 | §9.6, the node's root half of P2 (`keyreq`), installed at the first visit | **not built** (P2 is out of scope for now). `/etc/mu/owners` is written at the first pairing. P2 will therefore need one more root step at the PC (`C:\Mu\host\mu-wsl2-host.ps1 install` from a release that has it) | the lead's scope for P1b |
+| D10 | §8.3 step 11: `compute status` and `submit` look at a finished invite for 24 h (late contest) | only `mu compute invite --wait` sees a contest; a contest after `finish` removes the relay client (the relay does it), so the node stops answering, but the Mac does not un-pin by itself | scope; listed under "not built" |
+| D11 | `--ttl MIN` | `--ttl DUR` (`30m`, `90s`; 1–60 minutes) | the tests need a 1-minute invite |
+| D12 | The backup as one Keychain value | base64 of the JSON (`security -i` reads a quoted string) | quoting |
+| D13 | `mu-wsl2-distro uninstall` | removes `/var/lib/mu-wsl2/pair`, keeps `mu-pair.py` like the gate's source; the ps1's uninstall deletes it | as the other root-side scripts |
+
+**Relay faults added for the clients' tests** (`-tags faults` only; `must-fail.sh` checks each): `tamper-offer-fp`
+(another relay fingerprint in the offer), `tamper-offer-url` (another relay URL), `any-claim` (any claim token is
+accepted: the claimer's own checks remain), and `from-file` (the active faults are also read from
+`/var/lib/mu-relay/test-fault`, so the e2e run switches them without a restart). `TestOfferAndAnswerUnchanged` now
+compares every member of the offer.
+
+**Tests as built.** `tools/test-pair/run.sh` (§13.2): the code (aliases, separators, the exact BOM + CR LF bytes, 3,900
+single substitutions and transpositions), the known answers (equal to `pair_ref.py vectors` and to `openssl dgst
+-hmac`, and the claim hash the relay compares), every field bound, reflection, the offer checks, a retry after a 502
+with the identical body (F2), and the whole flow through the real command lines against `fakerelay.py` (the relay's
+state machine in Python) with stubs for `mu-wsl2-distro`, `ssh`, `security` and `osascript`: login, invite, the node's
+`run`, the Mac's `--wait`, typo, wrong secret, expiry, the relay changing the key, the fingerprint or the URL in the
+offer and the host key in the answer, contested, resume, abort, still-waiting, cancel, the dialog, `--replace` put
+back after a failure, `compute remove`, `relay restore`, the file store, and no secret in any argument list or
+output. Faults, each shown to make its checks fail: `no-check`, `key-label-swap`, `skip-field`, `one-key`,
+`no-type-label`, `trust-relay-fields`, `retry-new-body`, `skip-offer-mac`, `skip-answer-mac`,
+`rollback-on-no-confirm`, `no-resume`, `no-rollback`, `code-in-json`, `code-in-argv` (and `forget-done` in the e2e).
+
+`tools/test-jobs/e2e.sh` (§13.4): S3 pairs the node by one code (the relay replica in pairing mode with no static
+compute client, `relay login` with the replica's `login-bundle`, `invite --no-wait`, root's `pair run` with the code on
+stdin, `invite --wait`); every job-layer row runs against it. Q rows as built (each with its fault):
+
+| Row | Passes when | Fault → must fail |
+|---|---|---|
+| Q1 | a dynamic relay client made by the invite; the Mac's key the only one on the node; `/etc/mu/owners`; `ready for jobs: yes` | — |
+| Q2 | a typo: exit 2 at the node; the relay counted no claim | node `no-check` |
+| Q3 | a wrong secret with a valid check: exit 5 `wrong-code`, counted once; nothing set up | relay `any-claim` |
+| Q4 | a 1-minute invite claimed after 65 s: exit 9 at both ends; nothing set up | relay `no-expiry` |
+| Q5, Q6, Q7 | the relay changes the offer's key, relay fingerprint or relay URL: the node refuses (exit 5), sets nothing up, the invite is aborted, no client | node `skip-offer-mac` (Q7: with `trust-relay-fields`) |
+| Q9 | the relay changes the answer's host key: the Mac refuses (exit 5), pins nothing; the client removed; the node undoes its side | Mac `skip-answer-mac` |
+| Q10 | the used code again at the paired node: `already-paired`, the pairing stands | node `forget-done` |
+| Q11 | `--replace` with the Mac's confirm missing: the node exits 0 `not yet confirmed`, undoes nothing; the Mac finishes later with `--wait` | node `rollback-on-no-confirm` |
+| Q12 | no code, relay password or admin token in any argument list sampled during the pairings, any log, the journal or the relay's log | node `code-in-argv` |
+| Q13 | `mu compute remove` deletes the relay client; the node's tunnel is then refused | — |
+
+Not run in the e2e (covered by the fast tests only, or not at all): the 20-claim lockout (10 wrong claims from one
+address hold it off first; the relay's unit test covers both), the relay stopped while the Mac waits, a `pair` run
+killed after its answer, a second claimer from another machine (the fast flow covers contest and resume), P2.
+
+**Not built:** P2 (`invite --workstation`, `join`, `grant`, `revoke`, §9.6's `keyreq`); `mu relay export` /
+`gen-credentials.sh import` (§11 "going back"); the late contest check in `compute status`/`submit` (D10).
