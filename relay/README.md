@@ -1,16 +1,23 @@
 # μ relay (Stage A): chisel behind the server's Traefik
 
 One container on Martand's Docker server (PLAN §7). The office PC and the laptop each open an outbound
-`wss://relay.martand.systems` connection on 443; the relay joins the two. It stores nothing, publishes no host port
-and has no volume. Dokploy builds it from this folder and deploys it; nobody logs in to the server.
+`wss://relay.martand.systems` connection on 443; the relay joins the two. It publishes no host port. Dokploy builds it
+from this folder and deploys it; nobody logs in to the server.
+
+With `RELAY_ADMIN_TOKEN` set, the container also runs **mu-relayd**, the pairing service (`docs/design/pairing.md`):
+`mu compute invite` on the Mac and one line at the PC pair a node by one code, and relay clients are added and removed
+through its API instead of Dokploy edits. It answers `https://relay.martand.systems/mu/v1/` on the same route (chisel
+passes every request that is not a tunnel to it) and keeps its state on one named volume. Without the token the
+container is exactly the chisel-only relay described below.
 
 | File | What it is |
 |---|---|
-| `Dockerfile` | Alpine pinned by digest, chisel 1.12.0 pinned by SHA-256, runs as uid 65532 |
-| `compose.yaml` | The Dokploy Compose service. No routers, ports or volumes: Dokploy adds those labels and `dokploy-network`. Its own labels define the connection limit |
-| `entrypoint.sh` | Turns `RELAY_KEY` and `RELAY_CLIENTS` into chisel's key and its per-client access rules |
-| `gen-credentials.sh` | Makes and keeps the credentials (bash and openssl only) |
-| `.env.example` | The shape of the two variables. Placeholders only |
+| `Dockerfile` | Alpine pinned by digest, chisel 1.12.0 pinned by SHA-256, mu-relayd built from `control/` (Go, standard library only, nothing downloaded), runs as uid 65532 |
+| `compose.yaml` | The Dokploy Compose service. No routers or ports: Dokploy adds those labels and `dokploy-network`. Its own labels define the connection limit. One named volume, `relay-state`, for the pairing state |
+| `entrypoint.sh` | Turns `RELAY_KEY` and `RELAY_CLIENTS` into chisel's key and its per-client access rules; applies `RELAY_REVOKED`; starts mu-relayd when `RELAY_ADMIN_TOKEN` is set |
+| `control/` | mu-relayd: the pairing and control API, chisel's auth file, chisel's supervisor (`go test ./...`; `must-fail.sh` runs every test with its fault) |
+| `gen-credentials.sh` | Makes and keeps the credentials, the admin token and the revoked list (bash and openssl only) |
+| `.env.example` | The shape of the variables. Placeholders only |
 
 What each client may do is fixed by its entry in `RELAY_CLIENTS`:
 
@@ -19,7 +26,9 @@ What each client may do is fixed by its entry in `RELAY_CLIENTS`:
 
 So relay credentials do not give access to the other containers on `dokploy-network`, to Traefik's API or to the
 internet, and a neighbouring container cannot reach a compute node's port. `tools/s4/run.sh` tests this with
-chisel's own client and with a client written to ask for tunnels it did not declare.
+chisel's own client and with a client written to ask for tunnels it did not declare. Clients that mu-relayd adds get
+exactly the same two rules (rows P5), and its auth file always holds a sentinel user that nobody can log in as, because
+chisel lets anyone in when its user list is empty (row P11).
 
 What the relay does **not** give, in Stage A:
 
@@ -152,9 +161,102 @@ holders of the workstation credentials may not read.
 
 - **chisel version:** change `CHISEL_VERSION` and both sums in `Dockerfile`, push to a branch, and let the
   `s4-relay` workflow pass before it reaches the deploy branch.
-- **Testing:** `tools/s4/test-config.sh` (no Docker) and `tools/s4/run.sh` (a replica of the server's Traefik on
-  the local Docker; never on the server). CI runs both on every branch push that touches `relay/` or `tools/s4/`,
+- **Testing:** `tools/s4/test-config.sh` (no Docker), `relay/control` (`go test ./...`, and `must-fail.sh`) and
+  `tools/s4/run.sh` (a replica of the server's Traefik on the local Docker; never on the server). CI runs both on every branch push that touches `relay/` or `tools/s4/`,
   with 4 minutes of idle time. The long run (20 minutes idle on every Traefik version, and the credential tests on
   macOS) starts from *Run workflow* with idle 1200, or with `[s4-long]` in the pushed commit's message. Run it
   before a new chisel or Traefik version is deployed.
-- **Removing it:** delete the Dokploy service. Nothing else on the server was changed.
+- **Removing it:** delete the Dokploy service, with *delete volumes* ticked (the pairing state volume). Nothing else
+  on the server was changed.
+
+## 6. The pairing service (mu-relayd)
+
+### 6.1 Turning it on: the one Dokploy edit
+
+On the Mac, in Terminal (not through Claude Code: the token must not pass through its transcript):
+
+```sh
+relay/gen-credentials.sh admin-token        # adds RELAY_ADMIN_TOKEN to ~/.config/mu/relay.env; prints nothing secret
+relay/gen-credentials.sh env                # now three lines (four with RELAY_REVOKED)
+```
+
+In Dokploy: the service's **Environment** tab, replace the lines with the new ones, **Save**, **Deploy**. Nothing else
+changes: not the Domains entry, not Advanced (leave *Isolated Deployment* and *Randomize Compose* off and add no
+Mounts). The changed environment makes Docker replace the container; it starts mu-relayd, which creates its store on
+the volume and starts chisel as its child.
+
+### 6.2 Checking it
+
+```sh
+curl -sS https://relay.martand.systems/health      # OK (now answered by mu-relayd while chisel runs)
+curl -sS https://relay.martand.systems/mu/v1/      # {"ok":true,"pairing":true,"protocol":1,"service":"mu-relay","store":"ok"}
+```
+
+`"store":"unwritable"` means the volume is not writable by uid 65532 and `"damaged"` that its files could not be read:
+the static clients keep working either way, and pairing is off until it is fixed (§6.5). The container log starts
+with `relay: pairing mode; …` and `mu-relayd: store <id> (ok), N client(s) in the auth file`; each change is one line
+(`invite 7K3M claimed from=…`, `client office-pc removed`, `chisel restarted (…)`), never a password, token or code.
+On the Mac, `relay/gen-credentials.sh login-bundle avi-mac | mu relay login --stdin` stores the token in the Keychain
+and checks it (`GET /mu/v1/clients`).
+
+### 6.3 What it changes
+
+- **Static clients** (`RELAY_CLIENTS`) work as before. mu-relayd never changes them and never copies their passwords.
+- **Dynamic clients** are made by pairing (`mu compute invite`) or by the API (`PUT /mu/v1/clients/NAME`); each has the
+  password its node chose. They get exactly the rules above. A new client is accepted by chisel within a second,
+  without a restart and without touching other tunnels (chisel 1.12.0 reloads its auth file by itself).
+- **Removing a client** (`mu relay remove NAME`, `mu compute remove NAME --relay`, or `DELETE /mu/v1/clients/NAME`)
+  restarts chisel once, at most every 10 s, because chisel keeps a removed user's open tunnels otherwise: every tunnel
+  drops for about a second and reconnects by itself. Removing a static client leaves a tombstone in the store; the
+  last client cannot be removed (409 `last-client`).
+- A static workstation that pairs a second node is given the new port as a **grant** (its password stays the static
+  one). Deleting a compute client takes its port away from every workstation.
+
+### 6.4 Rotating the admin token
+
+```sh
+relay/gen-credentials.sh admin-token --rotate
+relay/gen-credentials.sh env                 # paste into Dokploy, Save, Deploy
+relay/gen-credentials.sh login-bundle avi-mac | mu relay login --stdin
+```
+
+The old token stops working at the deploy. Clients and pairings are not affected (they are on the volume).
+
+### 6.5 Revoking a client, also without the Mac
+
+With the Mac: `mu relay remove NAME` (immediate). Without it (a stolen Mac, a lost laptop), or to be sure it holds even
+if the volume is lost:
+
+```sh
+relay/gen-credentials.sh revoke NAME          # adds NAME to RELAY_REVOKED
+relay/gen-credentials.sh admin-token --rotate # if the Mac that held the token is gone
+relay/gen-credentials.sh env                  # paste into Dokploy, Save, Deploy
+```
+
+At every start the entrypoint drops a revoked name from the static list and mu-relayd deletes any dynamic client,
+grant or tombstone of that name; the API refuses to create it again. `unrevoke NAME` takes it off the list. Then revoke
+the client's keys on the nodes (`mu-wsl2-distro revoke NAME` as root on the PC, or the job layer's procedure).
+
+### 6.6 The volume, and losing it
+
+Docker names it `<appName>_relay-state` (Dokploy's project name). Dokploy keeps it across deploys, pushes and
+restarts. It is lost only by: deleting the service with *delete volumes* ticked, a deploy with *fresh volumes*,
+turning on *Isolated Deployment* (with isolated volumes) or *Randomize Compose*, or a new server. Then mu-relayd starts
+with a new, empty store (a new `store_id`): every **dynamic** client is refused (`Authentication failed`) until it is
+put back, the static clients keep working, tombstones are gone (that is what `RELAY_REVOKED` is for), and open invites
+are gone (make new ones). On the Mac, `mu relay status` notices the new store and `mu relay restore` puts every client,
+grant and tombstone back from the Mac's backup; no visit to the PC.
+
+If the store's files are damaged (both `state.json` and `state.json.prev` unreadable), pairing answers 503
+`store-damaged` and the static clients keep working; `POST /mu/v1/store/reset` (admin) moves the files aside and starts
+a new store, then `mu relay restore`.
+
+### 6.7 Turning it off
+
+Remove `RELAY_ADMIN_TOKEN` in Dokploy and deploy: the container is the chisel-only relay again, with the static
+clients only; every dynamic client stops working (the volume stays, unused, and comes back if the token does).
+
+### 6.8 The API
+
+`docs/design/pairing.md` §6.2 is the reference (endpoints, authentication, errors, limits). Clients act on the `error`
+slug only; the `message` is for people reading logs and is never shown by μ.
