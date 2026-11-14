@@ -323,6 +323,25 @@ mkdir -p "$MU_HOME/state/start.lock"; echo "$holder" > "$MU_HOME/state/start.loc
 MU_SWITCH_WAIT_S=2 MU_DISPATCH_FAULT=ignore-start-lock mu autoupdate run --force >/dev/null 2>&1
 if [ "$(def)" = v2026.11.5 ]; then ok "must-fail: with fault ignore-start-lock the default moves while the runner is starting a job (as the check must notice)"
 else bad "must-fail: ignore-start-lock did not move the default"; fi
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+# a lock left by a process that is gone, whose pid is alive again (after a reboot, or reused): stale, not waited for
+# (review 2026-11-15: such a lock stopped every switch and, on the runner's side, every start)
+echo boot-now > "$ROOT/boot_id"
+sleep 120 & holder=$!
+echo v2026.11.4 > "$MU_HOME/default"
+mkdir -p "$MU_HOME/state/start.lock"; printf '%s\nboot-before\n\n' "$holder" > "$MU_HOME/state/start.lock/pid"
+out="$(MU_BOOT_ID_FILE="$ROOT/boot_id" MU_SWITCH_WAIT_S=3 mu autoupdate run --force 2>&1)"
+eq "a start lock from another boot (its pid alive again): stale, the switch happens" "$(def)" v2026.11.5
+echo v2026.11.4 > "$MU_HOME/default"
+mkdir -p "$MU_HOME/state/start.lock"; printf '%s\nboot-before\n\n' "$holder" > "$MU_HOME/state/start.lock/pid"
+MU_DISPATCH_FAULT=start-lock-pid-only MU_BOOT_ID_FILE="$ROOT/boot_id" MU_SWITCH_WAIT_S=2 mu autoupdate run --force >/dev/null 2>&1
+if [ "$(def)" = v2026.11.4 ]; then ok "must-fail: with fault start-lock-pid-only (a live pid holds the lock) the switch waits for it, as the check must notice"
+else bad "must-fail: start-lock-pid-only still switched"; fi
+rm -rf "$MU_HOME/state/start.lock"; mkdir -p "$MU_HOME/state/start.lock"
+printf '%s\nboot-now\n\n' "$holder" > "$MU_HOME/state/start.lock/pid"; touch -t 202601010000 "$MU_HOME/state/start.lock/pid"
+out="$(MU_BOOT_ID_FILE="$ROOT/boot_id" MU_SWITCH_WAIT_S=3 mu autoupdate run --force 2>&1)"
+eq "a start lock not refreshed for MU_SWITCH_WAIT_S + 60 s: stale, the switch happens" "$(def)" v2026.11.5
+has "  the run's log says it removed it" "$(cat "$(st last_log)" 2>/dev/null)" "removed a stale start lock"
 kill "$holder" "$job" 2>/dev/null; wait "$holder" "$job" 2>/dev/null
 # too little memory beside the jobs: deferred
 mkrepo bmem "v2026.11.4:success v2026.11.5:success"
@@ -334,6 +353,72 @@ out="$(MU_MEMINFO="$ROOT/meminfo" mu autoupdate run)"
 eq "busy with 1 GB available: the installer is not called" "$(calls)" 0
 has "  deferred, saying why" "$out" "MB of memory available"
 kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+# the install beside jobs is held to its own memory: a transient scope with MemoryMax (review 2026-11-15)
+cat > "$STUBS/sdrun" <<'S'
+#!/bin/bash
+# systemd-run --user --scope ... -- CMD: logs its arguments, runs CMD (or exits with $FLAGS/sdrun-rc)
+printf '%s\n' "$*" >> "$CALLS/sdrun.log"
+[ ! -f "$FLAGS/sdrun-rc" ] || exit "$(cat "$FLAGS/sdrun-rc")"
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done; shift; exec "$@"
+S
+chmod +x "$STUBS/sdrun"
+mkrepo bcap "v2026.11.4:success v2026.11.5:success"
+fresh bcap bcap
+sleep 120 & job=$!; echo "$job" > "$MU_HOME/state/busy"; rm -f "$CALLS/sdrun.log"
+out="$(MU_SYSTEMD_RUN="$STUBS/sdrun" mu autoupdate run)"
+eq "busy: installed beside the jobs (through the scope)" "$(def)" v2026.11.5
+has "  in a transient scope held to 1536 MB" "$(cat "$CALLS/sdrun.log" 2>/dev/null)" "--user --scope --quiet --collect --unit=mu-install-"
+has "  MemoryMax 1572864K" "$(cat "$CALLS/sdrun.log" 2>/dev/null)" "MemoryMax=1572864K"
+fresh bcap2 bcap
+echo "$job" > "$MU_HOME/state/busy"; rm -f "$CALLS/sdrun.log"
+MU_DISPATCH_FAULT=install-uncapped MU_SYSTEMD_RUN="$STUBS/sdrun" mu autoupdate run >/dev/null 2>&1
+if [ -s "$CALLS/sdrun.log" ]; then bad "must-fail: install-uncapped still used the scope"
+else ok "must-fail: with fault install-uncapped the install runs without its memory cap (as the check must notice)"; fi
+fresh bcap3 bcap
+echo "$job" > "$MU_HOME/state/busy"; echo 137 > "$FLAGS/sdrun-rc"
+MU_SYSTEMD_RUN="$STUBS/sdrun" mu autoupdate run >/dev/null 2>&1; rm -f "$FLAGS/sdrun-rc"
+eq "killed under the cap (exit 137): not a failure of the release (fail_count empty)" "$(st fail_count)" ""
+eq "  an install error, retried (err_count 1)" "$(st err_count)" 1
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+# gc keeps every version a queued, held or running job needs (the runner's needed-versions), and the default
+mkrepo bneed "v2026.11.4:success"
+fresh bneed bneed
+for v in v2026.11.2 v2026.11.3; do fake_installed "$v"; done
+echo v2026.11.2 > "$MU_HOME/state/needed-versions"
+mu gc --yes >/dev/null 2>&1
+check "mu gc --yes keeps the version a held job needs (needed-versions)" test -f "$MU_HOME/toolchains/v2026.11.2/MANIFEST.json"
+check "  and removes the one nothing needs" test ! -e "$MU_HOME/toolchains/v2026.11.3"
+fake_installed v2026.11.3
+MU_DISPATCH_FAULT=gc-ignores-needed mu gc --yes >/dev/null 2>&1
+if [ -e "$MU_HOME/toolchains/v2026.11.2" ]; then bad "must-fail: gc-ignores-needed kept v2026.11.2"
+else ok "must-fail: with fault gc-ignores-needed gc removes a held job's version (as the check must notice)"; fi
+mkrepo bneed2 "v2026.11.4:success v2026.11.5:success"
+fresh bneed2 bneed2
+for v in v2026.11.2 v2026.11.3; do fake_installed "$v"; done
+echo v2026.11.2 > "$MU_HOME/state/needed-versions"
+sleep 120 & job=$!; echo "$job" > "$MU_HOME/state/busy"
+mu autoupdate run >/dev/null 2>&1
+kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+mu autoupdate run --scheduled >/dev/null 2>&1
+check "the deferred gc keeps it too" test -f "$MU_HOME/toolchains/v2026.11.2/MANIFEST.json"
+eq "  (the deferred gc ran)" "$(st pending_gc)" ""
+# a rollback after a switch on a busy node: the deferred gc never removes the default as it is now
+mkrepo broll "v2026.11.4:success v2026.11.5:success"
+for f in "" gc-forgets-default; do
+  fresh "broll$f" broll
+  for v in v2026.11.2 v2026.11.3; do fake_installed "$v"; done
+  sleep 120 & job=$!; echo "$job" > "$MU_HOME/state/busy"
+  mu autoupdate run >/dev/null 2>&1
+  mu use v2026.11.2 >/dev/null 2>&1
+  kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+  MU_DISPATCH_FAULT="$f" mu autoupdate run --scheduled >/dev/null 2>&1
+  if [ -z "$f" ]; then
+    eq "rolled back (mu use v2026.11.2) before the deferred gc: the default stays" "$(def)" v2026.11.2
+    check "  and installed" test -f "$MU_HOME/toolchains/v2026.11.2/MANIFEST.json"
+    eq "  the deferred gc ran" "$(st pending_gc)" ""
+  elif [ -e "$MU_HOME/toolchains/v2026.11.2" ]; then bad "must-fail: gc-forgets-default kept the rolled-back default"
+  else ok "must-fail: with fault gc-forgets-default the deferred gc removes the rolled-back default (as the check must notice)"; fi
+done
 # a stale marker (its pid gone) is no marker at all
 sleep 0 & dead=$!; wait "$dead"
 echo "$dead" > "$MU_HOME/state/busy"

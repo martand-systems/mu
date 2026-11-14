@@ -29,6 +29,10 @@ find_project() { local d="$PWD"; while [ "$d" != "/" ]; do [ -f "$d/mu.toml" ] &
 projects() { [ -f "$MU_HOME/projects.txt" ] && while IFS= read -r p; do [ -f "$p/mu.toml" ] && echo "$p"; done < "$MU_HOME/projects.txt"; return 0; }
 pinned_by() { projects | while IFS= read -r p; do [ "$(toml_version "$p/mu.toml")" = "$1" ] && printf '%s ' "$(basename "$p")"; done; return 0; }
 pinned_versions() { projects | while IFS= read -r p; do toml_version "$p/mu.toml"; done; return 0; }
+needed_versions() {   # the versions a job runner's unfinished jobs (queued, held, running) need (src/mu/node.py write_needed)
+  [ "${MU_DISPATCH_FAULT:-}" != gc-ignores-needed ] || return 0
+  [ -r "$MU_HOME/state/needed-versions" ] && tr -cs 'A-Za-z0-9._-' '\n' < "$MU_HOME/state/needed-versions" | grep . ; return 0
+}
 valid_version() { case "$1" in ""|.*|*..*|*/*|*[!A-Za-z0-9._-]*) die "invalid version '$1'" 2 ;; esac; }
 versions() { [ -d "$TC" ] && ls "$TC" | sort -t. -k1.2,1n -k2,2n -k3,3n; return 0; }
 install_running() {
@@ -304,7 +308,7 @@ cmd_gc() {
   # a job runner with jobs: a version it or a job's shim still runs from may no longer be the default (docs/design/
   # scheduler.md §9): gc only when idle
   if [ "$apply" = 1 ] && au_busy >/dev/null; then die "jobs are queued or running ($(tilde "$AU_BUSY")): run gc when the node is idle" 1; fi
-  keep=" $(default_version) ${MU_VERSION:-} $(pinned_versions | tr '\n' ' ') "
+  keep=" $(default_version) ${MU_VERSION:-} $(pinned_versions | tr '\n' ' ') $(needed_versions | tr '\n' ' ') "
   if P="$(find_project)"; then keep="$keep$(toml_version "$P/mu.toml") "; fi
   for v in $(versions); do case "$keep" in *" $v "*) kept="$kept $v" ;; esac; done
   printf 'keeping:%s  (the default and versions pinned by %s registered project(s))\n' "${kept:- nothing}" "$(projects | wc -l | tr -d ' ')"
@@ -440,6 +444,8 @@ AU_CONF="$MU_HOME/autoupdate.conf"; AU_STATE="$MU_HOME/state/autoupdate.state"; 
 AU_LOCK="$MU_HOME/.autoupdate.lock"; AU_LOG=""; AU_WHY=""
 AU_START_LOCK="$MU_HOME/state/start.lock"   # held by the job runner while it starts jobs (src/mu/node.py take_start_lock)
 AU_BUSY_MEM_KB=2097152   # a release installs beside running jobs only while this much memory is available (Linux)
+AU_BUSY_CAP_KB=1572864   # ... and in a scope of its own held to this much (MemoryMax): the jobs' grants leave the system
+                         # 2 GiB, and a job growing into its grant must never meet an install the kernel would let win
 AU_MAX_TRIES=3     # a release that fails its checks (or hangs, or is stopped mid-install) is tried this often
 AU_MAX_ERRORS=7    # a release that fails to download or build is tried once a day this often
 AU_RETRY_S="${MU_AUTOUPDATE_RETRY_S:-60}"
@@ -861,7 +867,10 @@ au_gc() {   # au_gc NEW PREV: remove releases older than NEW that nothing needs.
     return 0
   fi
   n="$(au_conf keep_previous)"
-  keep=" $new $(pinned_versions | tr '\n' ' ') "
+  keep=" $new $(pinned_versions | tr '\n' ' ') $(needed_versions | tr '\n' ' ') "
+  # the default as it is now (a rollback may have moved it since a deferred gc was planned) and the version this
+  # dispatcher runs the job layer from are never removed (review 2026-11-15)
+  [ "${MU_DISPATCH_FAULT:-}" = gc-forgets-default ] || keep="$keep$(default_version) ${MU_INFRA_VERSION:-} "
   if [ "$n" -gt 0 ] && [ -n "$prev" ]; then case "$keep" in *" $prev "*) ;; *) keep="$keep$prev " ;; esac; n=$((n - 1)); fi
   for v in $(versions | sort -t. -k1.2,1nr -k2,2nr -k3,3nr); do
     { is_release "$v" && ver_gt "$new" "$v"; } || continue
@@ -874,21 +883,47 @@ au_gc() {   # au_gc NEW PREV: remove releases older than NEW that nothing needs.
   printf 'gc: kept%s; removed:%s · ' "$(echo "$keep" | tr -s ' ' | sed 's/ $//')" "${removed:- no versions}"
   report_removed $((f0 + PRUNED_KB))
 }
+au_boot_id() { cat "${MU_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}" 2>/dev/null || true; }
+au_proc_start() {   # au_proc_start PID: its start time (/proc/PID/stat field 22), empty without /proc
+  [ -r "/proc/$1/stat" ] || return 0
+  sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{ print $20 }'
+}
+au_lock_stale() {   # the start lock is no one's: its pid has exited or is now another process (pid + boot id + start
+                    # time, as src/mu/node.py start_lock_holder), or it was not refreshed for MU_SWITCH_WAIT_S + 60 s
+  local f="$AU_START_LOCK/pid" p b s n
+  p="$(sed -n 1p "$f" 2>/dev/null | tr -cd '0-9')"; b="$(sed -n 2p "$f" 2>/dev/null)"; s="$(sed -n 3p "$f" 2>/dev/null)"
+  if [ -z "$p" ]; then [ -n "$(find "$AU_START_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; return; fi   # being taken
+  ps -p "$p" >/dev/null 2>&1 || return 0
+  [ "${MU_DISPATCH_FAULT:-}" != start-lock-pid-only ] || return 1
+  n="$(au_boot_id)"
+  if [ -n "$b" ] && [ "$b" != unknown ] && [ -n "$n" ] && [ "$b" != "$n" ]; then return 0; fi
+  n="$(au_proc_start "$p")"
+  if [ -n "$s" ] && [ -n "$n" ] && [ "$s" != "$n" ]; then return 0; fi
+  [ -z "$(find "$f" -mmin +$(( (${MU_SWITCH_WAIT_S:-900} + 60 + 59) / 60 )) 2>/dev/null)" ] || return 0
+  return 1
+}
 au_take_start_lock() {   # wait (MU_SWITCH_WAIT_S, default 900 s) until the job runner is not starting a job, and hold
                          # its start lock: the default then moves between two starts (docs/design/scheduler.md §9)
-  local end=$((SECONDS + ${MU_SWITCH_WAIT_S:-900})) p
+  local end=$((SECONDS + ${MU_SWITCH_WAIT_S:-900}))
   [ "${MU_DISPATCH_FAULT:-}" != ignore-start-lock ] || return 0
   mkdir -p "$(dirname "$AU_START_LOCK")"
   while :; do
-    if mkdir "$AU_START_LOCK" 2>/dev/null; then echo "$$" > "$AU_START_LOCK/pid"; return 0; fi
-    p="$(cat "$AU_START_LOCK/pid" 2>/dev/null | tr -cd '0-9')"
-    if [ -n "$p" ] && ! ps -p "$p" >/dev/null 2>&1; then rm -rf "${AU_START_LOCK:?}"; continue; fi
-    if [ -z "$p" ] && [ -n "$(find "$AU_START_LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rm -rf "${AU_START_LOCK:?}"; continue; fi
+    if mkdir "$AU_START_LOCK" 2>/dev/null; then
+      printf '%s\n%s\n%s\n' "$$" "$(au_boot_id)" "$(au_proc_start $$)" > "$AU_START_LOCK/pid"; return 0
+    fi
+    if au_lock_stale; then echo "removed a stale start lock ($(tr '\n' ' ' < "$AU_START_LOCK/pid" 2>/dev/null))"; rm -rf "${AU_START_LOCK:?}"; continue; fi
     [ "$SECONDS" -lt "$end" ] || return 1
     sleep 1
   done
 }
-au_drop_start_lock() { [ "$(cat "$AU_START_LOCK/pid" 2>/dev/null)" != "$$" ] || rm -rf "${AU_START_LOCK:?}"; }
+au_drop_start_lock() { [ "$(sed -n 1p "$AU_START_LOCK/pid" 2>/dev/null)" != "$$" ] || rm -rf "${AU_START_LOCK:?}"; }
+au_install() {   # au_install V CAP_KB: cmd_install V; with CAP_KB (a busy node) in a transient scope of the user's systemd
+                 # with MemoryMax, so the kernel's OOM killer never picks a job for the install's sake (review 2026-11-15)
+  if [ -z "$2" ] || [ "${MU_DISPATCH_FAULT:-}" = install-uncapped ]; then cmd_install "$1" --no-modify-path; return; fi
+  echo "the install runs in a scope of its own, held to $(($2 / 1024)) MB of memory (jobs are running)"
+  "${MU_SYSTEMD_RUN:-systemd-run}" --user --scope --quiet --collect --unit="mu-install-$$" -p MemoryMax="$2"K \
+    -- /bin/bash "$MU_HOME/bin/mu" install "$1" --no-modify-path
+}
 au_mem_kb() { awk '/^MemAvailable:/ { print $2; exit }' "${MU_MEMINFO:-/proc/meminfo}" 2>/dev/null || true; }
 au_switch() {   # au_switch OLD NEW: make NEW (installed and checked) the default. With a job runner busy, between two of
                 # its starts (it restarts with NEW and adopts the running jobs, which keep their pinned versions); gc
@@ -919,17 +954,22 @@ au_switch() {   # au_switch OLD NEW: make NEW (installed and checked) the defaul
     else au_gc "$new" "$old"; fi
   fi
 }
-au_pending_gc() {   # the gc a switch on a busy node deferred: run it once the node is idle (logged to the run's log)
-  local pg n o; pg="$(st_get pending_gc)"; [ -n "$pg" ] || return 0
+au_pending_gc() {   # the gc a switch on a busy node deferred: run it once the node is idle (logged to the run's log),
+                    # from the default as it is now (mu use may have rolled it back since)
+  local pg n o d; pg="$(st_get pending_gc)"; [ -n "$pg" ] || return 0
   if au_busy >/dev/null || install_running; then return 0; fi
-  n="${pg%% *}"; o="${pg#* }"; [ "$o" != "$pg" ] || o=""
-  echo "the gc deferred while jobs ran (μ $n, previous ${o:-none}):"
+  n="${pg%% *}"; o="${pg#* }"; [ "$o" != "$pg" ] || o=""; d="$(default_version)"
+  if [ "${MU_DISPATCH_FAULT:-}" != gc-forgets-default ] && [ "$d" != "$n" ]; then
+    echo "the gc deferred while jobs ran was planned from μ $n; the default is now ${d:-none}:"
+    n="$d"; o=""
+  else echo "the gc deferred while jobs ran (μ $n, previous ${o:-none}):"; fi
   st_set pending_gc ""
+  if [ -z "$n" ] || ! is_release "$n"; then echo "gc: skipped (the default is not a release)"; return 0; fi
   au_gc "$n" "$o"
 }
 
 au_run_body() {
-  local force="$1" cur latest policy fc ec free where need rc t0 i lim res tflag ipid c stage why kind reason msg other mk
+  local force="$1" cur latest policy fc ec free where need rc t0 i lim res tflag ipid c stage why kind reason msg other mk capkb=""
   local p_fv p_fc p_ft p_fl p_fr
   printf '== μ auto-update  %s  (pid %s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
   if [ "$(au_conf enabled)" != on ] && [ "$force" = 0 ]; then echo "auto-update is off (mu autoupdate on, or: mu autoupdate run --force)"; return 0; fi
@@ -970,6 +1010,9 @@ au_run_body() {
       au_note deferred "busy, and only $((mk / 1024)) MB of memory available: μ $latest installs beside the jobs once $((AU_BUSY_MEM_KB / 1024)) MB are"; return 0
     fi
     echo "jobs are queued or running: μ $latest installs beside them, and becomes the default between two job starts"
+    # held to its own memory (au_install): with systemd (the node) or MU_SYSTEMD_RUN; macOS runs no job runner
+    if [ -n "${MU_SYSTEMD_RUN:-}" ] || { [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1; }; then capkb="$AU_BUSY_CAP_KB"
+    elif [ "$(uname -s)" = Linux ]; then au_note deferred "busy, and no systemd-run to hold the install's memory: μ $latest waits until the node is idle"; return 0; fi
   fi
   if install_running; then au_note deferred "an install is running: μ $latest waits for a later run"; return 0; fi
   if installed "$latest"; then echo "μ $latest is already installed (it passed its checks then)"; au_switch "$cur" "$latest"; return 0; fi
@@ -1001,7 +1044,7 @@ au_run_body() {
   printf '\ninstalling μ %s: download, build, mu doctor, benchmarks (stopped after %s s)…\n' "$latest" "$lim"
   t0=$SECONDS
   set +e
-  ( set -e; export MU_NO_AUTOUPDATE=1 MU_INSTALL_RESULT="$res"; cmd_install "$latest" --no-modify-path ) & ipid=$!
+  ( set -e; export MU_NO_AUTOUPDATE=1 MU_INSTALL_RESULT="$res"; au_install "$latest" "$capkb" ) & ipid=$!
   au_caffeinate "$ipid"
   while kill -0 "$ipid" 2>/dev/null; do   # the time limit: stop the installer (TERM, then KILL a minute later)
     if [ $((SECONDS - t0)) -ge "$lim" ]; then
@@ -1040,7 +1083,9 @@ au_run_body() {
     case "$stage" in
       doctor|bench) kind=release; reason=checks ;;
       fetch|preflight) kind=env ;;   # download of the recipe, platform/packages, disk, another install running
-      "") if [ "$rc" -ge 128 ]; then kind=release; reason=interrupted; elif [ ! -d "$TC/$latest" ]; then kind=env; else kind=build; fi ;;
+      "") if [ "$rc" -ge 128 ] && [ -n "$capkb" ]; then   # killed under the busy-node cap: not the release's failure
+            kind=build; why="stopped beside running jobs (exit $rc; held to $((capkb / 1024)) MB of memory)"
+          elif [ "$rc" -ge 128 ]; then kind=release; reason=interrupted; elif [ ! -d "$TC/$latest" ]; then kind=env; else kind=build; fi ;;
       *) kind=build ;;               # downloads and builds of the layers
     esac
   fi
