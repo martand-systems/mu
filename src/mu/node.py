@@ -7,6 +7,8 @@
   mu node disable                                    stop and remove it (jobs are kept)
   mu node selftest                                   prove that a user unit's MemoryMax is enforced (§10)
   mu node info                                       the `hello` answer, here
+  mu node host-script                                the Windows path of the default release's mu-wsl2-host.ps1, for an
+                                                     administrator's PowerShell (docs/design/pairing.md §9.1)
 
 Every verb answers one JSON object (log and fetch: a byte stream) and exits 0, 64, 65, 66, 69, 70 or 78 (§7.2),
 never 1, 2 or ssh's 255. Standard library only.
@@ -1540,6 +1542,37 @@ def cmd_selftest(as_json):
     return 0 if st["ok"] else 69
 
 
+def cmd_host_script(as_json):
+    r"""One line on stdout: \\wsl.localhost\<distro>\...\recipe\install\hosts\wsl2\mu-wsl2-host.ps1 of the default
+    release, after checking that it exists and has the `pair` action. Messages go to stderr. No root, no network.
+    Exit 2 outside WSL, 3 when the default release has no host script with `pair` (run: mu update)."""
+    distro = os.environ.get("WSL_DISTRO_NAME", "")
+    if not re.match(r"^[A-Za-z0-9._-]{1,64}$", distro):
+        sys.stderr.write("mu node host-script: this is not a WSL distro (WSL_DISTRO_NAME is not set)\n")
+        return 2
+    v = default_version()
+    script = os.path.join(mu_home(), "toolchains", v or "-", "recipe", "install", "hosts", "wsl2", "mu-wsl2-host.ps1")
+    try:
+        with open(script, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    if not v or not re.search(r"ValidateSet\([^)]*'pair'", text):
+        sys.stderr.write("mu node host-script: the default μ %s has no host script with the pair action\n    next: run: "
+                         "mu update\n" % (v or "(none)"))
+        return 3
+    real = os.path.realpath(script)
+    if any(c in real for c in "\"'`$\n\r") or not real.startswith("/"):
+        sys.stderr.write("mu node host-script: the path %s holds a character PowerShell would misread\n" % real)
+        return 3
+    win = "\\\\wsl.localhost\\%s%s" % (distro, real.replace("/", "\\"))
+    if as_json:
+        proto.emit_json({"ok": True, "path": win, "version": v})
+    else:
+        sys.stdout.write(win + "\n")
+    return 0
+
+
 def main(args):
     as_json = "--json" in args
     rest = [a for a in args if a != "--json"]
@@ -1563,6 +1596,8 @@ def main(args):
         return cmd_disable(as_json)
     if sub == "selftest":
         return cmd_selftest(as_json)
+    if sub == "host-script":
+        return cmd_host_script(as_json)
     if sub == "info":
         a = hello_answer("local", node_info())
         if as_json:
