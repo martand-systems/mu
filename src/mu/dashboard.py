@@ -508,8 +508,11 @@ class NodeWorker:
         if self.need_reconcile or self.retry_asked:
             self.retry_asked = False
             self.reconcile()
-            self.next_list = self.clock.mono() + step
+            wanted, step = self.plan()   # the reconcile's list decides the step (a queued job: the busy step)
+            self.next_list = self.clock.mono() + (step or BG_STEP)
             return
+        # the step shrinks when the node turns busy or a tab opens: the next list comes at most one step after the last
+        self.next_list = min(self.next_list, self.last_list_m + step)
         if self.features and self.app.visible():
             self.ensure_watch()
         else:

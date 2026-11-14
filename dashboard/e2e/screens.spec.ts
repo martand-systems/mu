@@ -26,7 +26,7 @@ async function firstJob(page: Page, state: string): Promise<string> {
 
 async function overview(page: Page, d: Dash, name: string, ready?: (p: Page) => Promise<void>) {
   await openDash(page, d);
-  await page.getByTestId("filter-from").selectOption("all");
+  await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
   if (ready) await ready(page);
   else await page.waitForTimeout(3500);
   await shot(page, name);

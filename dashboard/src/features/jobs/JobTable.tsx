@@ -1,6 +1,7 @@
-// The job table (docs/design/dashboard.md §5.1, §5.3): a plain <table> of our own in 1a. Two native <select>
-// filters ("from", "node"), three sortable columns whose headers are buttons with aria-sort, a row opens the job (the
-// name is a real link; a click anywhere on the row does the same). Under 768 px the rows become two-line items.
+// The job table (docs/design/dashboard.md §5.1, §5.3): a plain <table> of our own in 1a. Two filters ("from",
+// "node"; segmented buttons, not native <select>s: see ui/Segmented.tsx), three sortable columns whose headers are
+// buttons with aria-sort; a row opens the job (the name is a real link; a click anywhere on the row does the same).
+// Under 768 px the rows become two-line items.
 import { ArrowDown, ArrowUp, ChevronsUpDown, Inbox } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { JobRow, NodeCard } from "../../api/types";
@@ -9,6 +10,7 @@ import { bytes, clock, duration, num, shortDuration } from "../../lib/format";
 import { jobHref, openJob } from "../../lib/route";
 import { CopyCommand } from "../../ui/CopyCommand";
 import { EmptyState } from "../../ui/EmptyState";
+import { Segmented } from "../../ui/Segmented";
 import { JobStateBadge } from "../../ui/StateBadge";
 
 type SortKey = "name" | "time" | "mem";
@@ -160,22 +162,12 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
     <section aria-labelledby="jobs-title" className="min-w-0 rounded-md border border-border bg-surface" data-testid="jobs">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-3 py-2">
         <h2 id="jobs-title" className="text-xs font-semibold uppercase tracking-wider text-text-muted">Jobs</h2>
-        <label className="flex items-center gap-1.5 text-xs text-text-muted">
-          from
-          <select value={from} onChange={(e) => setFrom(e.target.value === "all" ? "all" : "mine")} className="rounded-sm border border-border-strong bg-surface px-1.5 py-0.5 text-xs text-text" data-testid="filter-from">
-            <option value="mine">this Mac</option>
-            <option value="all">all workstations</option>
-          </select>
-        </label>
-        <label className="flex items-center gap-1.5 text-xs text-text-muted">
-          node
-          <select value={node} onChange={(e) => setNode(e.target.value)} className="rounded-sm border border-border-strong bg-surface px-1.5 py-0.5 text-xs text-text" data-testid="filter-node">
-            <option value="all">all</option>
-            {nodeNames.map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-        </label>
+        <Segmented label="from" testid="filter-from" value={from} onChange={setFrom}
+          options={[{ v: "mine", text: "this Mac" }, { v: "all", text: "all workstations" }]} />
+        {nodeNames.length > 1 && (
+          <Segmented label="node" testid="filter-node" value={node} onChange={setNode}
+            options={[{ v: "all", text: "all" }, ...nodeNames.map((n) => ({ v: n, text: n }))]} />
+        )}
         <span className="ml-auto text-xs text-text-muted tabular-nums" data-testid="job-count">
           {shown.length} {shown.length === 1 ? "job" : "jobs"}
           {hidden > 0 && <> · {hidden} hidden by the filters</>}

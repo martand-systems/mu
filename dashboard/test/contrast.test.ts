@@ -36,7 +36,10 @@ const TEXT = ["text", "text-muted", "accent-text", "state-running", "state-queue
 const MARKS = ["accent", "focus-ring", "series-cores", "series-mem", "series-cache", "series-limit", "border-strong"];
 const BACKS = ["bg", "surface", "surface-raised"];
 
-describe.each([["light", block(":root,")], ["dark", block('[data-theme="dark"]')]])("%s theme", (_name, vars) => {
+const dark = block('[data-theme="dark"]');
+if (__FAULT_FAINT_SERIES__) dark["series-cache"] = "#262626"; // D43's fault: the cache series at 1.5:1 in dark
+
+describe.each([["light", block(":root,")], ["dark", dark]])("%s theme", (_name, vars) => {
   for (const back of BACKS) {
     for (const t of TEXT) {
       it(`${t} on ${back} >= 4.5:1`, () => {
