@@ -486,9 +486,10 @@ or a shell's 126, 127 and 128+n. A verb never exits 255, 1 or 2.
 | 66 | `no-such-job`, `no-such-snapshot` |
 | 69 | `disk-low`, `limits-unavailable`, `not-enabled` (the runner is not running) |
 | 70 | `internal` (with a line for the journal) |
+| 77 | `not-allowed` (**planned**, with queue control: scheduler.md §20.4, §20.9; not built) |
 | 78 | `toolchain-missing` |
 
-Client mapping: 65 → 5; 66 → 9; 69 → 6; 78 → 3; 64 and 70 → 1.
+Client mapping: 65 → 5; 66 → 9; 69 → 6; 78 → 3; 64 and 70 → 1; 77 → 5 once built (scheduler.md §20.9).
 
 ### 7.3 Verbs (stage 1)
 

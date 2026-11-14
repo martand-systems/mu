@@ -375,7 +375,8 @@ today's node, before 1a's release (§7.0), because 1a's polling of old nodes dep
 
 - **One worker thread per paired node,** each with its own `NodeReader`: a thin wrapper around `jobs.Conn` that
   - refuses, before any ssh call, every verb not in the allowlist `hello list status log stats metrics watch` (plus
-    `events bench progress` in later phases). It never sends `submit`, `cancel`, `fetch` or `receive-pack`. The wrapper
+    `events bench progress` in later phases, and the read-only `queue` once the node has `queue-control`,
+    scheduler.md §20.10). It never sends `submit`, `cancel`, `fetch` or `receive-pack`. The wrapper
     is the only way the server reaches a node, and it is unit-tested on its own (D17);
   - uses **its own ControlPath** per node (`<node>.dash.sock`, placed by the same rule as `control_path()` so it fits
     the socket length limit). When one of its calls times out it closes only that master, never the CLI's. Today
