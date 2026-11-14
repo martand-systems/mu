@@ -63,36 +63,41 @@ runner (build-or-adopt: scheduler.md §2). Starts after step 1 is merged (it als
 reuses its `usage` and sampler.
 
 **Queue control** (the owner's requirements of 2026-11-14, §2.1) is designed in scheduler.md §20: `mu queue` (the
-whole node's queue, every project and session), `mu hold`/`release`/`move`/`priority` for queued jobs (four bands,
-explicit order inside each, held jobs skipped, aging), `mu pause`/`resume` of running jobs by systemd freeze/thaw (cores
-lent until the pause's deadline, memory kept, paused time not counted against `--time`), an opt-in auto-pause policy
-for `urgent` jobs, and the owner's key (`/etc/mu/owners`) allowed to arrange any job. It ships in **two releases**:
-the queue order and view with parts A and B (2.5.3), pause in a second release (2.5.5) after its probe.
+whole node's queue, every project and session), `mu hold`/`release`/`move`/`priority` for queued and held jobs (four
+strict bands, explicit order inside each, held jobs skipped), `mu pause`/`resume` of running jobs by systemd freeze/thaw
+(the job's memory kept in place, its cores and the memory it does not use lent until the pause's deadline, paused time
+not counted against `--time`, the time limit and a dead-man thaw held by systemd timers), an opt-in auto-pause policy
+for `urgent` jobs, the owner's key (`/etc/mu/owners`) allowed to arrange any job, and a guard between Claude sessions
+decided by the node by project (`--others`). It ships in **two releases**: the queue order and view with parts A and B
+(2.5.3), pause in a second release (2.5.5) after its probe. §20 was reviewed independently on 2026-11-14 and revised
+(scheduler.md §19, second table).
 
 | Sub-step | Design § | Effort | Needs the PC? |
 |---|---|---|---|
-| 2.5.0 Probe: the queued job `sched-probe` (cpuset, Open MPI's CPU set, `memory.peak`, P/E visibility) and a second one (system memory footprint, `CPUQuota` in a user unit, an express thread beside a 20-thread job; **freeze/thaw of a user unit under WSL, `RuntimeMaxSec` while frozen, an MPI job and a `timeout` through a pause, stopping a frozen unit**: items 10–13, needed by 2.5.5 only); results recorded in §12 before the build | §12 | ½ day | Through jobs only, no visit |
+| 2.5.0 Probe: the queued job `sched-probe` (cpuset, Open MPI's CPU set, `memory.peak`, P/E visibility) and a second one (system memory footprint, `CPUQuota` in a user unit, an express thread beside a 20-thread job; **freeze/thaw of a user unit under WSL and lowering a frozen unit's memory limit, `RuntimeMaxSec` while frozen and a transient timer's accuracy, an MPI job and a `timeout` through a pause, stopping a frozen unit**: items 10–13, needed by 2.5.5 only); results recorded in §12 before the build | §12 | ½ day | Through jobs only, no visit |
 | 2.5.1 Part A: admission by cores and memory, head reservation, express lane (`--quick`, `CPUQuota=100%`), CPU affinity and thread variables from the grant, `too-big`, `usage` and the 5 s sampler, `mu status` says why a job waits, the `next` size suggestion from the last run | §3.1–§3.4, §4–§8 | 5–6 days with its tests | One release, delivered by auto-update |
 | 2.5.2 Part B: time-based backfill on the monotonic clock, `starts_by`, the `--time` hint. Same release as 2.5.1, or a second one if days must be cut | §3.3, §3.5 | 2–3 days with its tests | One release, delivered by auto-update |
-| 2.5.3 Queue control, part C, **in the same release as 2.5.1–2.5.2**: the walk (priority bands, explicit order in `/srv/mu/queue.json`, held jobs skipped, aging), `mu queue`, `mu hold`/`release`/`move`/`priority`, `mu submit --priority/--hold`, the authorisation rule (own workstation, or an owner key from `/etc/mu/owners`), audit lines, the `--others` guard between Claude sessions; tests Q22–Q28 | §20.2–§20.4, §20.8–§20.12 | 3½–4 days with its tests | Same release, delivered by auto-update |
+| 2.5.3 Queue control, part C, **in the same release as 2.5.1–2.5.2**: the walk (strict priority bands, explicit order in `/srv/mu/queue.json` written whole, held jobs kept in place and skipped, re-queue at the front of the band), `mu queue`, `mu hold`/`release`/`move`/`priority`, `mu submit --priority/--hold`, the authorisation rule (own workstation, or an owner key from `/etc/mu/owners`; owner acts sticky; a warning when there is no owner), audit lines with the claimed project, the `--others` guard between Claude sessions decided by the node; JSON-shape fixtures for every answer; tests Q22–Q28 | §20.2–§20.4, §20.8–§20.12 | 3½–4 days with its tests | Same release, delivered by auto-update |
 | 2.5.4 Checks on the PC after the first release: concurrency, isolation, `oom` of one job only, backfill, Open MPI, memory at push time, the scaling series np 1…20; and a `mu move` and a `mu hold` from the Mac on real JATAYU jobs | §14 | ½ day | Through jobs only, no visit |
-| 2.5.5 Queue control, part D, **a second release**: `mu pause`/`resume` by freeze/thaw, cores lent to borrowers until the deadline, the runner's own time limit on running time with `RuntimeMaxSec` as backstop, `run_s`/`paused_s` in results, the opt-in auto-pause policy for `urgent` jobs (`--pausable`, `sched.auto_pause`); tests Q29–Q37. Starts when probe items 10–13 pass and the first release has run real JATAYU work for some days | §20.5–§20.8, §20.13 | 5–6 days with its tests | One release, delivered by auto-update; checked on the PC through jobs (a pause of a real sweep for an urgent job) |
+| 2.5.5 Queue control, part D, **a second release**: `mu pause`/`resume` by freeze/thaw, cores and unused memory lent to borrowers until the deadline (accounting by CPU-id sets), a systemd timer per job for the time limit on running time with `RuntimeMaxSec` as backstop, a dead-man timer that thaws a paused job if the runner is down, one stop path that thaws first, `run_s`/`paused_s` in results, the opt-in auto-pause policy for `urgent` jobs (`--pausable`, `sched.auto_pause`; checkout before freezing); tests Q29–Q39. Starts when probe items 10–13 pass and the first release has run real JATAYU work for some days | §20.5–§20.8, §20.13 | 6 days with its tests | One release, delivered by auto-update; checked on the PC through jobs (a pause of a real sweep for an urgent job) |
 | Later: R-sched-1 (cpuset and io delegation for hard CPU placement) | §5.4 | ½ day | **Yes**, one distro restart while no job runs; with step 4.2 or a visit, only if 2.5.0 shows cpuset available |
 
-Effort: parts A and B 7–9 days, part C 3½–4, part D 5–6: **about 16–19 days in all**, in two releases.
+Effort: parts A and B 7–9 days, part C 3½–4, part D 6: **about 16½–19 days in all**, in two releases.
 
-Before the first release the owner answers scheduler.md §17 Q1 (cores kept for people at the PC; default all 20) and
-Q2 (unflagged jobs get about 20 GB instead of about 21 GB; default yes); before the second, Q5–Q7 (auto-pause only for
+Before the first release the owner answers scheduler.md §17 Q1 (cores kept for people at the PC; default all 20) and Q2
+(unflagged jobs get about 20 GB instead of about 21 GB; default yes); before the second, Q5–Q7 (auto-pause only for
 jobs marked `--pausable`; pause limits 2 h per pause, 4 h per attempt, 30 min per auto-pause; `urgent` owner-only:
-defaults as stated) and Q8 (part D as a second release: default yes). §20 is reviewed independently before part C is
-built. Acceptance: the tests of §13 (unit tests, the randomised simulation of `plan()`, rows Q01–Q21 and, for queue
-control, Q22–Q28 in the first release and Q29–Q37 in the second, with the per-pass invariant check), each with its
-fault shown to fail; **done when** a `--quick` job on the office PC finishes within seconds while a JATAYU job runs,
-two flagged jobs run side by side on disjoint CPUs (§14), and, from the Mac with `--json` and nothing cancelled, a
-queued job is moved to the front and another held and released (first release), and a running sweep is paused for a
-short job and continues where it stopped (second release). What it does not change: a job submitted without flags
-still takes the whole node for up to 12 h, and a pause frees cores, never memory; the gain comes from Claude passing
-`--cores`, `--mem`, `--time` (scheduler.md §8).
+defaults as stated), Q8 (part D as a second release: default yes; if the probe shows a frozen job's memory cannot be
+lent, a pause helps only beside sized jobs) and Q9 (auto-pause for `urgent` jobs, as designed, or for the express lane
+as the requirement worded it; with hand pause or after it: default `urgent`, in the same release). §20 was reviewed
+independently and revised before part C is built (scheduler.md §19). Acceptance: the tests of §13 (unit tests, the
+randomised simulation of `plan()`, rows Q01–Q21 and, for queue control, Q22–Q28 in the first release and Q29–Q39 in the
+second, with the per-pass invariant check), each with its fault shown to fail; **done when** a `--quick` job on the
+office PC finishes within seconds while a JATAYU job runs, two flagged jobs run side by side on disjoint CPUs (§14),
+and, from the Mac with `--json` and nothing cancelled, a queued job is moved to the front and another held and released
+(first release), and a running sweep is paused for a short job and continues where it stopped (second release). What it
+does not change: a job submitted without flags still takes the whole node for up to 12 h, and a pause frees its cores
+and only the memory it is not using; the gain comes from Claude passing `--cores`, `--mem`, `--time` (scheduler.md §8).
 
 ### Step 3. Dashboard (docs/design/dashboard.md)
 
@@ -162,7 +167,7 @@ decision overrides any of these; record it here with its date.
 | Who types remote jobs | Almost always Claude Code | Owner. Commands are designed for Claude first (`--json`, `next`, `steps`); `mu run --job NAME` and `[jobs.*]` in `mu.toml` stay deferred |
 | The office PC | **Not to be disturbed.** People in the office use it. No OS change, no Windows reinstall, no uninstall/reinstall of the host side for testing. Changes to it must be additive, reversible, delivered by auto-update where possible, and checked with `status` | Owner. A second Windows PC may be budgeted later for destructive tests |
 | Windows-only tests | Run on the office PC only as a short, non-destructive manual checklist during an ordinary visit (status, `test-stop`, one pairing check). Anything that needs an uninstall/reinstall waits for a second PC | Follows from the above |
-| Queue control (concurrent-jobs scheduler) | **Requirements, from a real case on 2026-11-14:** a 2-minute probe job sat 5th in the queue behind another Claude session's JATAYU jobs, and the only way to let it go first was to ask that session to cancel its queued jobs and resubmit them (losing their place). The scheduler must therefore give: (1) **hold / release** of a queued job, **move** (before/after another job) and **priority**, without cancelling; (2) **pause / resume of a running job** (systemd `freeze`/`thaw` of its cgroup: CPU released at once, memory kept, the job continues exactly where it stopped), so a long sweep can be paused briefly for a small urgent job, by hand and, as a policy, automatically for the express lane; (3) **one view of the whole node queue** across projects and Claude sessions (`list` without `project=` already returns all jobs), and the owner's workstation key allowed to arrange any job on the node; (4) small jobs must not need anyone to step aside: they start at once when they fit. Each with `--json` for Claude. **Designed** in scheduler.md §20 (lead's calls there: four priority bands with an explicit order inside, not explicit order only; resume waits for the borrowers of a paused job's cores, which end by its deadline, rather than preempting them; paused time does not count against `--time`; auto-pause opt-in per job (`--pausable`) and for `urgent` jobs rather than the express lane, since `--quick` jobs never wait for cores and freezing a 20-core sweep for a 1-core job would idle 19 cores; urgent owner-only); built in step 2.5 (2.5.3, 2.5.5) | Owner, 2026-11-14 ("the two caveats are also learnings") |
+| Queue control (concurrent-jobs scheduler) | **Requirements, from a real case on 2026-11-14:** a 2-minute probe job sat 5th in the queue behind another Claude session's JATAYU jobs, and the only way to let it go first was to ask that session to cancel its queued jobs and resubmit them (losing their place). The scheduler must therefore give: (1) **hold / release** of a queued job, **move** (before/after another job) and **priority**, without cancelling; (2) **pause / resume of a running job** (systemd `freeze`/`thaw` of its cgroup: CPU released at once, memory kept, the job continues exactly where it stopped), so a long sweep can be paused briefly for a small urgent job, by hand and, as a policy, automatically for the express lane; (3) **one view of the whole node queue** across projects and Claude sessions (`list` without `project=` already returns all jobs), and the owner's workstation key allowed to arrange any job on the node; (4) small jobs must not need anyone to step aside: they start at once when they fit. Each with `--json` for Claude. **Designed** in scheduler.md §20 (lead's calls there: four strict priority bands with an explicit order inside, not explicit order only, and no aging (cut after the review); a paused job keeps its memory in place and lends what it does not use; resume waits for the borrowers of a paused job's cores, which end by its deadline, rather than preempting them; paused time does not count against `--time`; auto-pause opt-in per job (`--pausable`) and for `urgent` jobs rather than the express lane, since `--quick` jobs never wait for cores and freezing a 20-core sweep for a 1-core job would idle 19 cores, put to the owner as scheduler.md §17 Q9; urgent owner-only); built in step 2.5 (2.5.3, 2.5.5) | Owner, 2026-11-14 ("the two caveats are also learnings") |
 
 ### 2.2 Shell experience (docs/design/shell-ux.md §10)
 

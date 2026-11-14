@@ -8,7 +8,8 @@ findings and what was done with each are in §19. **Revised again the same eveni
 requirements** (ROADMAP §2.1, "Queue control"): hold, release, move and priority bands for queued jobs, pause and resume
 of running jobs by systemd freeze/thaw (by hand and as a policy for urgent jobs), one view of the whole node's queue,
 and the owner's key allowed to arrange any job. They are §20; the sections they change say so (§1, §3.2–§3.4, §3.7,
-§7.1, §8–§13, §15–§17). §20 has not been reviewed independently yet.
+§7.1, §8–§13, §15–§17). §20 was then reviewed independently and revised (§19, second table): exact walk and
+authorisation rules, a paused job's unused memory lent, time limits and thaws held by systemd timers, aging cut.
 
 **Nothing here has run on the office PC.** The probe job that settles the PC facts (job `20261114-161025-2icaxr`,
 "sched-probe", from `~/mu-first-job`) was still `queued` (position 1) on 2026-11-14 evening, behind the owner's JATAYU
@@ -63,10 +64,10 @@ sits at the head of the queue nothing else ordinary starts. Concurrency comes fr
 and `--time` (§8); time-based backfill pays off only when `--time` is realistic. This is deliberate: guessing sizes
 for unflagged jobs would risk silent `oom` of long runs (§19, finding 1).
 
-**Non-goals:** several nodes (Slurm's job if it ever comes, §2); fair share between workstations (one submitter
-today, §3.7; priority bands are now in, §20.3); checkpointing or swapping out a paused job's memory (a pause frees
-cores, never memory, §20.6); P/E-core-aware placement (the guest is not expected to see or keep core types, §5.5, per §12);
-GPU scheduling; learning job sizes automatically.
+**Non-goals:** several nodes (Slurm's job if it ever comes, §2); fair share between workstations (one submitter today,
+§3.7; priority bands are now in, §20.3); checkpointing or swapping out a paused job's memory (a pause keeps its memory
+in place and lends only what it does not use, §20.6); P/E-core-aware placement (the guest is not expected to see or
+keep core types, §5.5, per §12); GPU scheduling; learning job sizes automatically.
 
 ## 2. Build or adopt (PLAN §17)
 
@@ -136,11 +137,13 @@ candidate above still leaves μ's job layer in place and adds a second one to ke
     handles that job (§9).
   - **With pause (§20.6, part D):** paused time does not count against `t`. The end bound of a running job becomes
     `active_mono + t + paused time + SLACK`, of a paused one `D + (t − run time) + SLACK` (`D`: its resume
-    deadline). From part D on, `RuntimeMaxSec` is a backstop (`t` + the pause budget) and **the runner** stops a job
-    when its running time reaches `t`; express jobs and borrowers keep `RuntimeMaxSec = t`.
-- **Allocation** = the grants of all running jobs, paused ones included (their memory stays allocated; their cores
-  are lent until their deadline, §20.6), **rebuilt from their `state.json` on every pass**. There is no
-  allocation file and nothing kept only in memory, so nothing can disagree with the jobs (§9).
+    deadline). From part D on, an ordinary job's `RuntimeMaxSec` is a backstop (`t` + the pause budget) and a
+    **transient systemd timer per job** (`mu-limit-<id>.timer`, stopped while frozen, re-armed at the thaw) stops it
+    when its running time reaches `t`: a bound held by systemd, not by the runner's loop, which can sit in a checkout
+    for minutes. Express jobs and borrowers keep `RuntimeMaxSec = t`.
+- **Allocation** = the grants of all running jobs, paused ones included whole (what they lend to borrowers until their
+  deadline is accounted by CPU-id sets and lent memory, §20.6), **rebuilt from their `state.json` on every pass**. There
+  is no allocation file and nothing kept only in memory, so nothing can disagree with the jobs (§9).
 - A running job **without a grant** (written by the previous release, rebuilt by `rebuild_state()`, or whose
   `state.json` raised an error this pass) holds the whole node: the current rule "no job is started while another
   one's state is unknown", kept. While one exists, `starts_by` is `null`.
@@ -155,26 +158,31 @@ plan(now_mono, capacity, running grants, queued specs) -> (starts, waiting_for p
 
 0. Each queued job: request = resolve(spec, capacity); a request that no longer fits the capacity at all
    (capacity lowered since submit) ends the job failed, error too-big.
-1. free = (C − Σ cores, M − Σ mem, free CPU ids) over ordinary grants, paused ones included; any grant-less running
-   job: free = 0. lent = the CPU ids of frozen jobs, each with its lender's deadline D (§20.6).
+1. occupied = ⋃ CPU ids of running ordinary grants, frozen ones included; free = (all ids − occupied,
+   M − firm memory) (§20.6); any grant-less running job: free = 0. lent = for each frozen lender L, its lendable
+   ids and its lent memory not yet borrowed, with L's deadline D (§20.6).
 2. Express (§3.4): each queued --quick job, in walk order, takes a lane slot if one is free; otherwise it stays in Q
    below as an ordinary job of (1 core, 512 MiB, 10 min).
-3. Q = the walk of §20.3: queued jobs that are not held, by (band, re-queued first, place in queue.json,
-   accepted_ns). While Q's head fits free (or free plus lent cores whose D ≥ now + its time + MARGIN): start it.
-   [auto-pause, §20.7: if the head is urgent and fits in memory but not in cores, freeze eligible jobs for it]
+3. Q = the walk of §20.3: queued and held jobs by (band, place in queue.json, accepted_ns), held ones skipped.
+   While Q's head fits free, start it; or, if all its cores fit in lent ids of lenders whose D ≥ now + its time +
+   MARGIN (and its memory as in 5), start it as a borrower.
+   [auto-pause, §20.7: if the head is urgent, check it out, freeze eligible jobs, start it as a borrower, one pass]
 4. Head H does not fit. S = the earliest end bound at which, releasing running ordinary jobs in end-bound order,
    free ≥ H's request. extra = what is free at S beyond H's request (cores, memory and CPU ids).
    S = None if: a grant-less job runs, disk is below min_free_gb (§3.6), or the valve (6) is open.
-5. For each later job b in order, if b fits free now:
-     b fits within extra                         → start (class normal), extra −= b: uses only what H will not need;
-     S is not None and now + b.time + MARGIN ≤ S → start (class backfilled): it ends before H needs its resources;
-     b fits only with lent cores whose D ≥ now + b.time + MARGIN, its other cores by one of the two rules above
-                                                 → start (class borrowing, §20.6): it ends before its lender resumes;
+5. For each later job b in order:
+     b fits free, within extra                   → start (class normal), extra −= b: uses only what H will not need;
+     b fits free, S is not None and now + b.time + MARGIN ≤ S
+                                                 → start (class backfilled): it ends before H needs its resources;
+     all of b's cores fit in lent ids of lenders whose D ≥ now + b.time + MARGIN (never partly free ids), and its
+     memory in their unborrowed lent memory plus free memory that is within extra or ends before S
+                                                 → start (class borrowing, §20.6): it ends before its lenders resume;
      otherwise                                   → waits, waiting_for = {"reservation": {"head": …, "starts_by": S}}.
    MARGIN = START_WAIT + SLACK (70 s).
 6. Valve: if now > S + 60 s (a unit outlived its time limit), no time-based backfill until H starts.
 7. Pauses (§20.6): a frozen job whose deadline passed, whose resume was asked, or whose auto-pause reason ended is
-   thawed once no borrower holds its CPUs (at D + 60 s regardless).
+   thawed once no borrower lives (at D + 60 s the valve kills a borrower past its limit and thaws; if the runner
+   is down, systemd's dead-man timer thaws at D + 120 s, §20.5).
 ```
 
 - **Starting is checked twice.** A pass may start several jobs one after the other, and each start first checks out
@@ -183,13 +191,14 @@ plan(now_mono, capacity, running grants, queued specs) -> (starts, waiting_for p
   the job stays queued (its `work/` is rebuilt at its next start, as today). A **borrowing** job is re-checked the same
   way against its lender's deadline. The grant, its `start_mono` and the `state.json` write all come after the
   checkout, so the bound counts from the real start.
-- **Why the head is not delayed.** Every job started past H either uses only `extra` (resources H does not need at
-  `S`) or has an end bound ≤ `S`, enforced by systemd's `RuntimeMaxSec`, counted on the monotonic clock, with the
-  checkout and the `systemd-run` wait inside the margin. So H starts at or before `S` unless a unit refuses to stop
-  (the valve) or the disk is low (`S` is then `null`, never a false promise). Jobs that end early only bring `S`
-  forward. Each later job becomes the head in turn, so no job starves. **With queue control** the head can also be
-  displaced or delayed by an explicit act (a move, a priority, a pause of a job it waits for); each such act reports
-  whose `starts_by` it moved, and the guarantees that remain are G1–G7 of §20.3.
+- **Why the head is not delayed.** Every job started past H either uses only `extra` (resources H does not need at `S`)
+  or has an end bound ≤ `S`, enforced by systemd (`RuntimeMaxSec`; from part D on, the job's time-limit timer, §20.6),
+  counted on the monotonic clock, with the checkout and the `systemd-run` wait inside the margin, or is a borrower,
+  which takes only a paused job's cores and ends before that job resumes. So H starts at or before `S` unless a unit
+  refuses to stop (the valve) or the disk is low (`S` is then `null`, never a false promise). Jobs that end early only
+  bring `S` forward. Each later job becomes the head in turn, so no job starves. **With queue control** the head can
+  also be displaced or delayed by an explicit act (a move, a priority, a pause of a job it waits for); each such act
+  reports whose `starts_by` it moved, and the guarantees that remain are G1–G7 of §20.3.
 - **Without `--time`** (the 12 h default) a later job can only use `extra`; time-based backfill needs a realistic
   `--time` (§3.5, §8).
 - **CPU ids:** the 20 vCPUs are treated as identical slots (§5.5, per §12), so admission counts cores; the runner gives
@@ -198,7 +207,7 @@ plan(now_mono, capacity, running grants, queued specs) -> (starts, waiting_for p
   queue of a handful); a "waited longer than T" guard (the head reservation already guarantees it).
 - **Priority classes: reversed.** The first version rejected them ("one submitter; FIFO is what Claude expects").
   The owner's requirements of 2026-11-14 (several Claude sessions on one node, ROADMAP §2.1) need them: four bands,
-  FIFO inside each unless moved, held jobs skipped, aging (§20.3). With nobody arranging the queue, the walk is still
+  FIFO inside each unless moved, held jobs skipped, no aging (§20.3). With nobody arranging the queue, the walk is still
   today's FIFO.
 - **Can be shipped in two parts** (§15): part A is steps 0–4 and the `extra` branch of step 5 (no times needed, no
   `starts_by`); part B adds end bounds, the time branch, the valve, `starts_by` and the `--time` hint.
@@ -408,8 +417,8 @@ A job whose code ignores all of this (hard-coded 20 threads) is still confined b
 | `run_runner()` | **unchanged**: the version switch still waits for "idle" (§9) |
 | `hello_answer` | `features: ["sched", "usage"]`; `capacity: {cores, mem_bytes, reserve_system, reserve_express}`; `allocated`, `free`; `queue: {running, express, queued}`; `limits.cpu` |
 | `status_of`, `verb_list` | per job: `request` (from `resolve`), `grant`, `class`, `position` (in the ordinary queue), `waiting_for`, `starts_by` (head only, or `null`), `affinity_widened`, `usage` (finished jobs) |
-| queue control, part C (§20.2–§20.4) | `queued_jobs()` becomes the walk (bands, `queue.json`, re-queued first, held skipped); verbs `queue`, `hold`, `release`, `move`, `priority` with their `ARG_RULES`; `owners()` from `/etc/mu/owners`; `state: "held"` (`verb_cancel` and `step()` treat it as they treat `queued`); `rebuild_state()` reads `held`/`released` lines; aging in `step()`; `hello.features` `queue-control` |
-| pause, part D (§20.5–§20.7) | verbs `pause`, `resume` writing `control.json`; in `step()`: apply requests, `systemctl --user freeze`/`thaw` with confirmation, reconciliation with `FreezerState`, deadlines, thaw of a job that has a result, the auto-pause policy; `plan()` lends frozen jobs' cores to borrowers; `start_job`: `RuntimeMaxSec = t + budget` for pausable jobs, the runner's own timeout on running time (`stopping`), `classify` reads it; `write_result` adds `run_s`, `paused_s`, `pauses`; `verb_cancel` thaws before stopping; `hello.features` `pause` |
+| queue control, part C (§20.2–§20.4) | `queued_jobs()` becomes the walk (bands, `queue.json` written whole, held jobs in it and skipped); `interrupted()` inserts the job at the front of its band in `queue.json`; verbs `queue`, `hold`, `release`, `move`, `priority` with their `ARG_RULES` (`from`, `others`: the guard between projects is decided here, under the lock); `owners()` from `/etc/mu/owners`, a `warnings` entry when there is none; sticky owner acts (`held.by`, `band_by`); `state: "held"` (`verb_cancel` and `step()` treat it as they treat `queued`, including its `cancel` marker), written by `verb_submit` into the temporary folder for `--hold`; `rebuild_state()` reads `held`/`released` lines; `hello.features` `queue-control` |
+| pause, part D (§20.5–§20.7) | `freeze()` and `thaw()` (§20.5), called by the verbs `pause`, `resume` under the lock and by `step()` for deadlines, deferred resumes, the valve and the auto-pause policy (checkout first); reconciliation with `FreezerState` (by prefix) and with the two timers per job; thaw of a job that has a result; `stop_unit()` (thaw, then stop) for cancel, log cap, valve and `no-adopt`; `plan()` by CPU-id sets, lending frozen jobs' cores and unused memory (`set-property --runtime MemoryMax`); `start_job`: for ordinary jobs `RuntimeMaxSec = t + budget` and the `mu-limit-<id>` timer; `classify` reads `timelimit`; `write_result` adds `run_s`, `paused_s`, `pauses`; `hello.features` `pause` |
 
 **State files**
 
@@ -419,9 +428,10 @@ A job whose code ignores all of this (hard-coded 20 threads) is still confined b
 | `state.json` (sealed, replaced) | gains `grant` (with `boot_id`, `start_mono`, `active_mono`), `cgroup`, `affinity_widened` |
 | `jobs/<id>/usage.json` (new, view) | the sampler's latest figures and running maxima; after a runner restart the maxima restart from current values (acceptable: the shim's `memory.peak` is the kernel's own) |
 | `jobs/<id>/tmp/` (new) | the job's `TMPDIR`; removed when the result is written and before a re-run |
-| `node.json` | optional `sched: {cores, mem_bytes, reserve_system, reserve_express, age_after_s, auto_pause, pause: {max_s, budget_s, auto_max_s, auto_count, auto_cooldown_s}}` (§20.3, §20.6, §20.7) |
-| `/srv/mu/queue.json` (new, sealed, replaced) | the explicit order inside bands (§20.3, §20.8) |
-| `jobs/<id>/control.json` (new, sealed) | a pending pause or resume request (§20.8) |
+| `node.json` | optional `sched: {cores, mem_bytes, reserve_system, reserve_express, auto_pause}` (§20.7; the pause limits are constants, §20.6) |
+| `/srv/mu/queue.json` (new, sealed, replaced) | every queued and held job in walk order (§20.3, §20.8) |
+| `jobs/<id>/timelimit` (new marker) | written by the job's time-limit timer before it stops the unit; `classify` reads it (§20.6) |
+| transient units `mu-limit-<id>.timer`, `mu-thaw-<id>.timer` | the time limit on running time, and the dead-man thaw of a frozen job (§20.5, §20.6, §20.8) |
 | `events.log` lines | `granted cores=8 cpus=0-7 mem=6.0G time=2h class=normal`; `backfilled: ends by +1h05m before the head's +1h20m`; `express`; `affinity widened by mpirun: 0-19` |
 
 **Wall-clock times shown to people** (`starts_by`, `ends by`) are computed at answer time as
@@ -517,7 +527,7 @@ The job layer's rules (job-layer §9) hold per job; what changes is that several
 | Runner dies after writing a grant, before `systemd-run` | `start_unconfirmed` is set: next pass asks systemd; no unit → `start_failed` (back to the queue, grant dropped); unit exists → adopted with that grant. The grant was on disk first, so the allocation counted it throughout | Q16 |
 | Runner dies during a checkout (before any write) | Nothing about the start is on disk; the job is still queued; its partial `work/` is rebuilt at its next start | Q16 |
 | Two starts in one pass, runner dies after the first | The first is running (or `start_unconfirmed`) with its grant on disk; the second is still queued. Next pass re-plans with the first counted | Q17 |
-| **Windows restart / VM stop / `wsl --shutdown`** | Every unit is gone and the boot id changes. Each running job goes through the interrupted rule: re-run as attempt 2 at its **old** `accepted_ns`, grant and `tmp/` dropped. They return to the front in their original order and start as they fit | Q13 |
+| **Windows restart / VM stop / `wsl --shutdown`** | Every unit is gone and the boot id changes. Each running job goes through the interrupted rule: re-run as attempt 2 at its **old** `accepted_ns`, grant and `tmp/` dropped. They return to the front (with queue control: the front of their band in `queue.json`, §20.3) in their original order and start as they fit | Q13 |
 | `systemctl show` fails for one job | That job keeps its grant (or holds the node if it has none). Narrower than today's "no job starts while another's state is unknown", and still never over-commits | unit |
 | An error in one job's files during a pass | journalled; that job holds its grant or the whole node; the pass goes on (as today, review: durability 4) | unit |
 | A grant-less running job (previous release, rebuilt state) | Holds the whole node: nothing ordinary starts, `starts_by` `null`, express still runs | Q18 |
@@ -525,7 +535,7 @@ The job layer's rules (job-layer §9) hold per job; what changes is that several
 | `oom` of one job | Its cgroup alone is killed (`MemoryMax` per unit, `OOMPolicy=kill`); others are untouched because Σ grants ≤ `M` | Q09 |
 | **Version switch** | **Unchanged: only when idle** (a paused job counts as running; a queue of held jobs only does not, §20.6). Job-layer §12 and the README promise that the default does not move while `state/busy` exists, and the runner holds `busy` while any job is queued or running; switching with jobs running would also let old versions be cleaned up under live shims. With several jobs the node is idle less often, so a release may take effect later. If that is ever seen to starve updates, it is raised as its own change | — |
 | `usage.json` lost | It is a view; the next sample rewrites it; runner-written results then lack the working-set peak (`null`) | — |
-| Held jobs, bands, the order file, pauses, lending (queue control) | Their own table and races: §20.8. In short: holds and bands live in each job's `state.json` (and holds also in `events.log`); the order in `/srv/mu/queue.json`, whose loss restores FIFO within bands; a pause is recorded before the freeze and lends cores only once frozen; a paused job survives a runner restart frozen, becomes interrupted on a VM stop, is thawed before a cancel | Q22–Q37 |
+| Held jobs, bands, the order file, pauses, lending (queue control) | Their own table and races: §20.8. In short: holds and bands live in each job's `state.json` (and holds also in `events.log`); the order in `/srv/mu/queue.json`, whose loss restores FIFO within bands; a pause is recorded before the freeze and lends cores and unused memory only once frozen; a paused job survives a runner restart frozen, is thawed by systemd's dead-man timer if the runner is down past its deadline, becomes interrupted on a VM stop, and is thawed before any stop | Q22–Q39 |
 
 ## 10. What the dashboard shows
 
@@ -540,7 +550,7 @@ The dashboard (ROADMAP step 3) is built after this and reads these fields; nothi
   sweep-3 reaches its limit"), and for the head `starts by` (or why there is none).
 - **Finished jobs**: `usage` beside `sizing.source`, so "whole node by default, used 4.6 GB" is visible.
 - **Queue control** (§20.10): the node's queue in walk order with bands, `held` and `paused` badges, lent and
-  borrowed cores on the cores bar, who arranged what; copy-the-command buttons only (`mu release`, `mu resume`,
+  borrowed cores and memory on the bars, who arranged what; copy-the-command buttons only (`mu release`, `mu resume`,
   `mu move … --front`), since phases 1–3 are read-only.
 - Dashboard phase 1 then drops "μ starts recording CPU time and peak memory per job" from its own scope (built here;
   detected by `usage` in `hello.features`) and keeps the sampler's `metrics.jsonl`, `now.json` and the
@@ -587,11 +597,10 @@ the results choose between paths already designed, and the lead records them her
 | 7 | the system's memory footprint at idle | `/proc/meminfo` (MemTotal, MemAvailable) and `memory.current` of `system.slice`, `user.slice` and the user manager, minus the probe job's own cgroup | recorded | keep `reserve_system` = 2 GiB; push time is §14 check 8 | new, `sched-probe-2` |
 | 8 | `CPUQuota=100%` in a user unit | `systemd-run --user -p CPUQuota=100% --wait` of a 4-thread busy loop: `cpu.max` reads `100000 100000`; CPU time ≈ wall time | as stated | express units get no quota; §8's `--quick` rule then says "one thread only", and the sampler flags an express job above 1.2 cores | new, `sched-probe-2` |
 | 9 | how much an express thread slows a heavy job, and the reverse | a 20-thread busy loop in one unit; a timed single-thread loop alone, then in a second unit with `CPUQuota=100%` beside it; the 20-thread loop's rate before and during | recorded: the single thread within 1.5× of alone; the heavy job slowed ≤ 1/20 | if the single thread is much slower, express units get `CPUWeight=` above the default | new, `sched-probe-2` |
-
-| 10 | **freeze/thaw of a user unit under WSL2** (§20.5) | `systemctl --version`; a unit `systemd-run --user -p Type=exec` running a counter that writes a number to a file every 100 ms; `systemctl --user freeze`, then `show -p FreezerState` and the unit cgroup's `cgroup.events`; read the counter twice 5 s apart; `memory.current` before and after; `thaw`; the counter again; the time each call took | systemd ≥ 246; `FreezerState=frozen` and `frozen 1` within 1 s; the counter flat while frozen and continuing (not restarting) after the thaw; `memory.current` unchanged within 5 % | **no pause on this node**: `hello.features` lacks `pause`, `mu pause` exits 6 `pause-unavailable`; holds, moves and priorities (part C) are unaffected | new, `sched-probe-2` |
-| 11 | `RuntimeMaxSec` while frozen; whether it can be changed at runtime (§20.6) | a unit with `RuntimeMaxSec=15` frozen at 5 s for 25 s: when does it stop, with which `Result`; `systemctl --user set-property --runtime <unit> RuntimeMaxSec=60` on a running unit | recorded | expected: it stops at 15 s wall (frozen time counts) and `set-property` refuses: the design as written (backstop plus the runner's own limit). If `set-property` works, μ extends `RuntimeMaxSec` by each pause instead | new, `sched-probe-2` |
+| 10 | **freeze/thaw of a user unit under WSL2, and lowering a frozen unit's memory limit** (§20.5, §20.6) | `systemctl --version`; a unit `systemd-run --user -p Type=exec -p MemoryMax=1G` running a counter that writes a number to a file every 100 ms and holds 200 MB; `systemctl --user freeze`, then `show -p FreezerState` and the unit cgroup's `cgroup.events`; read the counter twice 5 s apart and `memory.current` 5 times over 5 s; `systemctl --user set-property --runtime <unit> MemoryMax=<memory.current + 512M>` on the frozen unit and `memory.max` read back; restored to 1G; `thaw`; the counter again; the time each call took | systemd ≥ 246; `FreezerState` starting with `frozen` and `frozen 1` within 1 s; the counter flat while frozen and continuing (not restarting) after the thaw; `memory.current` never above its value at the freeze; `memory.max` takes the lowered and then the restored value | no freeze: **no pause on this node**: `hello.features` lacks `pause`, `mu pause` exits 6 `pause-unavailable`; holds, moves and priorities (part C) are unaffected. Freeze works but `set-property` fails: pause lends cores only and helps only beside sized jobs (§20.6, §17 Q8) | new, `sched-probe-2` |
+| 11 | `RuntimeMaxSec` while frozen; `set-property RuntimeMaxSec`; a transient timer's accuracy (§20.6) | a unit with `RuntimeMaxSec=15` frozen at 5 s for 25 s: when does it stop, with which `Result`; `systemctl --user set-property --runtime <unit> RuntimeMaxSec=60` on a running unit; `systemd-run --user --on-active=10 --timer-property=AccuracySec=1s touch <file>`, and a second such timer stopped after 5 s | the timer fires 10–11 s after it was armed; the stopped one never fires. The first two are **records only** | expected: frozen time counts and `set-property RuntimeMaxSec` refuses (it is set only when a transient unit is created); the design relies on neither. A late timer: `SLACK` raised to its measured lateness + 5 s | new, `sched-probe-2` |
 | 12 | an MPI job and a wall-clock timeout through a pause (§20.5) | `mpirun -np 4` of a busy loop that checksums its work, frozen 20 s, thawed; and `timeout 10 sleep 8` frozen at 2 s for 15 s | the MPI job completes with the same checksum as an unpaused run; the `timeout` case is **expected to kill** its child at the thaw (recorded for §20.11's rule) | if MPI fails after a thaw, `mpirun` jobs are refused `--pausable` and §20.11 says so | new, `sched-probe-2` |
-| 13 | stopping a frozen unit (§20.8) | `systemctl --user stop` of a frozen unit with `TimeoutStopSec=5`; whether systemd thaws it first (does `SIGTERM` arrive?), the time to stop, `Result` | stops within 6 s | none needed: μ thaws before stopping anyway; the figure checks the cancel path's timing | new, `sched-probe-2` |
+| 13 | stopping a frozen unit (§20.8) | `systemctl --user stop` of a frozen unit with `TimeoutStopSec=5`; whether systemd thaws it first (does `SIGTERM` arrive?), the time to stop, `Result` | stops within 6 s | none needed: `stop_unit()` thaws before stopping anyway; the figure checks the cancel path's timing | new, `sched-probe-2` |
 
 Items 7–13 call `systemd-run --user` inside a probe job on purpose; §8 forbids that in ordinary jobs. Items 10–13 decide
 part D only; parts A–C do not wait for them.
@@ -641,32 +650,52 @@ FEA and CFD cases, recorded in `docs/verification/` (§14 check 7). It informs t
 | Q21 | **end bound counts from the real start**: a slow checkout (fault-injected 20 s) before a backfilled job: its re-check refuses it if it would now end after `S`; a job's `active_mono` is set and `start_unconfirmed` cleared once the unit is active | `stamp-before-checkout` |
 
 **Queue control rows** (§20), on the same runner, with two workstation keys in the CI node (`ci-owner` in
-`/etc/mu/owners`, and `ci-other`), every row with `MU_NODE_CHECK=1`. The per-pass invariant check gains: no held job
-started; Σ memory grants (paused included) ≤ `M`; CPU sets of jobs not frozen disjoint; every borrower's end bound ≤
-its lender's deadline; no frozen unit past its deadline + 60 s; no frozen unit whose job has a result. The `plan()`
-unit tests and the randomised simulation gain random holds, releases, moves, priorities, aging, hand pauses and
-auto-pauses, and assert the same, plus G1 (the head starts by its first `S` unless an explicit act, which the
-simulation logs, moved it) and G5 (auto-pause counts and cooldowns); their faults: `held-in-walk`,
-`borrow-past-deadline`, `thaw-over-borrower`, `free-mem-on-pause`, each must make the simulation fail.
+`/etc/mu/owners`, and `ci-other`) and two project clones, every row with `MU_NODE_CHECK=1`. The per-pass invariant
+check gains: no held job started; firm memory ≤ `M` and each lender's lent memory ≥ its borrowers' borrowed memory;
+CPU sets of jobs not frozen disjoint; every borrower's CPU ids inside frozen lenders' and its end bound ≤ each
+lender's deadline; no frozen unit past its deadline + 120 s; no frozen unit whose job has a result; an unfrozen
+ordinary job has its limit timer, a frozen one its dead-man timer and no limit timer.
+
+The `plan()` unit tests and the randomised simulation gain random holds, releases, moves (held references included),
+priorities, re-queues after interruptions, hand pauses and re-pauses, lenders ending while lent, and auto-pauses with
+random checkout times, and assert the same, plus **G1 in its strict form**: a job named in no act's `delays` never
+sees its `starts_by` grow (and the head starts by its first `S` unless an act that names it moved it); and G5
+(auto-pause counts and cooldowns). Their faults, each of which must make the simulation fail: `held-in-walk`,
+`borrow-past-deadline`, `thaw-over-borrower`, `lend-whole-grant` (memory lent beyond grant − held),
+`lender-ends-ids-freed` (a lender's end frees its borrowers' ids), `repause-shortens` (a re-pause moves `D` before a
+borrower's end), `borrower-mem-unchecked` (a borrower's free memory not tested against `S`), `partial-order-write`
+(only the moved job written to `queue.json`), `requeue-tier` (re-queued jobs sorted above explicit places),
+`freeze-before-checkout`.
+
+**JSON shapes (R5).** Layer 1 gains one golden fixture per command and per error of §20.9 (`queue`, the four
+arranging answers, `pause`, `resume`, `resuming`, `other-project`, `not-allowed`, `pause-limit`, `not-queued`,
+`reference-not-queued`, `already-finished`, `pause-failed`, `busy`, `node-too-old`), checked against the node's
+answer (keys, types, enums) and the client's `--json` output; the dashboard's D40 fixtures are the same files. Fault:
+`drop-field` (one field removed from an answer).
+
+**Freezing in CI is required, not optional.** Before Q29, `e2e.sh` freezes and thaws a test unit; if that fails,
+Q29–Q39 **fail**, never skip, so a CI image without a working freezer cannot pass part D.
 
 | # | Check | Fault that must make it fail |
 |---|---|---|
-| Q22 | **hold / release**: three queued `--cores 4` jobs A, B, C behind a running one; `hold B`: when the runner frees, C starts before B; B keeps `place` 2; `release B` (during a runner pass) puts it back at its place; `hold` twice is `changed: false`; `--hold` at submit; `mu cancel` of a held job ends it `cancelled` at once | `hold-ignored` (B starts); `release-to-back` (B behind C) |
-| Q23 | **move**: `--before`, `--after`, `--front`, `--back` give the order asked, in `mu queue --json` and in the actual start order; a repeated move is `changed: false`; `--before` a running job is `reference-not-queued` (exit 2) | `walk-by-accepted-ns` (moves have no effect on the start order) |
-| Q24 | **bands and aging**: a `high` job submitted last starts first; `--front` of a `normal` job stays behind it and the answer gives `higher_bands_ahead: 1` and the `mu priority` step; `--before` a `high` job moves a job into `high`; with `age_after_s` = 20 s a `low` job becomes `normal`, then `high` | `bands-ignored`; `no-aging` |
+| Q22 | **hold / release**: three queued `--cores 4` jobs A, B, C behind a running one; `hold B`: when the runner frees, C starts before B; B keeps `place` 2; `release B` (during a runner pass) puts it back at its place; `hold` twice is `changed: false`; `--hold` at submit (the job is never listed `queued`: `held` was in the temporary folder before the rename); `mu cancel` of a held job ends it `cancelled` at once | `hold-ignored` (B starts); `release-to-back` (B behind C) |
+| Q23 | **move**: `--before`, `--after`, `--front`, `--back` give the order asked, in `mu queue --json` and in the actual start order; with A, B, C, D queued and `queue.json` empty, `move D --before B` gives A, D, B, C; a held job can be moved and serves as `--before` reference; an attempt-2 job re-queued after an interruption is passed by a later `move --front` and that answer's `place: 1` is true; a repeated move is `changed: false`; `--before` a running job is `reference-not-queued` (exit 2) | `walk-by-accepted-ns` (moves have no effect on the start order); `partial-order-write` |
+| Q24 | **bands**: a `high` job submitted last starts first; `--front` of a `normal` job stays behind it and the answer gives `higher_bands_ahead: 1` and the `mu priority` step; `--before` a `high` job moves a job into `high`; `priority X high` puts X behind the `high` jobs already there; an interrupted `low` job re-queues at the front of `low`, behind the `normal` jobs | `bands-ignored`; `priority-to-front` |
 | Q25 | **order file and held state recovery**: `queue.json` zeroed (the S3 shape): the order falls back to FIFO within bands, holds and bands are kept, one journal line; `state.json` of a held job removed: it is rebuilt held from `events.log` and not started | `holds-in-order-file-only` (the held job starts); `rebuild-held-as-queued` |
-| Q26 | **authorisation**: `ci-other` cannot hold, move, pause or raise `ci-owner`'s job (exit 5 `not-allowed`, an audit line, nothing changed); it can arrange its own, but not move it ahead of `ci-owner`'s; `ci-owner` can arrange both and set `urgent`; with `/etc/mu/owners` removed and one key, that key is the owner; with two keys and no file, nobody is | `no-auth-check`; `owner-from-node-json` (an owner list a job could write) |
-| Q27 | **one view, two sessions**: jobs from two projects and both keys: `mu queue --json` lists all of them in walk order with `key`, `project`, `place`, `waiting_for`, `starts_by`, held and paused; the text lists the same order; the client's guard refuses `hold` of the other project's job without `--others` (exit 2, nothing sent to the node: no audit line) | `queue-project-filter`; `no-others-guard` |
-| Q28 | **mixed versions**: the previous release's runner on a node holding a held job and a moved order: the held job is not started, the rest run FIFO; a new client against an old node: `mu hold` exits 6 `node-too-old`, `mu queue` falls back to `list` and says so | `held-as-queued` (`state.json` `queued` with a flag: the old runner starts it) |
-| Q29 | **pause and resume by hand**: a 2-core job increments a counter file; `mu pause --for 60s`: `FreezerState=frozen`, the counter does not move for 5 s, `memory.current` unchanged; a queued `--cores 2 --time 20s` job starts on the lent CPUs (`class: borrowing`) and a `--time 5m` one does not; `mu resume`: same pid, attempt 1, the counter continues from its value | `pause-noop`; `lend-without-deadline` (the 5-minute job starts: the invariant check fires) |
-| Q30 | **resume waits for the borrower**: resume asked while a borrower runs: `resuming` with `resumes_by` (exit 10 with `--timeout 2`), thawed within one pass of the borrower's end; at no sample do two unfrozen jobs share a CPU; with a borrower that ignores `SIGTERM` past its limit, the lender is thawed at its deadline + 60 s with an `events.log` line | `thaw-over-borrower`; `no-valve` |
+| Q26 | **authorisation**: `ci-other` cannot hold, move, pause or raise `ci-owner`'s job (exit 5 `not-allowed`, an audit line, nothing changed); it can arrange its own, but not move it ahead of `ci-owner`'s; its `submit --priority high` that would pass `ci-owner`'s job is refused and nothing accepted; `ci-owner` can arrange both and set `urgent`; a hold or pause by `ci-owner` on `ci-other`'s job cannot be released or resumed by `ci-other`; with `/etc/mu/owners` removed and one key, that key is the owner; with two keys and no file, nobody is, and `hello` and `mu queue` carry the warning | `no-auth-check`; `owner-from-node-json` (an owner list a job could write); `owner-acts-not-sticky` |
+| Q27 | **one view, two projects**: jobs from two projects and both keys: `mu queue --json` lists all of them in walk order with `key`, `project`, `place`, `waiting_for`, `starts_by`, held and paused; the text lists the same order; the **node** refuses `hold` of the other project's job, and a `move --front` that would pass it, without `--others` (exit 2 `other-project`, nothing changed, an audit line with `from=`); with `--others` both are done and the audit lines carry `others=1` | `queue-project-filter`; `no-others-guard` |
+| Q28 | **mixed versions**: the previous release's runner (`src/mu/node.py` and the rest of `src/mu` at the previous release's git tag, named in `e2e.sh` and moved forward each release, installed on the CI node as a second μ version and made the default while idle, as auto-update would) on a node holding a held job and a moved order: the held job is not started, the rest run FIFO; `mu cancel` of the held job answers `cancelling`, and the current runner, restored, cancels it; a new client against the old node: `mu hold` exits 6 `node-too-old`, `mu queue` falls back to `list` and says so | `held-as-queued` (`state.json` `queued` with a flag: the old runner starts it) |
+| Q29 | **pause and resume by hand**: a 2-core job increments a counter file and holds 300 MB under `--mem 1G`; `mu pause --for 60s`: `FreezerState=frozen`, the counter does not move for 5 s, `memory.current` unchanged, `memory.max` lowered to `held`; a queued `--cores 2 --mem 256M --time 20s` job starts on the lent CPUs and memory (`class: borrowing`) and a `--time 5m` one does not; `mu resume` after the borrower ends: `memory.max` back to 1G, same pid, attempt 1, the counter continues from its value | `pause-noop`; `lend-without-deadline` (the 5-minute job starts: the invariant check fires); `lend-whole-grant` |
+| Q30 | **resume waits for the borrower**: resume asked while a borrower runs: `resuming` with `resumes_by` (exit 10 with `--timeout 2`), thawed within one pass of the borrower's end; at no sample do two unfrozen jobs share a CPU; with a borrower that ignores `SIGTERM` past its limit, at the deadline + 60 s it is killed and the lender thawed, `memory.max` restored only after the borrower's unit ended, with an `events.log` line | `thaw-over-borrower`; `no-valve` |
 | Q31 | **races**: (a) pause sent as the job exits: the answer is `already-finished` with its state, no frozen unit remains; (b) the shim frozen right after writing `result.json` (fault-injected pause in the shim): the runner thaws it and the job ends once; (c) resume after the unit ended: `changed: false`, exit 0; (d) `hold` sent during a 20 s fault-injected checkout of the same job: `not-queued`, the job runs exactly once | `freeze-after-result` (b stays frozen); `start-twice` |
-| Q32 | **runner restart while paused**: runner `SIGKILL`ed with a job frozen: after the restart the unit is still frozen, the deadline unchanged, the job thawed at the deadline and finished once; the pause and lending were never in memory only | `pause-in-memory-only` |
+| Q32 | **runner restart while paused**: runner `SIGKILL`ed with a job frozen: after the restart the unit is still frozen, its dead-man timer armed and no limit timer, the deadline unchanged, the job thawed at the deadline and finished once; the pause and lending were never in memory only | `pause-in-memory-only` |
 | Q33 | **VM stop while paused**: the frozen unit is killed with the runner stopped (Q13's path): the job is re-queued as attempt 2 at the front of its band, `pause` dropped, `note` says it was paused | `requeue-keeps-pause` |
 | Q34 | **cancel while paused**: ends `cancelled` within 10 s, its process tree gone, the job saw `SIGTERM` (its trap writes a file), its memory freed only after the unit ended | `cancel-without-thaw` (no `SIGTERM` file) |
-| Q35 | **time accounting**: a `--time 20s` loop paused 15 s ends `timeout` at about 20 s of running and 35 s wall; `result.json` `run_s` ≈ 20, `paused_s` ≈ 15, `pauses` has the entry; an unpaused `--time 20s` job still ends `timeout` at about 20 s; with the runner stopped, the `RuntimeMaxSec` backstop still ends a job (`t` + budget) | `count-paused-time` (timeout at 20 s wall); `no-runner-timeout` |
-| Q36 | **limits**: `--for 10s` resumes by itself at 10 s; a pause beyond `max_s` or the budget is refused `pause-limit` with the figures; pausing an express job or a borrower is refused; a job needing the paused job's memory does not start while it is paused | `no-pause-deadline`; `free-mem-on-pause` |
-| Q37 | **auto-pause**: with `auto_pause: marked`, a `--pausable --cores 4 --mem 512M` job running on `C` = 4 and an `urgent --cores 2 --mem 256M --time 20s` job submitted: the first is frozen, the urgent job runs on its lent CPUs, the first is thawed when it ends (before the deadline); an unmarked job is never paused; a second urgent job within the cooldown gets no pause; an urgent job whose memory does not fit gets no pause; an urgent job cancelled while queued ends the pause at once; `--quick` never pauses anything | `pause-unmarked`; `no-cooldown`; `pause-without-mem-check`; `keep-pause-after-beneficiary` |
+| Q35 | **time accounting**: a `--time 20s` loop paused 15 s ends `timeout` at about 20 s of running and 35 s wall, by its limit timer (`timelimit` marker), **also while the runner holds the lock through a fault-injected 60 s checkout of another job**; `result.json` `run_s` ≈ 20, `paused_s` ≈ 15, `pauses` has the entry; an unpaused `--time 20s` job still ends `timeout` at about 20 s; with the runner stopped, the `RuntimeMaxSec` backstop still ends a job (`t` + budget) | `count-paused-time` (timeout at 20 s wall); `limit-in-runner-loop` (the runner's own check: the 60 s checkout overruns) |
+| Q36 | **limits**: `--for 10s` resumes by itself at 10 s; a re-pause while a borrower runs is raised to the borrower's end (`deadline_raised_to`); a pause beyond 2 h or the budget is refused `pause-limit` with the figures; pausing an express job, a borrower or a job started without a limit timer is refused; a job needing more than the lent memory does not start while the job is paused | `no-pause-deadline`; `repause-shortens` |
+| Q37 | **auto-pause**: with `auto_pause: marked`, a `--pausable --cores 4 --mem 512M` job running on `C` = 4 and an `urgent --cores 2 --mem 256M --time 20s` job submitted: the first is frozen, the urgent job runs on its lent CPUs, the first is thawed when it ends (before the deadline); **with a fault-injected 20 s checkout of the urgent job, the victim is frozen only after it and the urgent job starts in the same pass**; an unmarked job is never paused; a second urgent job within the cooldown gets no pause; an urgent job whose memory does not fit gets no pause; `--quick` never pauses anything | `pause-unmarked`; `no-cooldown`; `pause-without-mem-check`; `keep-pause-after-beneficiary`; `freeze-before-checkout` |
+| Q38 | **stops of a frozen unit**: a paused job whose log passes a fault-injected small cap (a helper appends to its log while it is frozen): thawed, then stopped, its `SIGTERM` file written, result `failed` with the log-cap note; the limit timer's command run by hand on a frozen unit (as if its stop at freeze had failed): thawed, stopped, `timeout` | `stop-without-thaw` |
+| Q39 | **runner dead past the deadline**: a job paused `--for 20s` with a borrower running, then the runner stopped: the borrower ends by its own limit; at the deadline + 120 s the dead-man timer thaws the job, `memory.max` still at `held`; the runner restarted: "thawed outside μ", `memory.max` restored, the limit timer re-armed with the remaining run time, the job finishes once, `paused_s` ≈ 140 | `no-dead-man` |
 
 Existing rows R14, R17, R18, R19, R25 run unchanged; R19 ("three submits run one at a time") becomes "three
 whole-node jobs run one at a time" (unflagged jobs are whole-node), so it still holds and still fails with
@@ -700,9 +729,9 @@ Each from the Mac through Claude or the owner, after both machines show the rele
 | End bounds on the monotonic clock, re-check after checkout, time-based backfill, valve, `starts_by`, the `--time` hint | B | 80 in `node.py` | 1 |
 | Tests: `plan()` unit tests and the randomised simulation (~200), e2e rows Q01–Q21 (~400), each with its fault | A + B | ~600 | 2–3 |
 | **Total, parts A and B** | | **~770 + ~600 tests** | **7–9 days**, no PC visit |
-| Queue control, part C: the walk, holds, moves, priority bands, aging, `mu queue`, authorisation, audit (§20.13) | C | ~430 + ~250 tests | 3½–4 |
-| Queue control, part D: pause and resume by freeze/thaw, lent cores, the runner's own time limit, the auto-pause policy (§20.13) | D | ~430 + ~300 tests | 5–6 |
-| **Total with queue control** | | **~1,630 + ~1,150 tests** | **about 16–19 days**, no PC visit |
+| Queue control, part C: the walk, holds, moves, priority bands, `mu queue`, authorisation, the node-side `--others` guard, audit (§20.13) | C | ~420 + ~280 tests | 3½–4 |
+| Queue control, part D: pause and resume by freeze/thaw, lent cores and memory, the time-limit and dead-man timers, the auto-pause policy (§20.13) | D | ~480 + ~380 tests | 6 |
+| **Total with queue control** | | **~1,670 + ~1,260 tests** | **about 16½–19 days**, no PC visit |
 
 - **If days must be cut**, part A ships first as its own release (admission, head reservation, express, `usage`,
   `too-big`: about 5–6 days with its tests), and part B (time-based backfill, `starts_by`) follows in a second release
@@ -713,7 +742,8 @@ Each from the Mac through Claude or the owner, after both machines show the rele
 - **Queue control in two releases** (§20.13): part C ships with A and B in the **first release** (it needs nothing new
   on the PC and, with `--quick`, solves the 2026-11-14 case); part D is a **second release**, after probe items 10–13
   and some days of the first release running real JATAYU work, because it changes how time limits are enforced and
-  rests on freeze/thaw under WSL, which nothing has measured yet.
+  rests on freeze/thaw under WSL, which nothing has measured yet. If days must be cut there, the auto-pause policy
+  (about a day) can follow hand pause (§17 Q9).
 
 **Order** (ROADMAP step 2.5): after **step 1** (the pairing fixes, which also touch `node.py` lines 632–645 and 1559,
 `jobs.py` and `CLAUDE-toolchain.md`: rebase on them) and after **step 2** (the node's auto-update reports `ok` again,
@@ -739,12 +769,13 @@ owner answers §17 Q1 and Q2 before the release. Dashboard sub-step 3.1 then reu
 | Conflicts with the pairing branch | merge work | small overlap; rebase before building |
 | Auto-update still failing | the release does not reach the PC | ROADMAP step 2 is a prerequisite |
 | A PC fact differs from the expectation | a path changes | the probe runs before the build; every §12 item has a designed fallback |
-| Claude sessions arrange each other's jobs | one session's sweep pushed back or paused by another without the owner knowing | `--others` guard on the workstation; §20.11 (only when the owner asked, and say so); `delays` in each answer and `events.log` of each delayed job; the audit log |
+| Claude sessions arrange each other's jobs | one session's sweep pushed back or paused by another without the owner knowing | `--others` guard decided by the node by project (`from=`); §20.11 (only when the owner asked, and say so); `delays` in each answer and `events.log` of each delayed job; the audit log |
 | A paused job breaks on thaw (its own wall-clock timeout, a network peer, a timing measurement) | a failed or wrong run | pause is by hand or opt-in (`--pausable`); §20.5's table and §20.11; probe item 12; `paused_s` in every result |
 | freeze/thaw does not work under the PC's WSL kernel or user manager | no pause on the node | probe item 10 before part D; part C does not depend on it; `pause-unavailable` says so |
-| The runner's own time limit (part D) misses a job | a job runs past `--time` | systemd's `RuntimeMaxSec` backstop (`t` + budget ≤ 2 `t`); Q35 tests both |
+| The time-limit timer (part D) misses a job (not armed, or late) | a job runs past `--time` | re-armed every pass from `state.json`; systemd's `RuntimeMaxSec` backstop (`t` + budget ≤ 2 `t`); §12 item 11 measures its accuracy; Q35 tests both |
+| A paused job's unused memory is lent | a lender thawed outside μ while a borrower lives cannot grow past `held` and may end `oom` | `MemoryMax` stays at `held` until no borrower lives, so nothing is over-committed; the result's note says so; the dead-man fires only after the valve (§20.5) |
 | A held job forgotten for days | its project waits for nothing | `mu queue` and the dashboard show held jobs with who and since when; held jobs do not keep the node busy, so auto-update is not blocked |
-| Rollback while a job is paused | the old runner never thaws it; it ends at the backstop | a paused job keeps the node busy (no automatic switch); the README's rollback note says "resume paused jobs first" |
+| Rollback, or the runner down, while a job is paused | nothing in μ thaws it | systemd's dead-man timer thaws it at its deadline + 120 s (§20.5); a paused job keeps the node busy, so no automatic switch; Q39 |
 
 ## 17. Open questions for the owner
 
@@ -759,16 +790,28 @@ office PC is "not to be disturbed".
 3. **The root step R-sched-1** (cpuset and io delegation, one distro restart) at the next visit or with ROADMAP 4.2?
    Default: with 4.2, only if §12 item 1 shows cpuset available.
 4. ~~A `--priority` flag: not now~~ **Superseded** by the owner's queue-control requirements (ROADMAP §2.1,
-   2026-11-14): bands, holds, moves and pause are §20. Fair share between workstations: still with a second one.
+   2026-11-14): bands, holds, moves and pause are §20. Bands are strict (no aging after the review): a lower band
+   waits while higher ones arrive. Fair share between workstations: still with a second one.
 5. **Auto-pause default.** `sched.auto_pause` = `"marked"` (only jobs submitted `--pausable`), or `"any"` (every
    ordinary job the owner has not excluded)? Default `"marked"`: freezing breaks jobs with their own timeouts or
    network peers, and only the submitter knows. Changeable in `node.json` without a release.
 6. **Pause limits.** A hand pause at most 2 h; at most 4 h (and never more than the job's own `--time`) paused per
-   attempt; an auto-pause at most 30 min, twice per attempt, 15 min of running in between. Default: as stated.
+   attempt; an auto-pause at most 30 min, twice per attempt, 15 min of running in between. Default: as stated
+   (constants in the code: a change is a release).
 7. **`urgent` for the owner only** (it can pause other jobs); `high` past another workstation's job also owner-only.
    Today every Claude session on the Mac uses the owner's key, so this binds only a later second workstation; between
-   sessions the `--others` guard and §20.11 apply. Default: as stated.
-8. **Part D as a second release** (pause after the queue order). Default yes (§15).
+   sessions the node's `--others` guard (by project) and §20.11 apply, and `--priority high|urgent` at submit always
+   needs `--others`. Default: as stated.
+8. **Part D as a second release** (pause after the queue order). Default yes (§15). If probe item 10 shows that a
+   frozen unit's memory limit cannot be lowered under WSL, a pause lends cores only and **helps only beside sized
+   jobs**: beside an unflagged job such as the 2026-11-14 CFD run, nothing ordinary could start on its cores.
+9. **Auto-pause: for which jobs, and when.** Your requirement says a long sweep is paused automatically "for the
+   express lane". The design pauses only for `urgent` jobs (owner key, explicit `--time` of at most about 28 min),
+   because a `--quick` job starts at once in a free lane slot and needs no cores; the lane is full only when two quick
+   jobs already run. And it pauses only jobs marked `--pausable`, so on day one it does nothing until Claude marks
+   sweeps. Alternatives: (a) also pause for a `--quick` job when both lane slots are taken; (b) ship hand pause in the
+   second release and the policy later, once hand pauses show it is needed (saves about a day). Default: `urgent`
+   only, shipped with hand pause in the second release, since you asked for both.
 
 ## 18. Read in sources
 
@@ -790,7 +833,8 @@ office PC is "not to be disturbed".
 - `~/mu-first-job/probe.py` (items 1–6) and `mu status 20261114-161025-2icaxr` (still queued, 2026-11-14 evening).
 - For §20, from memory, not re-fetched: systemctl(1) `freeze`/`thaw` (systemd 246) and the `FreezerState` property;
   the kernel's cgroup v2 document (`cgroup.freeze`, `cgroup.events`; fatal signals still end frozen tasks);
-  systemd.service(5) `RuntimeMaxSec`; systemctl(1) `set-property` (resource-control settings); Slurm's `scontrol
+  systemd.service(5) `RuntimeMaxSec`; systemctl(1) `set-property` (resource-control settings) and `--runtime`;
+  systemd-run(1) `--on-active`, `--timer-property`; `FreezerState`'s later `…-by-parent` values; Slurm's `scontrol
   hold/release/top` and `squeue` for names. Read in the repository: `node.py` (`serve`, `ARG_RULES`, `VERBS`,
   `verb_cancel`, `queued_jobs`, `status_of`, `step`, `start_job`, `classify`, `interrupted`, `rebuild_state`,
   `run_runner`, `set_busy`), `install/hosts/wsl2/mu-node-gate`, `pair.py` `write_owner`, pairing §9.6, job-layer
@@ -818,8 +862,29 @@ fixing first." **All findings were accepted.** Two were applied in a slightly di
 | minor | `tmp/` on re-run; per-thread widening check; `usage` in `hello.features`; R-sched-1's early return; owner answer on Q1; effort | All applied (§6, §5.2, §7.1, §5.4, §17, §15) |
 
 **After the review** (same day): the owner's queue-control requirements (ROADMAP §2.1) reversed one of this
-design's calls (no priority classes, §3.3) and added §20. §20 needs its own independent review before part C is built
-(security: the authorisation table and its honest limits; durability: §20.8; usability for Claude: §20.9, §20.11).
+design's calls (no priority classes, §3.3) and added §20.
+
+**Second review: §20 (2026-11-14).** An independent reviewer read the whole file, §20 in detail, and the ROADMAP diff,
+checking the systemd facts against `node.py`, the gate and `pair.py` only (nothing run). Verdict: "not ready to build
+as written. Part C is close and needs its ordering rule and authorisation table made exact; part D has the freezer
+mechanics right but needs four design changes first." **Every finding was accepted**; four in a different form, noted
+in the table. None was rejected.
+
+| # | Finding | Done |
+|---|---|---|
+| 1 | Pause frees nothing in the real case: the paused job's whole memory grant stays counted, so nothing fits beside an unflagged job | A frozen job cannot allocate: its memory is kept in place, `MemoryMax` lowered to `memory.current` + `LEND_MARGIN` with `set-property --runtime`, the rest lent to borrowers that end before `D`; restored before the thaw; never thawed while a memory borrower lives (§20.5, §20.6). Probe item 10 checks `memory.current` flat and `set-property` on a frozen unit; its fallback (cores only, "helps only beside sized jobs") is in §17 Q8 |
+| 2 | Auto-pause freezes before the urgent job's checkout, which can outlast `MARGIN`; both pauses burnt, `H` refused | Checkout first, then freeze, confirm, compute `D`, start `H` in the same pass (§20.7); Q37 case with a 20 s checkout, fault `freeze-before-checkout` |
+| 3 | The runner's own time limit is not a hard bound (`step()` holds the lock through checkouts) | A transient systemd timer per job (`mu-limit-<id>`, `AccuracySec=1s`) writes `timelimit` and stops the unit; stopped at freeze, re-armed at thaw, re-armed every pass if missing (§20.6). The "if `set-property RuntimeMaxSec` works" branch dropped; probe item 11 kept as a record and now also measures the timer's accuracy. Q35 runs during a 60 s checkout, fault `limit-in-runner-loop` |
+| 4 | A frozen job depends on the runner being alive | Dead-man timer armed at freeze, removed at thaw (§20.5). **Different form:** it fires at `D + 120 s`, not `D + 60 s`, so it never races the runner's own valve at `D + 60 s`, and it only thaws (`MemoryMax` stays at `held` until the runner sees no borrower). The "resume paused jobs before rolling back" trap is gone (§20.12, §16). Q39 |
+| 5 | Core accounting with borrowers unspecified; the §20.9 example did not add up | Accounting by CPU-id sets and firm/lent memory (§20.6, §3.3 step 1); a lender ending while lent leaves its borrowers their ids; a borrower's free memory passes the `extra`-or-time test against `S`; a re-pause never moves `D` before a borrower's end bound. §20.9's example recomputed. Simulation faults `lender-ends-ids-freed`, `repause-shortens`, `borrower-mem-unchecked` |
+| 6 | The walk is not a precise rule (unlisted jobs, "re-queued first" tier, held jobs not movable, G3 false) | Every write of `queue.json` lists all queued and held jobs; re-queue is an insertion at the front of the job's **own band** (an interrupted `low` job does not pass `normal` ones); `move`/`priority` apply to held jobs and accept held references; G3 reworded (§20.3). Q23, Q24 cases; faults `partial-order-write`, `requeue-tier` |
+| 7 | Not starvation-free (`urgent` never ages; aging overrides an explicit `low`; aging clock undefined) | **The reviewer's alternative taken: aging cut**, and said plainly that lower bands wait while higher ones arrive (§20.3 G4, §17 Q4). `--priority high\|urgent` at submit always needs `--others`; `mu priority` past another project's job needs it too |
+| 8 | Owner acts not sticky; `submit --priority high` from a non-owner missing; the `--others` guard cannot be decided on the client; the audit cannot tell sessions apart; no owner is silent | Sticky owner acts (`held.by`, `pause.by`, `band_by`); the table's submit row; `from=` and `others=` under `ARG_RULES`, decided by the node under the lock; `from=` and `others=1` in `audit.log`, `events.log` and `delays`; `owners: []` warned in `hello` and `queue`, the file written at the next root step (§20.2, §20.4). Q26, Q27 |
+| 9 | The policy differs from the owner's text and is inert on day one | Said plainly (§20.7) and put to the owner as §17 Q9, with both alternatives. **Different form:** the default keeps the policy in the second release rather than after hand pause, because the owner asked for both; the split is the question's option (b) |
+| 10 | One stop path | `stop_unit()` thaws first, for cancel, log cap, valve, `no-adopt`, and the limit timer's command (§20.5). Q38 |
+| 11 | Tests miss cases | Q23, Q24, Q26, Q27, Q35–Q37 extended; Q38 (stops of a frozen unit), Q39 (runner dead past `D`); JSON-shape fixtures for every command and error; G1 asserted strictly; Q29–Q39 fail, never skip, without a freezer; Q28 says where the previous runner comes from (its git tag) (§13) |
+| 12 | Simpler: no `control.json`, no mixed borrowers, constants for the five limits | All three: the verbs freeze under the lock and a deferred resume is `pause.resume_asked`; a borrower's cores all come from lenders. **Different form for mixed borrowers:** cores are never mixed, but a borrower's memory may come partly from free memory (tested against `S`), or an urgent job could rarely borrow beside a sized sweep that uses most of its memory. The limits are constants; only `sched.auto_pause` stays in `node.json` |
+| 13 | Small: `--hold` in the temporary folder; cancel of a held job under a rolled-back runner; `FreezerState` by prefix; no pointers in `dashboard.md` and `job-layer.md` | All applied (§20.8, §20.12, §20.5); pointers added to job-layer §7.2 (exit 77) and dashboard §4.3 (`queue` in the allowlist) |
 
 ## 20. Queue control (the owner's requirements of 2026-11-14)
 
@@ -828,46 +893,49 @@ design's calls (no priority classes, §3.3) and added §20. §20 needs its own i
 for that session to cancel its queued jobs and resubmit them (losing their place), and the probe would still have
 waited for the running CFD job. Several Claude sessions now share one node. §1–§19 were written before these
 requirements and did not meet them (§3.3 even rejected priority classes). This section adds what was missing; every
-earlier section it changes says so and points here. Nothing here is built.
+earlier section it changes says so and points here. Nothing here is built. **Revised after its own review** (§19,
+second table): exact walk and authorisation rules, memory lent by a paused job, the time limit and the thaw held by
+systemd timers rather than by the runner, aging cut.
 
-| # | Requirement (owner) | Where |
-|---|---|---|
-| R1 | **hold / release** a queued job, **move** it before or after another job or to the front, **priority**, all without cancelling | §20.2–§20.4 |
-| R2 | **pause / resume a running job** by systemd freeze/thaw of its cgroup (CPU released at once, memory kept, the job continues exactly where it stopped), by hand **and** as a policy so an urgent job can briefly pause a long sweep | §20.5–§20.7 |
-| R3 | **one view of the whole node queue** across projects and Claude sessions; the owner's workstation key may arrange **any** job on the node | §20.2, §20.4 |
-| R4 | small jobs never need anyone to step aside: they start at once when they fit | §20.1 |
-| R5 | every operation with `--json` for Claude | §20.9 |
+| # | Requirement (owner) | Where | Met, and its limits |
+|---|---|---|---|
+| R1 | **hold / release** a queued job, **move** it before or after another job or to the front, **priority**, all without cancelling | §20.2–§20.4 | yes; held jobs can be moved too |
+| R2 | **pause / resume a running job** by systemd freeze/thaw of its cgroup (CPU released at once, memory kept, the job continues exactly where it stopped), by hand **and** as a policy so an urgent job can briefly pause a long sweep | §20.5–§20.7 | yes, with probe items 10–11 passing. The job's memory is kept **in place**; what it does not use is lent (§20.6), so a pause helps beside an unflagged job too. The policy is for `urgent` jobs, not `--quick` ones, and acts only on jobs marked `--pausable`: §17 Q9 asks the owner |
+| R3 | **one view of the whole node queue** across projects and Claude sessions; the owner's workstation key may arrange **any** job on the node | §20.2, §20.4 | yes; the node cannot tell Claude sessions apart, only projects (`from=`, §20.4) |
+| R4 | small jobs never need anyone to step aside: they start at once when they fit | §20.1 | yes for `--quick` (two lane slots) and for sized jobs that fit; beside an unflagged job only the lane fits until it is paused |
+| R5 | every operation with `--json` for Claude | §20.9 | yes; every answer and error has a fixture (§13) |
 
 ### 20.1 The 2026-11-14 case under this design, and R4
 
 - **The probe needed one core, a few hundred MB and two minutes.** Submitted `--quick`, it takes an express slot
   (§3.4) and starts at once, even beside an unflagged whole-node job. Nobody steps aside. This is R4, and it needs no
-  operation from anyone: the express lane and backfill (§3.3) start every job that fits.
+  operation from anyone: the express lane and backfill (§3.3) start every job that fits. The lane has **two** slots;
+  a third `--quick` job joins the ordinary queue.
 - **A small job that needs more than the lane** (say 4 cores, 2 GB, 5 minutes): `--cores 4 --mem 2G --time 10m`
   starts at once when 4 cores and 2 GB are free and either the head of the queue does not need them or the job ends
-  before the head's `starts_by`.
-- **It must simply go first among the queued jobs:** `mu move <probe> --front`. The JATAYU jobs keep their order
-  behind it; nothing is cancelled.
-- **It cannot start because a running job holds the cores:** `mu pause <cfd> --for 15m` (when the owner asks). The
-  CFD job's cores are lent until the pause's deadline; the probe starts on them because it ends before that deadline;
-  the CFD job then continues from where it stopped.
-- **Pause frees cores, never memory.** If the running job was unflagged (the whole job memory, §4.2), nothing
-  ordinary fits beside it, paused or not; only the express lane does. That is why §8 keeps telling Claude to size
-  jobs.
+  before the head's `starts_by`. Beside an unflagged job (all cores, all job memory) nothing ordinary is free.
+- **It must simply go first among the queued jobs:** `mu move <probe> --front --others` (the JATAYU jobs are another
+  project's; `--others` because the owner asked, §20.2). They keep their order behind it; nothing is cancelled.
+- **It cannot start because a running job holds the node:** `mu pause <cfd> --for 15m --others` (when the owner asks).
+  The CFD job is frozen; its cores and the memory it is not using (say 14 of its 20 GB) are lent until the pause's
+  deadline; the probe starts on them within a pass or two because it ends before that deadline (it needs a realistic
+  `--time`); `mu resume <cfd> --others` after the probe ends, or the CFD job resumes by itself at the deadline, and
+  continues from where it stopped. The probe did not need to be moved first: a job that ends before the deadline
+  borrows wherever it is in the queue.
 - **Claude sees the node:** `mu queue --json` shows what runs, what is paused, held and queued, in the order they will
   start, who submitted each job and from which project, why each waits and by when it starts.
 
 ### 20.2 Commands (workstation)
 
-| Command | What it does | Who may |
+| Command | What it does | Who may (§20.4) |
 |---|---|---|
-| `mu queue [--on NODE] [--json] [--mine]` | The **whole node's** queue: running (with paused ones marked), held, queued in the order they will start. Per job: id, name, project, owner workstation (`key`), `submitted.host`, request and grant, band, place, `waiting_for`, `starts_by` / `ends_by`, pause and lending. `--mine`: this project's jobs only (`mu status` stays the per-project list, unchanged) | any paired key |
-| `mu hold JOB` / `mu release JOB` | A held job keeps its place but is skipped: it starts nothing, takes no reservation and blocks nothing. `release` puts it back in the walk at the same place | the job's workstation; an owner key |
-| `mu move JOB --before JOB2 \| --after JOB2 \| --front \| --back` | Changes the job's place. `--front`/`--back`: the front or back of its own **band**; `--before`/`--after` another queued job: next to it, taking that job's band (said in the answer) | same; passing another workstation's job needs an owner key |
-| `mu priority JOB urgent\|high\|normal\|low` | Moves the job to the back of that band | same; raising past another workstation's job, and `urgent`, need an owner key |
-| `mu submit … --priority CLASS --hold --pausable` | The band at submit (default `normal`); submit already held; let the auto-pause policy pause this job (§20.7) | `urgent`: owner key |
-| `mu pause JOB [--for DUR] [--timeout S]` | Freezes a running job for `DUR` (default 30m, at most `sched.pause.max_s`, 2 h); its cores are lent until then; it resumes by itself at the deadline | the job's workstation; an owner key |
-| `mu resume JOB [--timeout S]` | Thaws a paused job, as soon as no borrower is on its cores (they end by the deadline, §20.6) | same |
+| `mu queue [--on NODE] [--json] [--mine]` | The **whole node's** queue: running (with paused ones marked), then held and queued jobs in walk order. Per job: id, name, project, owner workstation (`key`), `submitted.host`, request and grant, band, place, `waiting_for`, `starts_by` / `ends_by`, pause, lending and borrowing. `--mine`: this project's jobs only (`mu status` stays the per-project list, unchanged) | any paired key |
+| `mu hold JOB` / `mu release JOB` | A held job keeps its place but is skipped: it starts nothing, takes no reservation and blocks nothing. `release` makes it eligible again at the place it has then | the job's workstation; an owner key |
+| `mu move JOB --before JOB2 \| --after JOB2 \| --front \| --back` | Changes the job's place (queued or held). `--front`/`--back`: the front or back of its own **band**; `--before`/`--after` another queued or held job: next to it, taking that job's band (said in the answer) | same; passing another workstation's job needs an owner key |
+| `mu priority JOB urgent\|high\|normal\|low` | Puts the job (queued or held) at the back of that band | same; passing another workstation's job, and `urgent`, need an owner key |
+| `mu submit … --priority CLASS --hold --pausable` | The band at submit (default `normal`; `high` and `urgent` need `--others`); submit already held; let the auto-pause policy pause this job (§20.7) | `urgent`: owner key |
+| `mu pause JOB [--for DUR] [--timeout S]` | Freezes a running job for `DUR` (default 30m, at most 2 h); its cores and unused memory are lent until then; it resumes by itself at the deadline | the job's workstation; an owner key |
+| `mu resume JOB [--timeout S]` | Thaws a paused job, as soon as no borrower is on its cores (they end by the deadline, §20.6) | same; an owner's pause only by an owner key |
 
 Every command takes `--json`, `--on NODE` (default: the job's node from this clone's record, else the only paired
 node) and `--others` (below). `pause` and `resume` wait up to `--timeout` (default 60 s) for the change to be complete.
@@ -880,59 +948,74 @@ Slurm's word for un-holding, which Claude knows; no later command about μ's own
 `update` and `install`). Each command gets a row in shell-ux §4.1 and its command table; shell-ux phase 2's names,
 `@last` and id prefixes apply to them as to `status` and `cancel`.
 
-**`--others`: a guard between Claude sessions, on the workstation.** All Claude sessions on the owner's Mac use one
-workstation key (`avi-mac`), which is also the node's owner, so the node cannot tell sessions apart. The client
-therefore refuses (exit 2, `other-project`) any operation that arranges a job of **another project**, or that moves a
-job ahead of, or pauses, another project's job, unless `--others` is given. `CLAUDE-toolchain.md` says when to pass it
-(§20.11). Two sessions working in the same project are not told apart; nothing here needs them to be.
+**`--others`: a guard between Claude sessions, decided by the node.** All Claude sessions on the owner's Mac use one
+workstation key (`avi-mac`), which is also the node's owner, so the key cannot tell sessions apart; the project can.
+Every arranging command sends `from=<this clone's project_id>` and `others=0|1` (§20.4), and the node, under the queue
+lock, refuses (`other-project`, exit 2, nothing changed, one audit line) an operation that arranges, pauses or resumes
+a job of **another project**, or that places a job ahead of another project's queued or held job, unless `others=1`.
+`submit --priority high|urgent` always needs `--others` (it may pass anything). The client cannot decide this itself:
+whether `move --front` passes another project's job depends on the queue at that moment. `CLAUDE-toolchain.md` says
+when to pass it (§20.11). Two sessions in the same project are not told apart; nothing here needs them to be.
 
 ### 20.3 Order: priority bands, explicit order inside each, held jobs skipped
 
 **The walk.** `plan()` (§3.3) no longer takes queued jobs by `accepted_ns`. It walks one ordered list:
 
 ```
-W = queued jobs that are not held, sorted by
+W = queued and held jobs, sorted by
       (band: urgent < high < normal < low,
-       re-queued after an interruption first (attempt ≥ 2, in their old accepted_ns order: today's rule, kept),
-       place in /srv/mu/queue.json (jobs not listed come after the listed ones),
+       index in /srv/mu/queue.json "order"   (a job not listed sorts after every listed job of its band),
        accepted_ns)
+place(J) = J's 1-based index in W.   The head and the candidates are W's jobs that are not held, in W's order.
 ```
 
-- **The head** is W's first job; the head reservation, `S`, `extra` and backfill of §3.3 apply to it unchanged. Held
-  jobs are not in W at all: never the head, never a candidate, no reservation, no `waiting_for` but `held`.
+- **Every write of `queue.json` lists every queued and held job, in walk order** (the whole of W, rewritten). So a
+  job that is not listed is one that arrived since the last write, and "after every listed job of its band, by
+  `accepted_ns`" is exactly the back of its band. With nobody arranging, nothing is ever written and W is today's FIFO.
+- **Writes**, each under `/srv/mu/lock`, computed on the current W:
+  - `move J --before K` / `--after K`: J leaves W and is inserted next to K (queued or held); J's band becomes K's.
+    `--front` / `--back`: first or last among the jobs of J's band;
+  - `priority J C`: J's band becomes `C`, J goes last among the jobs of `C`;
+  - **re-queue after an interruption** (§9's interrupted rule): the runner inserts the job at the **front of its own
+    band**, several in their old `accepted_ns` order. Not a sort tier: a later `move --front` can pass it, and an
+    interrupted `low` job goes to the front of `low`, not ahead of `normal` jobs (bands keep their meaning). With
+    every job `normal`, this is today's "re-queued first";
+  - submits, holds and releases do not write it (a new job sorts to the back of its band by the rule above).
+- **The head** is the first job of W that is not held; the head reservation, `S`, `extra` and backfill of §3.3 apply
+  to it unchanged. Held jobs are never the head, never a candidate, take no reservation, have no `waiting_for` but
+  `held`. They keep their place and can be moved, raised or lowered, and serve as `--before`/`--after` references.
 - **Express** jobs (`--quick`) take a lane slot in W's order; when the lane is full they stay in W at their place, as
   §3.4 says.
-- A new job goes to the back of its band (it is not in `queue.json`, so it sorts by `accepted_ns` after the listed
-  ones): FIFO, exactly as today when nobody arranges anything.
 
 **Chosen: bands with an explicit order inside.** Not explicit order only, because: (1) `mu submit --priority high`
 needs a well-defined place without the submitter reading the queue; with explicit order only, priority would be a
 one-off move, and a later `normal` arrival could not be kept behind it; (2) the auto-pause policy needs a class
 (`urgent`) that names who may pause others; (3) with nobody arranging, bands with FIFO inside are today's FIFO
-exactly; (4) aging (below) needs bands to move a job through. Not priority **numbers** with a formula (Slurm's
-multifactor): four named bands are what a person or Claude can predict from `mu queue`. Fair share between
-workstations (§3.7), if it comes, orders jobs within a band.
+exactly. Not priority **numbers** with a formula (Slurm's multifactor): four named bands are what a person or Claude
+can predict from `mu queue`. Fair share between workstations (§3.7), if it comes, orders jobs within a band.
 
 **`move` across bands.** `--before`/`--after` a job of another band puts the job in that band, next to it; the answer
 says `"band": "high", "was": {"band": "normal", …}`. So "before X" always means exactly that place. `--front` and
 `--back` stay inside the job's own band; when higher-band jobs stay ahead, the answer says how many and gives the step
-(`mu priority JOB high` to pass them).
+(`mu priority JOB high --others` to pass them).
 
-**Aging.** A queued, unheld job that has waited longer than `sched.age_after_s` (default 24 h) moves up one band (low
-→ normal → high; never to `urgent`), once per period, to the back of the new band; `events.log` and the audit log say
-so.
+**No aging.** The first version of this section raised a job one band after 24 h of waiting. Cut: it overrode an
+explicit `mu priority JOB low`, needed a clock robust to held time, WSL clock steps and reboots, and still let a stream
+of `urgent` jobs starve everything. Instead, plainly: **a lower band waits as long as higher-band jobs keep arriving.**
+With one owner and a short queue that is visible in `mu queue` and is the owner's call; raising a job above another
+project's needs `--others`, and `urgent` an owner key.
 
-**What still holds (starvation guarantees).**
+**What still holds (guarantees).**
 
 | | Guarantee |
 |---|---|
-| G1 | The head starts no later than its announced `starts_by`, **unless an explicit act changes what it waits for**: a job placed ahead of it (move, priority, an `urgent` or `high` submit, a release of a held job placed ahead), or a pause of a running job it waits for (`starts_by` moves by the pause). Each such act's answer lists the jobs whose `starts_by` it moved (`delays`), and `events.log` of each delayed job says by whom |
+| G1 | The head starts no later than its announced `starts_by`, **unless an explicit act changes what it waits for**: a job placed ahead of it (move, priority, a `high` or `urgent` submit, a release of a held job placed ahead), or a pause of a running job it waits for (`starts_by` moves by the pause). Each such act's answer lists the jobs whose `starts_by` it moved (`delays`), and `events.log` of each delayed job says by whom. **A job named in no act's `delays` never sees its `starts_by` grow** (asserted by the simulation, §13) |
 | G2 | A held job blocks nothing and is never started |
-| G3 | Within a band, a job is never passed by a later arrival; only an explicit move puts a job ahead of it |
-| G4 | Aging: a job cannot be kept behind newer higher-band arrivals for ever; it reaches `high` within 2 × `age_after_s` |
-| G5 | Auto-pause is bounded per running job: at most 2 per attempt, each at most 30 min, at least 15 min of running between two (§20.7): it delays a job by at most an hour |
-| G6 | A hand pause ends at its deadline (at most 2 h); the paused time of one attempt is at most its pause budget (§20.6) |
-| G7 | §3.3's invariants still hold on every pass: Σ memory grants (paused jobs included) ≤ `M`; the CPU sets of jobs **not frozen** are disjoint; a borrower ends before its lender's deadline |
+| G3 | A job is never placed behind a later arrival of its band in the walk except by an explicit move or priority. (Backfill and the express lane do start later arrivals earlier, but only on resources the head does not need by its `starts_by`, §3.3) |
+| G4 | No aging (above): bands are strict |
+| G5 | Auto-pause is bounded per running job: at most 2 per attempt, each at most 30 min, at least 15 min of running between two (§20.7): it delays a job by at most about an hour |
+| G6 | A hand pause ends at its deadline (at most 2 h), by the runner, or by systemd's dead-man timer if the runner is down (§20.5); the paused time of one attempt is at most its pause budget (§20.6) |
+| G7 | §3.3's invariants still hold on every pass, by the accounting of §20.6: firm memory ≤ `M` and each lender's lent memory covers its borrowers; the CPU sets of jobs **not frozen** are disjoint; a borrower's cores all lie in frozen lenders' sets and its end bound is before each lender's deadline |
 
 No guarantee survives an owner who keeps moving one job to the back; that is the owner's call, and the audit log shows
 it.
@@ -944,53 +1027,68 @@ arguments, job-layer §7.1):
 
 | Request | Answer (§20.9) | Lock |
 |---|---|---|
-| `queue` | the whole node's queue: capacity, allocation, `rev`, the jobs in walk order (§20.9) | read only, no lock |
-| `hold id=J` / `release id=J` | the job's place, band, `held`, `delays` | `/srv/mu/lock` |
-| `move id=J before=K` / `after=K` / `to=front` / `to=back` | same | lock |
-| `priority id=J class=C` | same | lock |
-| `pause id=J [for=S]` | the pause as recorded; the verb waits (≤ the client's `--timeout`) for the runner to apply it | lock to record; the runner freezes |
-| `resume id=J` | same, for the thaw | same |
+| `queue` | the whole node's queue: capacity, allocation, lending, owners, `rev`, the jobs in walk order (§20.9) | read only, no lock |
+| `hold id=J from=P others=0\|1` / `release …` | the job's place, band, `held`, `delays` | `/srv/mu/lock` |
+| `move id=J before=K` / `after=K` / `to=front` / `to=back`, `from`, `others` | same | lock |
+| `priority id=J class=C from=P others=0\|1` | same | lock |
+| `pause id=J for=S from=P others=0\|1` | the pause as applied: the verb freezes the unit itself under the lock, as `verb_cancel` already calls `systemctl` (§20.5) | lock |
+| `resume id=J from=P others=0\|1` | the thaw as applied, or `resuming` with `resumes_by` while a borrower runs | lock |
 
 New `ARG_RULES`: `before` and `after` = `proto.JOB_ID`; `to` = `^(front|back)$`; `class` =
-`^(urgent|high|normal|low)$`; `for` = `^[0-9]{1,6}$` (seconds). `submit`'s spec gains `priority`, `hold` and
-`limits.pausable` (checked by `check_spec`; unknown keys are already ignored by old nodes, §11).
+`^(urgent|high|normal|low)$`; `for` = `^[0-9]{1,6}$` (seconds); `from` = `proto.PROJECT_ID`; `others` = `^[01]$`.
+`submit`'s spec gains `priority`, `hold`, `others` and `limits.pausable` (checked by `check_spec`; unknown keys are
+already ignored by old nodes, §11). `from` and `others` are claims made by code `mu` owns, like `by=` (job-layer §14).
 
 **Who may arrange which job.** The verb receives the caller's key name from the gate (`--key=`, taken by root's gate
 from the root-owned key file, job-layer §7.1). The node reads, on every call:
 
 - **Owners**: the names in `/etc/mu/owners` (root, 0644; written by pairing at the node's first pairing by invite,
-  pairing §9.6: on the office PC, `avi-mac`). If that file does not exist (a node paired by hand, first-job-checklist appendix
-  A) and `/etc/mu/authorized_keys/mu` holds exactly one key, that key's name is the owner; otherwise there is none.
+  pairing §9.6: on the office PC, `avi-mac`). If that file does not exist (a node paired by hand, first-job-checklist
+  appendix A) and `/etc/mu/authorized_keys/mu` holds exactly one key, that key's name is the owner; otherwise there is
+  none. **`owners: []` is warned about**, not silent: `hello` and `queue` carry `"warnings": ["no owner key on this
+  node: …"]` and the text prints it, because a second key added by hand would otherwise remove the owner without a
+  word. The file is then written at the node's next root step (a visit, or ROADMAP step 4.2's).
 - **A job's workstation**: `job.json` `key`, written by the node at acceptance.
+- **Owner acts are sticky.** An act by an owner key on a job of **another** workstation records the owner as its
+  author: `held.by`, `pause.by`, `band_by` (in `state.json`). Only an owner key may undo it (release that hold, resume
+  that pause, change that band). While every session uses `avi-mac`, the job's workstation is the owner and this binds
+  nothing; it binds with a second workstation.
 
 | Operation | The job's own workstation | An owner key | Any other paired key |
 |---|---|---|---|
 | `queue`, `status`, `list` | yes | yes | yes (job-layer §14: a key already reads everything) |
-| `hold`, `release`, `pause`, `resume`; `move` and `priority` (not `urgent`) that pass only this workstation's own jobs | yes | yes | **no**: `not-allowed` |
+| `hold`, `release`, `pause`, `resume`; `move` and `priority` (not `urgent`) that pass only this workstation's jobs | yes, **unless it undoes an owner's act** (`held.by`, `pause.by`, `band_by` an owner key) | yes | **no**: `not-allowed` |
 | `move` or `priority` that puts the job ahead of **another workstation's** job | no | yes | no |
+| `submit --priority high` that passes only this workstation's jobs / that passes another workstation's job (decided at acceptance, under the lock) | yes / no (`not-allowed`, nothing accepted) | yes | — |
 | `priority urgent`, `submit --priority urgent` | no | yes | no |
-| `submit --pausable` (own job) | yes | yes | — |
+| `submit --pausable`, `submit --hold` (own job) | yes | yes | — |
+
+Orthogonal to the table, for every key including an owner's: an operation touching another **project** needs
+`others=1` (§20.2). The table answers "which workstation"; `--others` answers "which Claude session meant it".
 
 **This is a guard against mistakes, not a security boundary**, and the design says so as job-layer §14 does: any
 paired key can run a job as `mu`, and a job can rewrite every state file on the node. The rule stops one workstation
 or session from reshuffling another's work by accident; it cannot stop a key holder who wants to.
 
 **Audit.** Every call is already journalled with key, verb and id (job-layer §7.3). Each operation adds one outcome
-line to `/srv/mu/audit.log` and the journal, and one to the job's `events.log`:
+line to `/srv/mu/audit.log` and the journal, and one to the job's `events.log` and each delayed job's; each carries
+the key, the claimed project (`from=`) and `others=1` when given, so two Claude sessions on one key can be told apart
+by project:
 
 ```
-queue: hold id=…2icaxr by=avi-mac (owner) place 5 kept
-queue: move id=…2icaxr to=front by=avi-mac (owner) place 5→1 band normal delays=…k3f9qa,…m7c2xz
-queue: priority id=…p0bx1c normal→high by=avi-mac (owner) delays=…
-queue: aged id=…q4wz8e low→normal after 24h
-queue: refused hold id=…k3f9qa by=bob-mac not-allowed (job of avi-mac)
-pause: id=…k3f9qa by=avi-mac (hand) for=900s deadline=+15m: frozen in 0.3s; cores 0-7 lent until 14:45
+queue: hold id=…2icaxr by=avi-mac (owner) from=mu-first-job-3f1a… place 5 kept
+queue: move id=…2icaxr to=front by=avi-mac (owner) from=mu-first-job-3f1a… others=1 place 5→1 band normal delays=…k3f9qa,…m7c2xz
+queue: priority id=…p0bx1c normal→high by=avi-mac (owner) from=jatayu-0123… delays=…
+queue: refused move id=…2icaxr to=front by=avi-mac from=mu-first-job-3f1a… other-project (passes 4 jobs of jatayu)
+queue: refused hold id=…k3f9qa by=bob-mac from=… not-allowed (job of avi-mac)
+pause: id=…k3f9qa by=avi-mac (hand) from=mu-first-job-3f1a… others=1 for=900s: frozen in 0.3s; cores 0-19 and 14.1G lent until 14:45
 pause: id=…k3f9qa auto for=…u8tz0q (urgent) until +12m10s
-resume: id=…k3f9qa (deadline | by avi-mac | beneficiary ended) after 11m52s paused; total paused this attempt 11m52s
+resume: id=…k3f9qa (deadline | by avi-mac | beneficiary ended | dead-man timer) after 11m52s paused; total paused this attempt 11m52s
 queue: order file unreadable: FIFO within each band restored (holds and bands kept)
 ```
 
-The `by=` attribution has the limits job-layer §14 states (written by code `mu` owns).
+The same `by`, `from` and `others` go into each `delays` entry of the answer. The `by=` attribution has the limits
+job-layer §14 states (written by code `mu` owns).
 
 **What another workstation sees.** Everything `mu queue` shows, for every job: name, project, owner workstation,
 `submitted.host` and `user`, sizes, states, who held, moved or paused it. No command lines, environment or logs in
@@ -1001,10 +1099,11 @@ The `by=` attribution has the limits job-layer §14 states (written by code `mu`
 - **systemd `freeze` / `thaw`.** `systemctl --user freeze mu-job-<id>.service` writes `1` to `cgroup.freeze` of the
   unit's cgroup and waits for the kernel's `frozen 1` in `cgroup.events`; `thaw` writes `0`. The verbs came with
   systemd 246 (2020) on cgroup v2; the node runs systemd 255 (noble). The unit property `FreezerState` reads
-  `running`, `freezing`, `frozen` or `thawing`; `ActiveState` stays `active`, so the runner's `unit_ended()` is
-  unaffected. `cgroup.freeze` is a core cgroup v2 file, not a controller, so it needs no delegation beyond what the
-  user manager has: the user manager can freeze its own units. **Expected, not measured** on the PC's WSL kernel:
-  §12 item 10.
+  `running`, `freezing`, `frozen` or `thawing`; later systemd versions add values such as `frozen-by-parent`, so μ
+  **matches by prefix** (`frozen…` is frozen, `freezing…` is freezing). `ActiveState` stays `active`, so the
+  runner's `unit_ended()` is unaffected. `cgroup.freeze` is a core cgroup v2 file, not a controller, so it needs no
+  delegation beyond what the user manager has: the user manager can freeze its own units. **Expected, not measured**
+  on the PC's WSL kernel: §12 item 10.
 - **What the cgroup v2 freezer does.** Every thread of every process in the cgroup (and its children) is stopped at
   its next return to user space and stays stopped until thawed. It is not `SIGSTOP`: no signal is sent, parents see no
   stop or continue through `wait()`, and nothing in the job can notice except by the clock. A thread in an
@@ -1012,7 +1111,8 @@ The `by=` attribution has the limits job-layer §14 states (written by code `mu`
   (`freezing`). Signals sent to a frozen task stay pending until thaw, **except a fatal signal: `SIGKILL` still ends a
   frozen task** (that is what makes cancel, `oom` and shutdown work, §20.8).
 - **Memory, files, network.** Memory stays as it was (anonymous memory cannot leave: `MemorySwapMax=0`; the kernel may
-  drop the job's clean page cache under pressure). Open files, file locks, pipes, shared memory and sockets stay open.
+  drop the job's clean page cache under pressure). A frozen job cannot allocate, so `memory.current` cannot grow; that
+  is what lets its unused memory be lent (§20.6). Open files, file locks, pipes, shared memory and sockets stay open.
   The kernel's TCP stack still answers for a socket (ACKs, keepalive) until its buffer fills; the program reads
   nothing. Peers with their own application-level timeouts may give up during a long pause.
 - **Clocks and timers.** `CLOCK_MONOTONIC` and wall time run on while frozen; CPU-time clocks stop. A timer that
@@ -1021,11 +1121,49 @@ The `by=` attribution has the limits job-layer §14 states (written by code `mu`
   frozen together; one rank frozen a few milliseconds before another only spins on shared memory until frozen too. On
   one node Open MPI keeps no heartbeat between ranks by default. §12 item 12 checks an `mpirun -np 4` job through a
   20 s pause.
-- **Who freezes.** Only the runner, in `step()` under the queue lock, as only the runner starts units. The `pause` and
-  `resume` verbs record the request (§20.8) and wait for the runner's next pass (≤ 1 s) to apply it. The runner calls
-  `systemctl --user freeze` with a 30 s limit and confirms `FreezerState=frozen`; **the cores are lent only after
-  that**. If the job is still `freezing` after 30 s, the runner thaws it, the pause fails (`pause-failed`, the job runs
-  on) and the answer says so. A thaw is confirmed the same way.
+
+**Who freezes, and in what order.** The `pause` and `resume` verbs themselves, under `/srv/mu/lock` (there is no
+request file: `verb_cancel` already calls `systemctl` from the verb); the runner, in `step()` under the same lock, for
+auto-pauses (§20.7), deadlines and deferred resumes. Both use the same two functions, each step written to
+`state.json` before the next is taken:
+
+```
+freeze(J, D, by, why):
+  1. state.json pause = {phase: "freezing", deadline_mono: D, boot_id, by, why, for_job}
+  2. stop J's time-limit timer mu-limit-<id>.timer and confirm it inactive    (else: drop the pause, pause-failed)
+  3. arm the dead-man timer: systemd-run --user --unit=mu-thaw-<id> --on-active=<D + 120 s − now>
+       --timer-property=AccuracySec=1s systemctl --user thaw mu-job-<id>.service
+  4. systemctl --user freeze, at most 30 s; confirm FreezerState starts with "frozen"
+       (else: thaw, stop mu-thaw-<id>.timer, re-arm the time-limit timer, drop the pause, pause-failed)
+  5. read memory.current; held = min(grant, memory.current + LEND_MARGIN);
+     systemctl --user set-property --runtime mu-job-<id>.service MemoryMax=<held>
+       (if this fails: the job stays frozen, its cores are lent but no memory; journalled once)
+  6. state.json pause.phase = "frozen", since_mono, held_mem_bytes          -> only now is anything lent
+
+thaw(J):     (never while a borrower of J lives, §20.6, except the valve)
+  1. state.json pause.phase = "thawing"
+  2. systemctl --user set-property --runtime mu-job-<id>.service MemoryMax=<grant>
+  3. systemctl --user thaw; confirm FreezerState "running"
+  4. stop mu-thaw-<id>.timer; re-arm mu-limit-<id>.timer with the remaining run time (§20.6)
+  5. state.json: the pause moves into the attempt's history; paused_total_s, last_thaw_mono
+```
+
+`LEND_MARGIN` = max(512 MiB, 5 % of `memory.current`), a constant. A frozen job's page cache can only shrink, so
+`held` stays above its use.
+
+**The dead-man timer** (step 3) is a transient systemd timer in the user manager, so it fires whether or not the runner
+is alive: a frozen job never depends on the runner to wake up. It fires at `D + 120 s`, after the runner's own valve
+(`D + 60 s`, §20.6), so the two never race while the runner is up. It only thaws: `MemoryMax` stays at `held` (so a
+borrower that is still alive is never over-committed against), and the runner restores the grant once no borrower
+lives; until then a lender that grows past `held` ends `oom` with the note "while its memory was lent". It covers a
+runner that crashed, was disabled, or was rolled back to a release without pause (§20.12). Reconciliation already
+handles a unit "thawed outside μ" (§20.8).
+
+**One stop path.** Every stop of a job's unit goes through one `stop_unit()` that thaws first (if `FreezerState` is
+not `running`) and then stops: cancel, the log cap, the time-limit timer's service (below, its fixed command does the
+same two calls), the valve, and the `no-adopt` test fault. So a frozen job always gets its `SIGTERM` and can clean up;
+systemd's own handling of stopping a frozen unit is not relied on (§12 item 13 records it). `SIGKILL` after
+`TimeoutStopSec=5` ends frozen tasks anyway.
 
 **Why freezing is safe for μ's solvers, and when it is not.**
 
@@ -1042,127 +1180,213 @@ The `by=` attribution has the limits job-layer §14 states (written by code `mu`
 signals); the build checks that it stays so. `result.json` writes are sealed and renamed, so a freeze in the middle of
 one leaves the old file or none, never a torn one.
 
-### 20.6 Accounting while paused: memory, cores, time
+### 20.6 Accounting while paused: CPU ids, memory, time
 
-- **Memory: still held, strictly.** A paused job keeps its whole memory grant in the allocation (Σ memory grants ≤
-  `M` counts it). Nothing is lent: thawing must never meet a node whose memory was given away.
-- **Cores: lent until the deadline, never taken back by force.** Every pause has a **deadline** `D` (the hand pause's
-  `--for`, or the auto-pause's length). While the job is frozen its CPU ids are **lent**: another job may be started on
-  them only if its own end bound is before `D` (`now + t + MARGIN ≤ D`, the backfill rule of §3.3 with `D` in place of
-  `S`); such a job is a **borrower** and its grant records `borrowed: {from, cpus, until}`. So at `D` the cores are free
-  again by construction.
-- **Resume waits for the borrowers; it does not preempt them.** `mu resume` before `D` thaws the job at once if no
-  borrower is on its cores, else as soon as the last borrower ends, which is before `D`; the answer says `resuming`
-  with `resumes_by`. Chosen over preempting (freezing or stopping the borrower) because that would cascade (a borrower
-  pausing for its lender, its own borrowers…), and over thawing onto shared CPUs because the CPU-set invariant (G7)
-  would no longer hold. The wait is bounded by `D` and is usually zero.
-- **Valve.** A borrower that outlives its time limit (a unit that will not stop) cannot keep a job frozen: at `D` + 60 s
-  the runner thaws the lender anyway, both share those CPUs until the borrower is gone, and `events.log` says so (the
-  same valve as §3.3 step 6).
-- **A borrower is never paused**, by hand or by policy (`pause-limit`, "it runs on cores lent by … until …"), and
-  never lends: its RuntimeMaxSec is its time exactly.
-- **Time limit: paused time does not count.** systemd's `RuntimeMaxSec` counts wall time since the unit became active,
-  frozen time included (to be confirmed, §12 item 11), and systemd's documentation lists `set-property` for resource
-  settings, not `RuntimeMaxSec` (also §12 item 11). So:
-  - every ordinary job that may be paused gets `RuntimeMaxSec = t + budget` as a **backstop**, where `budget` (the most
-    one attempt may be paused in total) = min(`sched.pause.budget_s`, default 4 h, `t`);
-  - **the runner enforces `t` itself, on running time**: run time = (now − `active_mono`) − paused time. When it
-    reaches `t`, the runner writes `stopping: "timeout"` into `state.json`, then stops the unit; `classify` reads that
-    field and writes `timeout` ("ran 2h, its --time, not counting 14m paused"). systemd's backstop fires only if the
-    runner is down for longer than the budget;
-  - express jobs and borrowers are never paused and keep `RuntimeMaxSec = t`;
-  - if item 11 shows `RuntimeMaxSec` can be changed at runtime, μ extends it by each pause instead, and the runner's
-    own timeout is dropped.
-- **End bounds** (§3.2) of a running job become `active_mono + t + paused time + SLACK`; of a paused job,
-  `D + (t − run time) + SLACK`: so a waiting head sees a paused job's cores come back at its resume plus its remaining
-  run, and its `starts_by` moves by the pause (G1).
-- **Records.** `result.json` keeps `wall_s` (started to ended) and adds `run_s` (wall minus paused), `paused_s` and
-  `pauses` (each `{from, to, by, why: "hand"|"auto", for_job}`, at most 20, then a count). `usage.cpu_s` needs no
-  change (a frozen job uses no CPU). The dashboard's comparisons (dashboard §6) use `run_s` and flag any job with
-  `paused_s > 0`.
-- **Limits** (`node.json` `sched.pause`, each optional): `max_s` 2 h per hand pause; `budget_s` 4 h per attempt (and
-  never more than the job's own `t`); `auto_max_s` 30 min per auto-pause; `auto_count` 2 per attempt; `auto_cooldown_s`
-  15 min of running between two auto-pauses. A pause that would exceed one is refused `pause-limit` with the figures.
-  A second `mu pause` of a paused job sets a new deadline from now, within the same limits.
-- **The node stays "busy"** (`state/busy`) while a job is paused, as while it runs, so a version switch never meets a
-  frozen unit (§9). A queue of **held jobs only** is not busy: holds can last days and must not stop auto-update; held
-  jobs survive the runner's restart (they are on disk).
+**CPU ids, by sets** (not by summing cores: a lender and its borrowers share ids).
+
+```
+ids(J)        = the CPU ids of J's grant
+occupied      = ⋃ ids(J) over running ordinary jobs, frozen or not     (a borrower's ids lie inside its lenders')
+free ids      = all ids − occupied                                      (counted cores = |set|)
+lendable(L)   = ids(L) − ⋃ ids(borrowers of L), for each L with pause.phase = "frozen"
+```
+
+- **A borrower's cores all come from frozen lenders** (one or more), never partly from free ids: no mixed borrowers.
+  Each lender's deadline `D` must satisfy `now + t + MARGIN ≤ D` (the backfill rule of §3.3 with `D` in place of `S`).
+  Its grant records `borrowed: [{from, cpus, mem_bytes, until_mono}]`. So at `D` the cores are free again by
+  construction, and a borrower takes no core the head was promised.
+- **A lender that ends while lent** (cancelled, `oom`, the backstop): its ids not held by a borrower become free; each
+  borrower keeps its ids (they are now in the occupied set only through the borrower's own grant) and ends by its own
+  limit, before `D`.
+
+**Memory: kept in place; what is unused is lent.**
+
+```
+held(L)        = pause.held_mem_bytes (= the lowered MemoryMax), for each frozen L
+lent(L)        = grant.mem(L) − held(L)
+firm memory    = Σ grant.mem of running ordinary jobs, frozen ones whole,
+                 minus Σ the borrowed part of each borrower whose lender still runs
+invariants     : firm memory ≤ M;   for each L, Σ borrowed mem_bytes from L ≤ lent(L)
+```
+
+What the kernel enforces then follows: Σ `MemoryMax` of unfrozen jobs + Σ `held` of frozen ones ≤ firm memory ≤ `M`.
+
+- **A borrower's memory** comes from its lenders' `lent` first; any remainder comes from free memory and must pass the
+  same test as any later job against the head (step 5 of §3.3: within `extra`, or `now + t + MARGIN ≤ S`). So a
+  borrower cannot delay the head silently by its memory either.
+- **Thaw restores the grant before thawing** (`set-property MemoryMax=<grant>`) and never happens while a memory
+  borrower lives (resume waits for borrowers anyway, below). A lender that ends while lent leaves firm memory whole;
+  its borrowers' borrowed parts are then counted as theirs: the total never rises.
+- **Why this matters:** the 2026-11-14 CFD job was unflagged (grant = `M`, about 20 GB). Counting a paused job's whole
+  grant would have freed nothing ordinary beside it; lending its unused memory lets the probe start. If §12 item 10
+  shows `set-property MemoryMax` does not work on a frozen unit under WSL, pause lends cores only and **helps only
+  beside sized jobs**; §17 Q8 says so to the owner.
+
+**Deadlines.** Every pause has a deadline `D` (the hand pause's `--for`, or the auto-pause's length). A second
+`mu pause` of a paused job sets a new deadline `max(now + for, the latest end bound of its borrowers)`, within the
+limits below: **never earlier than a borrower's end bound** (the answer says when it was raised). The dead-man timer
+is re-armed with it.
+
+**Resume waits for the borrowers; it does not preempt them.** `mu resume` before `D` thaws the job at once if no
+borrower is on its cores, else records `pause.resume_asked: {by, at}` in `state.json` and answers `resuming` with
+`resumes_by`; the runner thaws it on the first pass after the last borrower ends, which is before `D`. Chosen over
+preempting (freezing or stopping the borrower) because that would cascade (a borrower pausing for its lender, its own
+borrowers…), and over thawing onto shared CPUs because the CPU-set invariant (G7) would no longer hold. The wait is
+bounded by `D` and is usually zero.
+
+**Valve.** A borrower that outlives its time limit (a unit that will not stop) cannot keep a job frozen: at `D` + 60 s
+the runner kills it (`systemctl --user kill --signal=SIGKILL`; it is past its own limit), thaws the lender with
+`MemoryMax` still at `held`, and restores the grant once the borrower's unit has ended; both share those CPUs until
+then, and `events.log` says so (the same valve as §3.3 step 6).
+
+**A borrower is never paused**, by hand or by policy (`pause-limit`, "it runs on cores lent by … until …"), and
+never lends: its `RuntimeMaxSec` is its time exactly.
+
+**Time limit: paused time does not count, enforced by systemd, not by the runner's loop.** systemd's `RuntimeMaxSec`
+counts wall time since the unit became active, frozen time included, and it can be set only when a transient unit is
+created (it is not a resource-control property, so `set-property` cannot change it; §12 item 11 records both). And
+the runner's own loop is not a bound: `step()` holds the lock through `prepare_work`, minutes for a large checkout. So,
+for every **ordinary** job from part D on (any of them can be paused by hand):
+
+- `RuntimeMaxSec = t + budget` is a **backstop**, where `budget` (the most one attempt may be paused in total) =
+  min(4 h, `t`);
+- **a time-limit timer** enforces `t` on running time: at start, `systemd-run --user --unit=mu-limit-<id>
+  --on-active=<t> --timer-property=AccuracySec=1s /bin/sh -c '<write jobs/<id>/timelimit and sync it; systemctl
+  --user thaw mu-job-<id>.service; systemctl --user stop mu-job-<id>.service>'` (a fixed command line: no μ code runs
+  in it, so it works under any release). `freeze` stops it (step 2, confirmed, else the pause fails); `thaw` re-arms it
+  with `t − run_s`. `classify` reads the `timelimit` marker, as it reads `logcap`, and writes `timeout` ("ran 2h, its
+  --time, not counting 14m paused");
+- **each pass**, an unfrozen ordinary job without an active limit timer (after a runner restart, a dead-man thaw, or an
+  arm that failed) gets one with its remaining run time, or is stopped at once (`timeout`) if none remains; a job
+  thawed by the dead-man timer while the runner was down is taken as thawed at `D + 120 s`;
+- express jobs and borrowers are never paused and keep `RuntimeMaxSec = t` and no timer.
+
+**End bounds** (§3.2) of a running ordinary job become `active_mono + t + paused time + SLACK`; of a paused job,
+`D + (t − run time) + SLACK`. `SLACK` (10 s) still covers the timer's 1 s accuracy, `TimeoutStopSec=5` and a tick.
+So a waiting head sees a paused job's resources come back at its resume plus its remaining run, and its `starts_by`
+moves by the pause (G1).
+
+**Records.** `result.json` keeps `wall_s` (started to ended) and adds `run_s` (wall minus paused), `paused_s` and
+`pauses` (each `{from, to, by, why: "hand"|"auto", for_job, lent_mem_bytes}`, at most 20, then a count). `usage.cpu_s`
+needs no change (a frozen job uses no CPU). The dashboard's comparisons (dashboard §6) use `run_s` and flag any job with
+`paused_s > 0`.
+
+**Limits** (constants in `node.py`, not `node.json` settings, until a need is seen): 2 h per hand pause; 4 h paused
+per attempt, and never more than the job's own `t`; 30 min per auto-pause; 2 auto-pauses per attempt; 15 min of
+running between two auto-pauses. A pause that would exceed one is refused `pause-limit` with the figures. Only the
+policy itself, `sched.auto_pause`, is in `node.json`.
+
+**The node stays "busy"** (`state/busy`) while a job is paused, as while it runs, so a version switch never meets a
+frozen unit (§9). A queue of **held jobs only** is not busy: holds can last days and must not stop auto-update; held
+jobs survive the runner's restart (they are on disk).
 
 ### 20.7 Auto-pause: the policy for urgent jobs
 
-**Not for `--quick` jobs.** They never wait for cores (the lane borrows CPU time, §3.4), and freezing a 20-core
-sweep for a 1-core job would idle 19 cores. Auto-pause is for jobs **in the `urgent` band** that need more than the
-lane gives.
+**Not for `--quick` jobs** (the design's call; the owner's text said "the express lane", and §17 Q9 asks). They never
+wait for cores while a lane slot is free (the lane borrows CPU time, §3.4), and freezing a 20-core sweep for a 1-core
+job would idle 19 cores unless others borrow them. Auto-pause is for jobs **in the `urgent` band** that need more than
+the lane gives.
+
+**Inert until used**, said plainly: on day one it pauses nothing, because the default policy pauses only jobs
+submitted `--pausable` (Claude marks long solver runs, §20.11) and only for an `urgent` job (owner key, `--others`)
+with an explicit `--time` of at most about 28 minutes. `sched.auto_pause: "any"` widens it without a release.
 
 On a pass where the head `H` does not fit (§3.3 step 4), the runner pauses running jobs for it when **all** hold:
 
 1. the node's policy allows it: `node.json` `sched.auto_pause` = `"marked"` (default: only jobs submitted
    `--pausable`), `"any"` (any ordinary job), or `"off"`;
-2. `H` is `urgent`, not held, and has an explicit `--time` with `t + MARGIN ≤ auto_max_s` (30 min);
-3. **`H`'s memory fits now** without counting any victim's (paused jobs keep theirs, §20.6);
-4. a set of **eligible** running jobs frees enough cores: ordinary (not express, not a borrower, not `urgent`), not
-   already paused, pausable under the policy, fewer than `auto_count` auto-pauses this attempt, at least
-   `auto_cooldown_s` of running since its last thaw, and its pause budget not spent;
+2. `H` is `urgent`, not held, and has an explicit `--time` with `t + MARGIN + 30 s ≤ 30 min`;
+3. a set of **eligible** running jobs has lendable cores ≥ `H`'s cores (no mixed borrowers: `H`'s cores all come
+   from them): ordinary (not express, not a borrower, not `urgent`), not already paused, started with a time-limit
+   timer (§20.12), pausable under the policy, fewer than 2 auto-pauses this attempt, at least 15 min of running since
+   its last thaw, and its pause budget not spent;
+4. **`H`'s memory fits** in free memory plus the set's estimated `lent` (grant − `memory.current` − `LEND_MARGIN`,
+   read now), the free part passing nothing more since `H` is the head;
 5. `H` cannot start by `extra`, by backfill or on cores already lent.
 
 **Which jobs.** The smallest eligible set by (number of jobs, then cores beyond the need), ties broken by the latest
-`active_mono`, then job id: deterministic, testable. Each is paused with `why: "auto"`, `for_job: H` and `D = now +
-t_H + MARGIN + 30 s` (the freeze time). `H` starts on the next pass, on the lent cores (it ends before `D`). **An
-auto-pause ends as soon as its reason does**: when `H` ends, or leaves the queue (cancelled, held, moved behind
-another job), or fails to start, the victims are resumed on that pass; otherwise at `D`.
+`active_mono`, then job id: deterministic, testable.
+
+**In one pass, checkout first.** The checkout (`prepare_work`) can take minutes; freezing first would burn the
+victims' pauses on it, and the §3.3 re-check would then refuse `H` against a deadline the checkout ate. So:
+
+```
+1. prepare_work(H)                            (under the lock, as any start)
+2. re-plan with the state after the checkout: if H now fits without a pause, start it ordinarily; if the
+   conditions above no longer hold, stop here (H's work/ is reused at its next start, as today)
+3. D = now + 30 s + t_H + MARGIN              (30 s: the freeze limit; MARGIN covers systemd-run and SLACK)
+4. freeze(V, D, by=auto, for_job=H) for each victim V; any failure: thaw those already frozen, no auto-pause
+   is counted, H waits
+5. recompute H's memory from the measured held(V); start H as a borrower (its re-check passes by construction)
+   in the same pass; if the start fails, thaw the victims at once
+```
+
+**An auto-pause ends as soon as its reason does**: when `H` ends, or fails to start, the victims are thawed on that
+pass (once `H`'s unit has ended); otherwise at `D`. (`H` cannot leave the queue once started; it is a running job.)
 
 **Why it is opt-in.** Freezing is transparent to the solvers μ runs (§20.5), but not to jobs with their own
 wall-clock timeouts, network peers or timing measurements. Only the submitter knows which it is, so the default asks
-the submitter (`--pausable`), and §20.11 tells Claude when to mark a job. The owner can widen it to `"any"` for the
-node without a release.
+the submitter (`--pausable`), and §20.11 tells Claude when to mark a job.
 
 ### 20.8 Durability of the new state, and races
 
 All new state is in the job layer's sealed records (`write_durable`, `seal`; a record that fails its check is "not
-written", job-layer §9.2), written under `/srv/mu/lock`.
+written", job-layer §9.2), written under `/srv/mu/lock`, plus two transient systemd timers per paused job, which live
+in the user manager and survive a runner restart.
 
 | State | Where | Written by | If lost or unreadable |
 |---|---|---|---|
-| held | `state.json` `state: "held"`, `held: {by, at}` (a held job is not `queued`, so the previous release's runner ignores it: §20.12) | the verb | `rebuild_state()` (which takes a job with no start in `events.log` as queued) also reads the last `held by …` / `released by …` line of `events.log`, which the verb writes first, so a lost `state.json` never starts a held job |
-| band | `state.json` `band`; `job.json` `priority` is what was asked at submit | the verb, aging | `job.json` `priority`, else `normal` |
-| order | `/srv/mu/queue.json`: `{"schema": 1, "rev": n, "order": [job ids], "updated": …}`, replaced whole | `move`, `priority` (the moved job's place), aging | Unreadable or missing: the order is (band, re-queued first, `accepted_ns`): FIFO inside each band, holds and bands intact; journalled once; `hello.queue.order_restored_at` set. Ids of jobs neither queued nor held are ignored and dropped at the next write (a held job keeps its entry, hence its place) |
-| pause request | `jobs/<id>/control.json`: `{"op": "pause"\|"resume", "for_s", "by", "at"}` | the verb | none pending: the verb's caller sees no `paused` and retries (both operations are idempotent) |
-| pause | `state.json` `pause: {phase: "freezing"\|"frozen"\|"thawing", since_mono, deadline_mono, boot_id, by, why, for_job}`, `paused_total_s`, `pause_count`, `auto_pause_count`, `last_thaw_mono`, `stopping` | the runner | `rebuild_state()` rebuilds a running job without a grant (it holds the node, §3.2); the runner reads `FreezerState` and thaws a frozen unit it has no record for |
-| lending | the borrower's grant `borrowed: {from, cpus, until_mono}` | the runner, at start | the allocation is rebuilt from grants each pass (§3.2) |
+| held | `state.json` `state: "held"`, `held: {by, at}` (a held job is not `queued`, so the previous release's runner ignores it: §20.12). `submit --hold` writes it into the temporary folder **before the rename**, where `verb_submit` writes `queued` today, so the job is never visible as queued | the verb | `rebuild_state()` (which takes a job with no start in `events.log` as queued) also reads the last `held by …` / `released by …` line of `events.log`, which the verb writes first, so a lost `state.json` never starts a held job |
+| band | `state.json` `band`, `band_by`; `job.json` `priority` is what was asked at submit | the verb | `job.json` `priority`, else `normal` |
+| order | `/srv/mu/queue.json`: `{"schema": 1, "rev": n, "order": [every queued and held job id, in walk order], "updated": …}`, replaced whole | `move`, `priority`, the runner's re-queue | Unreadable or missing: the order is (band, `accepted_ns`): FIFO inside each band, holds and bands intact (interrupted jobs keep their old `accepted_ns`, so they stay near the front); journalled once; `hello.queue.order_restored_at` set. Ids of jobs neither queued nor held are ignored and dropped at the next write |
+| pause | `state.json` `pause: {phase: "freezing"\|"frozen"\|"thawing", since_mono, deadline_mono, boot_id, by, why, for_job, held_mem_bytes, resume_asked}`, `paused_total_s`, `pause_count`, `auto_pause_count`, `last_thaw_mono` | the verb, or the runner (auto-pause, deadline, deferred resume) | `rebuild_state()` rebuilds a running job without a grant (it holds the node, §3.2); the runner reads `FreezerState` and thaws a frozen unit it has no record for |
+| timers | `mu-limit-<id>.timer` while running unfrozen; `mu-thaw-<id>.timer` while frozen (§20.5, §20.6) | the verb or the runner | re-armed each pass from `state.json` (the limit timer with the remaining run time; the dead-man with `D + 120 s`); a stray one is stopped |
+| lending | the borrower's grant `borrowed: [{from, cpus, mem_bytes, until_mono}]` | the runner, at start | the allocation is rebuilt from grants each pass (§3.2) |
+| timeout | the marker `jobs/<id>/timelimit`, written by the limit timer's service before it stops the unit | systemd | as `logcap`: absent means the unit ended for another reason, classified as today |
 
 **Write order.** A cross-band move writes the job's `state.json` (band) first, then `queue.json`: a crash in between
-leaves the job in its new band at its old place or by `accepted_ns`, a valid order; the client, having no answer,
-retries, and every operation is idempotent (`hold` of a held job, `move` to where it already is: `changed: false`). A
-pause is recorded as `phase: "freezing"` **before** `systemctl freeze` and as `frozen` after it is confirmed; the
-cores are lent only from `frozen`. A thaw is recorded `thawing`, then the unit is thawed, then `pause` is moved into
-the attempt's history.
+leaves the job in its new band, sorted among that band's listed jobs by its old index, a valid order; the client,
+having no answer, retries, and every operation is idempotent (`hold` of a held job, `move` to where it already is:
+`changed: false`). The runner's re-queue writes `queue.json` (the job at the front of its band) **before** `state.json`
+`queued`; a crash in between leaves a listed id of a job that is not yet queued, which the next pass's interrupted rule
+re-queues again. A pause and a thaw follow the steps of §20.5, each written before it is taken; cores and memory are
+lent only from `frozen`.
 
-**Reconciling with systemd, every pass.** systemd's `FreezerState` wins: `phase` `freezing` but the unit running (the
-runner died before the freeze) → the freeze is done now if `D` is still ahead, else the pause is dropped; `frozen`
-but the unit running (thawed outside μ) → the pause ends, `events.log` says "thawed outside μ"; no `pause` but the unit
-frozen → thawed.
+**Reconciling with systemd, every pass.** systemd's `FreezerState` (by prefix) wins: `phase` `freezing` but the unit
+running (the verb or runner died before the freeze) → the freeze is done now if `D` is still ahead, else the pause is
+dropped; `frozen` but the unit running (thawed outside μ, e.g. by the dead-man timer) → the pause ends, `MemoryMax`
+is restored once no borrower lives, the limit timer re-armed, `events.log` says "thawed outside μ"; no `pause` but the
+unit frozen → thawed.
 
 | Event | What happens | Test |
 |---|---|---|
-| Runner restart while a job is paused | The unit stays frozen (systemd keeps the cgroup frozen); the runner adopts it with its `pause`, deadline on the monotonic clock with `boot_id`; thaws at `D` as planned | Q32 |
-| Windows restart, VM stop, `wsl --shutdown` while paused | The unit is gone, the boot id changes: the interrupted rule (§9) re-runs it as attempt 2 at the front of its band, pause dropped, `note` "was paused when the node stopped" | Q33 |
-| Cancel of a paused job | `verb_cancel` and the runner **thaw first, then stop** (so the job gets its `SIGTERM` and can clean up; systemd's own handling of stopping a frozen unit is not relied on). `SIGKILL` after `TimeoutStopSec=5` ends frozen tasks anyway. The grant is freed when the unit has ended (§9) | Q34 |
-| `oom` while paused | A frozen job cannot allocate, so it cannot reach its own `MemoryMax`. The kernel's global OOM killer can still kill a frozen process (`SIGKILL` works); the unit ends `oom` and the result's `note` says "while paused". Its borrowers are untouched | — |
-| Pause while the job finishes | The runner classifies a unit that ended before it freezes anything; the request is answered `already-finished` with the result's state. A unit frozen just after the shim wrote `result.json` is thawed at once (**a job with a result is never kept frozen**) | Q31 |
+| Runner restart while a job is paused | The unit stays frozen (systemd keeps the cgroup frozen) and so do its timers; the runner adopts it with its `pause`, deadline on the monotonic clock with `boot_id`; thaws at `D` as planned | Q32 |
+| Runner dead past `D` (crashed, disabled, rolled back) | The dead-man timer thaws the job at `D + 120 s`; its borrowers have ended by their own `RuntimeMaxSec`; `MemoryMax` stays at `held` until the runner returns; the job then runs to the backstop (`t` + budget) if the runner never does | Q39 |
+| Windows restart, VM stop, `wsl --shutdown` while paused | The unit and its timers are gone, the boot id changes: the interrupted rule (§9) re-queues it at the front of its band as attempt 2, pause dropped, `note` "was paused when the node stopped" | Q33 |
+| Cancel of a paused job | `stop_unit()`: thaw first, then stop (so the job gets its `SIGTERM`); its borrowers are untouched. The grant is freed when the unit has ended (§9) | Q34 |
+| Log cap or time-limit stop of a frozen unit | Same `stop_unit()` (the limit timer is stopped at freeze, so it can fire on a frozen unit only if that stop failed, which fails the pause) | Q38 |
+| `oom` while paused | A frozen job cannot allocate, so it cannot reach its own `MemoryMax`. The kernel's global OOM killer can still kill a frozen process (`SIGKILL` works); the unit ends `oom` and the result's `note` says "while paused". Its borrowers are untouched and keep their ids | — |
+| Pause while the job finishes | The verb classifies a unit that ended before it freezes anything; the answer is `already-finished` with the result's state. A unit frozen just after the shim wrote `result.json` is thawed at once (**a job with a result is never kept frozen**) | Q31 |
 | Resume after the unit ended | `changed: false`, the job's final state, exit 0 | Q31 |
 | Move, hold or priority while the job starts | The verb and `step()` take the same lock; the verb finds the job `running` and answers `not-queued` with `next: mu pause JOB` (or nothing to do). The start is never undone, never doubled | Q31 |
 | Release of a held job while the runner walks | Same lock: it joins the next pass | Q22 |
 | Cancel of a held job | `verb_cancel` and the runner treat `held` as they treat `queued`: `cancelled` at once ("cancelled while held") | Q22 |
-| The verb waits for the lock | The runner can hold it through a checkout (`prepare_work`, seconds to minutes). Verbs wait up to 120 s, then answer `busy` (exit 6, "retry in a minute"); nothing was changed | unit |
+| The verb waits for the lock | The runner can hold it through a checkout (`prepare_work`, seconds to minutes). Verbs wait up to 120 s, then answer `busy` (exit 6, "retry in a minute"); nothing was changed. No bound depends on this wait: limits and the dead-man are systemd timers | unit |
 
 ### 20.9 Answers, JSON shapes, exit codes, wording
 
-**`mu queue --json`** (the node's `queue` answer, plus `this_project` per job added by the client):
+**`mu queue --json`** (the node's `queue` answer, plus `this_project` per job added by the client). In this example
+the CFD sweep (8 cores, 12 GiB, using 5 GiB) is paused by hand and lends its 8 cores and 6.5 GiB; the probe borrows
+4 of those cores and 2 GiB:
 
 ```json
 {"ok": true, "node": "office-pc", "rev": 1841, "auto_pause": "marked", "owners": ["avi-mac"], "you_are_owner": true,
+ "warnings": [],
  "capacity": {"cores": 20, "mem_bytes": 21474836480},
- "allocated": {"cores": 16, "mem_bytes": 17179869184, "lent_cores": 8},
+ "allocated": {"cores": 8, "cpus": "0-7", "mem_bytes": 12884901888},
+ "lent": {"cores": 8, "cpus": "0-7", "mem_bytes": 6979321856,
+          "borrowed": {"cores": 4, "cpus": "0-3", "mem_bytes": 2147483648}},
+ "free": {"cores": 12, "cpus": "8-19", "mem_bytes": 8589934592},
  "jobs": [
   {"job_id": "20261114-120102-k3f9qa", "name": "cfd-sweep", "project": "jatayu", "project_id": "jatayu-0123456789ab",
    "key": "avi-mac", "submitted": {"host": "avi-mac", "user": "avi"}, "this_project": false,
@@ -1170,21 +1394,25 @@ frozen → thawed.
    "request": {"cores": 8, "mem_bytes": 12884901888, "time_s": 21600},
    "grant": {"cores": 8, "cpus": "0-7", "mem_bytes": 12884901888, "class": "normal"},
    "paused": {"since": "2026-11-14T14:30:05Z", "until": "2026-11-14T14:45:05Z", "by": "avi-mac", "why": "hand",
-              "lent_to": ["20261114-142955-2icaxr"]},
-   "time": {"limit_s": 21600, "run_s": 5120, "paused_s": 310}, "ends_by": "2026-11-14T19:12:00Z"},
+              "held_mem_bytes": 5905580032, "lent_to": ["20261114-142955-2icaxr"]},
+   "time": {"limit_s": 21600, "run_s": 5120, "paused_s": 310}, "ends_by": "2026-11-14T19:19:55Z"},
   {"job_id": "20261114-142955-2icaxr", "name": "sched-probe", "state": "running", "band": "normal",
    "grant": {"cores": 4, "cpus": "0-3", "mem_bytes": 2147483648, "class": "borrowing",
-             "borrowed": {"from": "20261114-120102-k3f9qa", "until": "2026-11-14T14:45:05Z"}}, "…": "…"},
+             "borrowed": [{"from": "20261114-120102-k3f9qa", "cpus": "0-3", "mem_bytes": 2147483648,
+                           "until": "2026-11-14T14:45:05Z"}]},
+   "ends_by": "2026-11-14T14:41:20Z", "…": "…"},
   {"job_id": "20261114-123000-m7c2xz", "name": "frame-fea-v2", "state": "queued", "band": "normal", "place": 1,
-   "held": false, "waiting_for": {"resources": {"cores": 12, "mem_bytes": 17179869184}},
-   "starts_by": "2026-11-14T19:12:00Z", "…": "…"},
+   "held": false, "waiting_for": {"resources": {"cores": 16, "mem_bytes": 17179869184}},
+   "starts_by": "2026-11-14T19:19:55Z", "…": "…"},
   {"job_id": "20261114-123500-q4wz8e", "name": "mesh-study", "state": "held", "band": "normal", "place": 2,
    "held": {"by": "avi-mac", "at": "2026-11-14T13:02:00Z"}, "waiting_for": {"held": true}, "starts_by": null}]}
 ```
 
-`place` counts held jobs too (a held job keeps its number); `position` in `status` and `list` stays the place among
-jobs that can start (old readers keep their meaning). Times shown to people are wall-clock at answer time, from the
-monotonic bounds (§7.1).
+`allocated` is the occupied set and firm memory of §20.6 (the paused job's whole grant counted); `lent` is what
+frozen jobs lend, with the part borrowed; `free` is what an ordinary job can take without borrowing. `place` counts held
+jobs too (a held job keeps its number); `position` in `status` and `list` stays the place among jobs that can start
+(old readers keep their meaning). Times shown to people are wall-clock at answer time, from the monotonic bounds
+(§7.1).
 
 **An arranging answer** (`hold`, `release`, `move`, `priority`):
 
@@ -1192,44 +1420,48 @@ monotonic bounds (§7.1).
 {"ok": true, "exit": 0, "job_id": "20261114-161025-2icaxr", "op": "move", "changed": true,
  "state": "queued", "band": "normal", "place": 1, "was": {"place": 5, "band": "normal"},
  "higher_bands_ahead": 0, "starts_by": null, "waiting_for": {"resources": {"cores": 20}},
+ "by": {"key": "avi-mac", "owner": true, "from": "mu-first-job-3f1a9c0d2b7e", "others": true},
  "delays": [{"job_id": "20261114-123000-m7c2xz", "name": "frame-fea-v2", "project": "jatayu", "key": "avi-mac",
              "starts_by_was": "2026-11-14T19:12:00Z", "starts_by": null}],
  "next": "mu queue --json",
  "steps": [{"cmd": "mu queue --json", "where": "here", "by": "agent", "why": "the whole node's queue now"}]}
 ```
 
-**A pause answer** adds `paused` (`since`, `until`, `frozen: true`), `lent: {cores, cpus, until}`,
-`memory_kept_bytes`, `time: {limit_s, run_s, paused_s, budget_left_s}` and `delays`; `next` is "it resumes by
-itself at 14:45; to resume sooner: mu resume JOB".
+**A pause answer** adds `paused` (`since`, `until`, `frozen: true`, `held_mem_bytes`), `lent: {cores, cpus, mem_bytes,
+until}`, `time: {limit_s, run_s, paused_s, budget_left_s}`, `deadline_raised_to` when a re-pause was raised to a
+borrower's end, and `delays`; `next` is "it resumes by itself at 14:45; to resume sooner: mu resume JOB".
 
 **Exit codes** (the client's, `proto.py`; the node's in brackets):
 
 | Exit | `error` | When | `next` |
 |---|---|---|---|
 | 0 | — | done, or nothing to change (`changed: false`) | `mu queue --json` |
-| 2 | `other-project` | the client's guard (§20.2) | "only if the owner asked: the same command with --others" (`by: ask`) |
-| 2 | `not-queued`, `not-running`, `reference-not-queued`, `already-finished` [64] | the job (or `--before` job) is not in the state the operation needs; mapped by error code, as `too-big` | the operation that fits its state (`mu pause JOB` for a running one, `mu hold JOB` for a queued one, `mu move JOB --front`) |
-| 2 | `pause-limit` [64] | over `max_s` or the budget, an express job, a borrower | the figures and when it may be paused again |
-| 5 | `not-allowed` [77, new] | this key may not arrange that job (§20.4) | "ask the owner (avi-mac) to run: mu …" (`by: human`) |
-| 6 | `node-too-old` (client), `pause-unavailable`, `pause-failed`, `busy` [69] | the node lacks the feature; its freezer does not work (§12 item 10); the freeze did not complete in 30 s; the lock was not free in 120 s | wait for the node's auto-update (`mu compute status NODE`); nothing; retry; retry in a minute |
+| 2 | `other-project` [64] | the node's guard (§20.2): another project's job, without `--others`; the answer lists the jobs it would touch | "only if the owner asked: the same command with --others" (`by: ask`) |
+| 2 | `not-queued`, `not-running`, `reference-not-queued`, `already-finished` [64] | the job (or `--before` job) is not in the state the operation needs (held counts as queued for `move`, `priority` and as a reference); mapped by error code, as `too-big` | the operation that fits its state (`mu pause JOB` for a running one, `mu hold JOB` for a queued one, `mu move JOB --front`) |
+| 2 | `pause-limit` [64] | over 2 h or the budget, an express job, a borrower, a job started without a time-limit timer (§20.12) | the figures and when it may be paused again |
+| 5 | `not-allowed` [77, new] | this key may not arrange that job, or may not undo an owner's act (§20.4) | "ask the owner (avi-mac) to run: mu …" (`by: human`) |
+| 6 | `node-too-old` (client), `pause-unavailable`, `pause-failed`, `busy` [69] | the node lacks the feature; its freezer does not work (§12 item 10); the freeze did not complete in 30 s or the limit timer could not be stopped; the lock was not free in 120 s | wait for the node's auto-update (`mu compute status NODE`); nothing; retry; retry in a minute |
 | 9 | `no-such-job` [66] | | `mu queue` |
-| 10 | — | `pause`/`resume` accepted but not complete after `--timeout`: `state` `pausing` or `resuming`, with `by` | `mu queue --json`; the request stays in force |
+| 10 | — | `resume` accepted but waiting for a borrower after `--timeout`: `state` `resuming`, with `resumes_by` | `mu queue --json`; the request stays in force |
 
-Node exit 77 (`EX_NOPERM`) is new in job-layer §7.2's table; the client maps it to 5 ("refused, never retry").
+Node exit 77 (`EX_NOPERM`) is new in job-layer §7.2's table (pointer added there); the client maps it to 5 ("refused,
+never retry").
 
 **Text** (`mu queue`, built in `jobs.py` from the JSON):
 
 ```
-office-pc · 20 cores, 20.0 GB for jobs · 16 cores, 16.0 GB granted (8 cores lent) · auto-pause: marked jobs only
+office-pc · 20 cores, 20.0 GB for jobs · 8 cores, 12.0 GB granted · 8 cores, 6.5 GB lent by paused jobs (4 cores, 2.0 GB borrowed) · auto-pause: marked jobs only
 RUNNING
-  k3f9qa  cfd-sweep     jatayu        avi-mac  8 cores 12.0 GB  PAUSED by avi-mac until 14:45 · 1h25m run, 4h35m left · pausable
-  2icaxr  sched-probe   mu-first-job  avi-mac  4 cores  2.0 GB  on 4 cores lent by k3f9qa · ends by 14:41
+  k3f9qa  cfd-sweep     jatayu        avi-mac  8 cores 12.0 GB  PAUSED by avi-mac until 14:45 (keeps 5.5 GB) · 1h25m run, 4h35m left · pausable
+  2icaxr  sched-probe   mu-first-job  avi-mac  4 cores  2.0 GB  borrowed from k3f9qa · ends by 14:41
   x9d1ab  quick-check   jatayu        avi-mac  express · 1 CPU (quota)
 QUEUED, in the order they start
-  1 normal  m7c2xz  frame-fea-v2  jatayu  avi-mac  waiting for 12 cores / 16 GB · starts by 19:12
+  1 normal  m7c2xz  frame-fea-v2  jatayu  avi-mac  waiting for 16 cores / 16 GB · starts by 19:20
   2 normal  q4wz8e  mesh-study    jatayu  avi-mac  HELD by avi-mac 13:02 (keeps place 2) · mu release q4wz8e
 next: mu queue --json
 ```
+
+With no owner key, a line `WARNING: no owner key on this node (…)` comes first.
 
 ### 20.10 What the dashboard shows
 
@@ -1237,58 +1469,67 @@ Dashboard phases 1–3 are **read-only** (ROADMAP §2.3 Q3; dashboard §4.6): th
 command, never a button that changes it.
 
 - **Per node**: the queue in walk order, with band chips (`urgent`, `high`, `low`; `normal` unmarked), `held` and
-  `paused` badges (with "until 14:45" and who), lent and borrowed cores drawn on the cores bar (§10) as hatched spans
-  with the deadline, `auto-pause: marked` and the owners.
-- **Per job**: who held, moved or paused it and when (from `events.log`), `run_s` beside `wall_s` and `paused_s`.
+  `paused` badges (with "until 14:45" and who), lent and borrowed cores and memory drawn on the cores and memory bars
+  (§10) as hatched spans with the deadline, `auto-pause: marked`, the owners and any warning.
+- **Per job**: who held, moved or paused it and when, with the claimed project (from `events.log`), `run_s` beside
+  `wall_s` and `paused_s`.
 - **Copy-the-command buttons** only (dashboard §4.7): `mu release JOB`, `mu resume JOB`, `mu move JOB --front`,
-  `mu queue`. The server's read-only verb allowlist (dashboard §4.6) gains `queue` and nothing else.
+  `mu queue`. The server's read-only verb allowlist (dashboard §4.3) gains `queue` and nothing else (pointer added
+  there).
 - Real buttons, if ever, come with phase 4 under the same rules as its optional cancel button (token, Origin check, a
   confirmation naming the job, node and state, the same code as the `mu` command), and only on the owner's decision.
-- Dashboard phase 1b reads `queue` (or `list` plus `rev`) and the shapes above; its golden fixtures (D40) gain a
-  `queue` scenario with held, paused and borrowing jobs.
+- Dashboard phase 1b reads `queue` (or `list` plus `rev`) and the shapes above; its golden fixtures (D40) are the
+  same files as §13's JSON-shape fixtures, with a `queue` scenario of held, paused and borrowing jobs.
 
 ### 20.11 Rules for Claude (added to §8 and `CLAUDE-toolchain.md`)
 
 - **Look before you wait:** `mu queue --json` shows the whole node. Read `waiting_for` and `starts_by` there before
   deciding anything.
-- **Small checks: `--quick`.** They start at once; nobody needs to move, hold or pause anything for them.
+- **Small checks: `--quick`.** They start at once while a lane slot is free; nobody needs to move, hold or pause
+  anything for them. A job that must borrow a paused job's cores needs a realistic `--time`.
 - **Your own project's queued jobs** you may hold, release and move among themselves freely (e.g. run the decisive
   case of a sweep first: `mu move JOB --front`). Never cancel and resubmit to reorder: that loses the job's place and
   its id; `mu move` keeps both.
-- **Other projects' jobs** (another Claude session's work) — holding, moving or pausing them, or moving your job ahead
-  of them — **only when the owner asked**, with `--others`, and say in your reply what you changed. `priority high`
-  and `urgent`, and every `mu pause`, likewise only when the owner asked.
+- **Other projects' jobs** (another Claude session's work) — holding, moving, pausing or resuming them, or moving your
+  job ahead of them — **only when the owner asked**, with `--others`, and say in your reply what you changed (the
+  answer's `delays` lists whom it delayed). `--priority high` and `urgent` at submit, `mu priority` past another
+  project's job, and every `mu pause` of another project's job likewise only when the owner asked.
+- **`other-project` (exit 2)**: the node refused because the operation touches another project's job; do not add
+  `--others` on your own.
 - **Mark long solver runs `--pausable`** when they use no network, no wall-clock timeouts of their own (`timeout`,
   `subprocess` timeouts) and are not timing measurements. Never mark benchmarks, `perf/` runs or the scaling series.
-- **`not-allowed` (exit 5)**: another workstation's job; relay the `next` line to the owner, do not retry.
+- **`not-allowed` (exit 5)**: another workstation's job, or an owner's act; relay the `next` line to the owner, do not
+  retry.
 - A paused job's result carries `paused_s`; use `run_s` for timings, never `wall_s`.
 
 ### 20.12 Compatibility (added to §11)
 
 Protocol stays 1. `hello.features` gains `queue-control` (the order, holds, bands, `queue`) and, in the second release
-(§20.13), `pause`; `hello` gains `owners`, `you_are_owner`, `auto_pause` and `queue: {…, held, paused}`.
+(§20.13), `pause`; `hello` gains `owners`, `you_are_owner`, `warnings`, `auto_pause` and `queue: {…, held, paused}`.
 
 | Workstation | Node | Behaviour |
 |---|---|---|
 | new | without `queue-control` | `mu queue` falls back to `list` without `project=` (all jobs, no order or bands) and says so; the arranging commands exit 6 `node-too-old` with "wait for office-pc's auto-update (μ ≥ v…)"; `--priority`, `--hold`, `--pausable` are refused before the upload, not sent and ignored |
 | new | with `queue-control`, without `pause` | `mu pause`/`resume` exit 6 `node-too-old`; `--pausable` is recorded and takes effect once the node has `pause` |
 | old | new | No new commands. Its `mu status` shows a held job's state `held` (an unknown word it prints as is) and a paused job as `running` with the `note` "paused until 14:45 by avi-mac"; `--wait` keeps waiting, which is right |
-| either | rolled back to a release without queue control | The old runner takes only `state: "queued"` jobs: **held jobs stay held** (ignored, not started) until a roll-forward; bands and `queue.json` are ignored (FIFO). A paused job keeps the node busy, so the runner never switches versions under it (§20.6); a manual rollback while a job is paused would leave it frozen until the backstop: **resume paused jobs before rolling back** (the README's rollback note says so) |
+| either | part D's runner adopting units started by a runner without `pause` | Those units have `RuntimeMaxSec = t` (frozen time would count) and no limit timer: pausing them is refused `pause-limit` ("started before pause was available; ends by …") |
+| either | rolled back to a release without queue control | The old runner takes only `state: "queued"` jobs: **held jobs stay held** (ignored, not started) until a roll-forward; bands and `queue.json` are ignored (FIFO). **`mu cancel` of a held job hangs as `cancelling`** under the old runner (its `verb_cancel` cancels only `queued` jobs and the job has no unit); the new runner cancels it on roll-forward (it reads the `cancel` marker of held jobs too). A paused job keeps the node busy, so the runner never switches versions under it (§20.6); after a manual rollback, the **dead-man timer** thaws it at `D + 120 s` (`MemoryMax` stays at `held` until a new runner restores it, so it may end `oom` if it grows), and the limit timer, once re-armed, still stops it on time; a job stopped by that timer is classified by the old runner as a stopped unit (`interrupted`, re-run once with the old rules) |
 
 ### 20.13 Effort, and place in step 2.5
 
 | Piece | Part | Lines (approx.) | Days |
 |---|---|---|---|
-| The walk (bands, `queue.json`, re-queued first, aging), `hold`/`release`/`move`/`priority`/`queue` verbs, owners and the authorisation table, audit lines, `state: "held"` with its `rebuild_state` path, `--priority`/`--hold` at submit | C | 230 in `node.py` | 1½ |
-| `mu queue` (text and JSON), the five arranging commands, `--others`, exit codes and `next`, compatibility paths | C | 200 in `jobs.py`, `proto.py` | 1 |
-| Tests: walk and authorisation unit tests, simulation additions, Q22–Q28 | C | 250 | 1–1½ |
-| Pause/resume by hand: `control.json`, freeze/thaw in `step()` with confirmation and reconciliation, lent cores and borrowers in `plan()`, deadlines, the runner's own time limit and the `RuntimeMaxSec` backstop, `run_s`/`paused_s`/`pauses`, cancel/oom/restart/interrupted paths, `pause`/`resume` commands | D | 260 in `node.py`, 80 in `jobs.py` | 2½ |
-| The auto-pause policy (`--pausable`, `sched.auto_pause`, victim choice, limits, early end) | D | 90 | 1 |
-| Tests: Q29–Q37, simulation with pauses, borrowers and auto-pauses | D | 300 | 1½–2 |
-| **Total** | | **~860 + ~550 tests** | **8½–10 days** |
+| The walk (bands, `queue.json` written whole, re-queue at the front of the band), `hold`/`release`/`move`/`priority`/`queue` verbs, owners with the `owners: []` warning, the authorisation table with sticky owner acts, the node-side `--others` guard (`from`, `others`), audit lines, `state: "held"` with its `rebuild_state` path, `--priority`/`--hold` at submit | C | 240 in `node.py` | 1½ |
+| `mu queue` (text and JSON), the five arranging commands, `--others`, exit codes and `next`, compatibility paths | C | 180 in `jobs.py`, `proto.py` | 1 |
+| Tests: walk and authorisation unit tests, JSON-shape fixtures for every command and error, simulation additions, Q22–Q28 | C | 280 | 1–1½ |
+| Pause/resume by hand: `freeze()`/`thaw()` in the verbs and `step()` with confirmation and reconciliation, `stop_unit()`, the limit and dead-man timers, lent cores by id sets and lent memory (`set-property MemoryMax`), borrowers in `plan()`, deadlines and re-pause, `run_s`/`paused_s`/`pauses`, cancel/oom/restart/interrupted paths, `pause`/`resume` commands | D | 300 in `node.py`, 80 in `jobs.py` | 3 |
+| The auto-pause policy (`--pausable`, `sched.auto_pause`, victim choice, checkout first, limits, early end) | D | 100 | 1 |
+| Tests: Q29–Q39, simulation with pauses, borrowers, memory lending and auto-pauses, each with its fault | D | 380 | 2 |
+| **Total** | | **~900 + ~660 tests** | **9½–10 days** |
 
 **Place in ROADMAP step 2.5.** Part C (queue order and view) is cheap, needs nothing new on the PC, and fixes the
 owner's case on its own together with `--quick`: it ships **in the first release with parts A and B** (2.5.3). Part D
 (pause and auto-pause) needs probe items 10–13 on the PC first and changes how time limits are enforced, so it is a
-**second release** (2.5.5), after the first has run real JATAYU work on the PC for some days. Step 2.5 in all grows
-from 7–9 days to about 16–19.
+**second release** (2.5.5), after the first has run real JATAYU work on the PC for some days. Whether the auto-pause
+policy ships in that release or later, once hand pauses show it is needed, is §17 Q9 (default: with it, as the owner
+asked for both). Step 2.5 in all grows from 7–9 days to about 16½–19.
