@@ -16,7 +16,7 @@
                code (not echoed, never an argument), the clean restart when the settings need it, then the node's
                side of the pairing (the relay credential, the Mac's key, the host key sent back), the status, and
                one line: "paired with <Mac> | ready for jobs: yes". Run it from Terminal (Admin):
-                 powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
+                 powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
                Started from the release folder (a \\wsl.localhost path) it first copies itself to <MuRoot>\stage\<version>
                (administrators and SYSTEM only) and runs that copy. -Relay URL names another relay.
 

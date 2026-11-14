@@ -902,11 +902,14 @@ class Claimer:
             iid, state or "relay unreachable"), "finish it with that code, or: %smu-wsl2-distro pair abort" % PC_ROOT)
 
     def status(self):
+        """The half-done pairing, if any, and the invites this PC finished (48 h): mu-wsl2-host.ps1 pair's last line
+        says "paired" when its invite is among them, whatever the exit code (usability review of ff2c707, 5)."""
         cur = self.current()
+        done = sorted(self.done())
         if not cur:
-            return {"ok": True, "pairing": None}
+            return {"ok": True, "pairing": None, "done": done}
         return {"ok": True, "pairing": {"invite": cur.get("id"), "phase": cur.get("phase"), "node": cur.get("node"),
-                                        "inviter": cur.get("inviter"), "relay": cur.get("relay")}}
+                                        "inviter": cur.get("inviter"), "relay": cur.get("relay")}, "done": done}
 
 
 # ------------------------------------------------------------------------------------------------ the command line

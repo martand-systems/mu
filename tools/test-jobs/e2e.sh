@@ -145,9 +145,13 @@ rfault() {   # rfault NAMES: the relay's faults (mu-relayd -tags faults, from-fi
   docker exec "$(relay_ctr)" sh -c 'printf "%s\n" "$1" > /var/lib/mu-relay/test-fault' sh "${*:-}" ; sleep 1.5
 }
 noderun() {   # noderun ACTION [ARGS]: mu-wsl2-distro pair ACTION as root, the code on stdin; $PF the node's MU_PAIR_FAULT
+  # root's pair.py reads MU_PAIR_* only while the root-owned /etc/mu/test-hooks exists (NOHOOKS=1: without it;
+  # HOOKSFORCE=1: with it regardless, Q14's must-fail)
+  if [ -z "$NOHOOKS" ] || [ -n "$HOOKSFORCE" ]; then sudo install -m 644 -o root -g root /dev/null /etc/mu/test-hooks
+  else sudo rm -f /etc/mu/test-hooks; fi
   sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@"
 }
-PF=""; PCW=""
+PF=""; PCW=""; NOHOOKS=""; HOOKSFORCE=""
 invite_new() {   # invite_new NODE [OPTS]: sets INV (the id) and CODE; the invite's JSON is kept without the code
   local j
   j="$(ws compute invite "$@" --no-wait --json --show-code stdout 2> "$WORK/logs/invite-$1.err")"
@@ -897,6 +901,12 @@ q_tampered() {
 q_offer_key() { q_tampered tamper-offer; }
 q_offer_fp() { q_tampered tamper-offer-fp; }
 q_offer_url() { q_tampered tamper-offer-url; }
+q_hooks_gated() {   # security review of ff2c707, 6: an environment fault (WSLENV) never reaches root's checks
+  local r; PF=skip-offer-mac,trust-relay-fields; NOHOOKS=1
+  q_tampered tamper-offer; r=$?
+  PF=""; NOHOOKS=""; sudo rm -f /etc/mu/test-hooks
+  M="MU_PAIR_FAULT=skip-offer-mac,trust-relay-fields, no /etc/mu/test-hooks: $M"; return $r
+}
 q_answer_key() {
   local out mac mrc pcrc pid
   invite_new q9-pc || { M="invite failed"; return 1; }
@@ -965,6 +975,7 @@ pair_rows() {
   run_row Q10 "the used code again at the paired node: exit 5 already-paired, no contest, the pairing stands" q_reused
   run_row Q11 "--replace, the Mac's confirm missing: the node exits 0 'not yet confirmed' and undoes nothing; the Mac completes later with --wait" q_noconfirm
   run_row Q12 "no code, relay password or admin token in any sampled argument list, log, journal or the relay's log" q_secrets
+  run_row Q14 "root's pair run ignores MU_PAIR_FAULT without the root-owned /etc/mu/test-hooks: a tampered offer is still refused" q_hooks_gated
 }
 pair_faults() {
   must_fail Q2 "no-check (the node)" 'eval PF=no-check' 'eval PF=""' q_typo
@@ -977,14 +988,15 @@ pair_faults() {
   must_fail Q10 "forget-done (the node)" 'eval PF=forget-done' qf_reused_off q_reused
   must_fail Q11 "rollback-on-no-confirm (the node)" qf_rollback_on qf_rollback_off q_noconfirm
   must_fail Q12 "code-in-argv (the node)" qf_argv_on qf_argv_off q_secrets
+  must_fail Q14 "the root gate bypassed (/etc/mu/test-hooks present)" 'eval HOOKSFORCE=1' 'eval HOOKSFORCE=""; qf_restore' q_hooks_gated
 }
 qf_restore() { PF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
 qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
 qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 check_ran() {
   local want got
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"

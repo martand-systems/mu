@@ -125,7 +125,35 @@ sed "s/'install', 'status', 'uninstall', 'test-stop', 'pair'/'install', 'status'
   "$REPO/install/hosts/wsl2/mu-wsl2-host.ps1" > "$T/recipe/install/hosts/wsl2/mu-wsl2-host.ps1"
 out="$(cd "$ROOT" && WSL_DISTRO_NAME=mu-compute /bin/bash "$MU_HOME/bin/mu" node host-script 2>&1)"; rc=$?
 eq "a release whose host script has no pair action: exit 3" "$rc" 3
-has "  and says: run: mu update" "$out" "run: mu update"
+has "  and says: run: wsl ... /home/mu/.local/bin/mu update (a full path: wsl -- runs no login shell)" "$out" "run: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update"
+
+
+# The PC's lines as wsl.exe runs them: `wsl -d D -u mu --cd DIR -- CMD` is a NON-login bash with WSL's default PATH
+# (no ~/.local/bin). v2026.11.8 printed "-- mu node host-script": "mu: command not found" at the first visit.
+# pc_run LINE: the wsl part of LINE run that way, /home/mu standing for this test's $HOME
+printf '\n== the PC lines run as wsl.exe runs them (a non-login shell, WSL'"'"'s default PATH)\n'
+cp "$REPO/install/hosts/wsl2/mu-wsl2-host.ps1" "$T/recipe/install/hosts/wsl2/mu-wsl2-host.ps1"
+mkdir -p "$HOME/.local/bin"; ln -sf "$MU_HOME/bin/mu" "$HOME/.local/bin/mu"
+WSL_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib
+pc_run() {
+  local inner dir cmd
+  inner="$(printf '%s\n' "$1" | sed -n 's/.*wsl -d mu-compute -u mu --cd \([^ ]*\) -- \([^)]*\).*/\1|\2/p')"
+  [ -n "$inner" ] || { echo "no wsl ... -- part in: $1"; return 99; }
+  dir="${inner%%|*}"; cmd="${inner#*|}"
+  dir="$(printf '%s' "$dir" | sed "s#^/home/mu#$HOME#; s#^~#$HOME#")"; cmd="$(printf '%s' "$cmd" | sed "s#/home/mu/\\([^ ]*\\)#'$HOME/\\1'#g")"
+  (cd "$dir" && env -i HOME="$HOME" PATH="$WSL_PATH" MU_HOME="$MU_HOME" WSL_DISTRO_NAME=mu-compute /bin/bash -c "$cmd" 2>&1)
+}
+pair_line="$("$PY1" -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import invite; print(invite.PC_PAIR)' "$REPO/src")"
+upd_line="$("$PY1" -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import invite; print(invite.PC_UPDATE)' "$REPO/src")"
+out="$(pc_run "$pair_line")"; rc=$?
+eq "the printed pair line's (wsl ... host-script) runs without a login PATH: exit 0, the host script's path" \
+  "$rc $out" "0 \\\\wsl.localhost\\mu-compute$(printf '%s' "$real" | tr '/' '\\')"
+out="$(pc_run "$(printf '%s' "$upd_line" | sed 's/ update$/ --version/')")"; rc=$?
+eq "the printed update line names a mu that a non-login shell finds (run with --version: exit 0, μ v2026.11.9)" "$rc ${out%% (*}" "0 μ v2026.11.9"
+out="$(pc_run 'powershell -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair')"; rc=$?
+if [ "$rc" = 127 ] && printf '%s' "$out" | grep -q "mu: command not found"; then
+  ok "must-fail: v2026.11.8's line (-- mu node host-script) fails here as at the visit: mu: command not found"
+else bad "must-fail: v2026.11.8's line did not fail (the check does not model wsl.exe)" "$rc $out"; fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAILN"
 if [ "$FAILN" -gt 0 ]; then printf 'failed:%s\n' "$FAILED"; exit 1; fi

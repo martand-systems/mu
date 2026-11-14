@@ -48,7 +48,10 @@ DEFAULT_PORT = 7001
 CALL_TIMEOUT = 300
 ANSWER_CAP = 1 << 20          # a JSON answer of the node: at most 1 MB is read (review finding 5)
 RESULT_CAP = durable.MAX_RECORD + (1 << 16)   # fetch what=result: the record (16 MB at most) in one tar member
-PC_MU = "wsl -d mu-compute -u mu --cd ~ --"       # what the owner types at the PC (PowerShell), as mu or as root
+PC_MU = "wsl -d mu-compute -u mu --cd /home/mu --"   # what the owner types at the PC (PowerShell), as mu or as root
+# wsl ... -- CMD runs a non-login shell, whose PATH lacks ~/.local/bin: mu is named by its full path (seen at the
+# first visit: "mu: command not found"). No ~ either: a newer PowerShell may expand it to the Windows home
+PC_MUCMD = PC_MU + " /home/mu/.local/bin/mu"
 PC_ROOT = "wsl -d mu-compute -u root --"
 LARGE_UNTRACKED = 100 << 20   # the snapshot's uncommitted and untracked files above which submit asks --allow-large
 KEEP_SNAP_REFS = 10           # refs/mu/snap/* of accepted jobs kept in this clone (all unaccepted ones are kept)
@@ -386,7 +389,7 @@ class Conn:
         if rc == 255:
             classify_255(self.conf, err, st, muxed)
         raise MuError(proto.EXIT_ERROR, "node-error", "%s answered with exit %d" % (self.name, rc),
-                      "if μ on the node is older than the job layer: on the PC, %s mu update" % PC_MU,
+                      "if μ on the node is older than the job layer: on the PC, %s update" % PC_MUCMD,
                       node_message=proto.clean_text((err.strip() or "(no message)")[-600:], 600))
 
     def call(self, verb, data=None, timeout=CALL_TIMEOUT, **args):
@@ -405,8 +408,8 @@ class Conn:
                           node_message=proto.clean_text(repr(out[:200]), 300))
         if not isinstance(ans, dict):
             raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer is not a JSON object" % self.name,
-                          "the node's μ may differ from this one: mu compute status %s; on the PC: %s mu update"
-                          % (self.name, PC_MU))
+                          "the node's μ may differ from this one: mu compute status %s; on the PC: %s update"
+                          % (self.name, PC_MUCMD))
         return proto.clean_obj(ans)   # every string from the node: no control characters, length-capped
 
     def stream(self, request, on_data, data=None):
@@ -604,17 +607,17 @@ def classify_255(conf, err, st, muxed):
 # step: they go to node_message, cleaned and capped (review finding 4). {n} the node, {j} the job id.
 NODE_REFUSALS = {
     "protocol-mismatch": ("{n} speaks another protocol version", "run mu update on the older side (on the PC: "
-                          + PC_MU + " mu update)"),
+                          + PC_MUCMD + " update)"),
     "no-such-job": ("{n} has no job {j}", "mu status (this project's jobs); --on NODE if it ran on another node"),
     "no-such-snapshot": ("{n} does not have the snapshot of job {j}", "mu submit --resume {j} pushes it again"),
     "not-finished": ("job {j} has no result yet", "mu status {j} --wait --timeout 500"),
-    "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MU + " mu node enable"),
+    "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MUCMD + " node enable"),
     "limits-unavailable": ("{n} cannot enforce a job's memory limit (its self-test failed), so it takes no jobs",
-                           "tell the user; on the PC: " + PC_MU + " mu node selftest (docs/design/job-layer.md §19)"),
+                           "tell the user; on the PC: " + PC_MUCMD + " node selftest (docs/design/job-layer.md §19)"),
     "disk-low": ("{n} has too little free disk space for a job", "tell the user; on the PC, delete the folders of old "
                  "finished jobs: " + PC_MU + " rm -rf /srv/mu/jobs/<job-id> (largest: see `largest`)"),
     "toolchain-missing": ("{n} lacks the μ version this project pins", "tell the user: an install at the PC takes over "
-                          "an hour (" + PC_MU + " mu install <version>); or, with the user's agreement, mu pin a version "
+                          "an hour (" + PC_MUCMD + " install <version>); or, with the user's agreement, mu pin a version "
                           "the node has (`installed`)"),
     "bad-spec": ("{n} refused the job spec", "mu update on both sides, then submit again"),
     "key-revoked": ("this workstation's key was revoked on {n}", "tell the user; pairing again: mu compute remove {n}, "
@@ -1205,16 +1208,16 @@ def check_node(ans, node_name, pin, job_id=None):
         have = sorted(installed)[-1] if installed else None
         raise MuError(proto.EXIT_VERSION, "toolchain-missing", "%s has no μ %s, which this project pins (installed "
                       "there: %s)" % (node_name, pin, ", ".join(installed) or "none"),
-                      "tell the user: the node needs μ %s; at the PC (an install takes over an hour): %s mu install %s"
-                      "%s" % (pin, PC_MU, pin, "; or, with the user's agreement, pin a version the node has: mu pin %s"
+                      "tell the user: the node needs μ %s; at the PC (an install takes over an hour): %s install %s"
+                      "%s" % (pin, PC_MUCMD, pin, "; or, with the user's agreement, pin a version the node has: mu pin %s"
                               % have if have else ""), installed=installed, **extra)
     if ans.get("runner") != "active":
         raise MuError(proto.EXIT_NODE_CANNOT, "not-enabled", "the job runner on %s is not running" % node_name,
-                      "tell the user; on the PC: %s mu node enable" % PC_MU, **extra)
+                      "tell the user; on the PC: %s node enable" % PC_MUCMD, **extra)
     if not (ans.get("limits") or {}).get("memory"):
         raise MuError(proto.EXIT_NODE_CANNOT, "limits-unavailable", "%s cannot enforce a job's memory limit (its "
                       "self-test failed), so it takes no jobs" % node_name,
-                      "tell the user; on the PC: %s mu node selftest (docs/design/job-layer.md §19 step 1)" % PC_MU,
+                      "tell the user; on the PC: %s node selftest (docs/design/job-layer.md §19 step 1)" % PC_MUCMD,
                       **extra)
     disk = ans.get("disk") or {}
     if isinstance(disk.get("free_gb"), (int, float)) and disk["free_gb"] < disk.get("min_free_gb", 0):

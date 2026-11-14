@@ -34,8 +34,8 @@ TOKEN = re.compile(r"^mra_[A-Za-z0-9_-]{43,128}$")
 PASSWORD = re.compile(r"^[A-Za-z0-9_-]{24,128}$")
 INVITE_ID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{4}$")
 EXIT_STILL_WAITING = proto.EXIT_STILL_RUNNING
-PC_UPDATE = "wsl -d mu-compute -u mu --cd ~ -- mu update"
-PC_PAIR = "powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair"
+PC_UPDATE = "wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update"
+PC_PAIR = "powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair"
 PC_PAIR_INSTALLED = "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Mu\\host\\mu-wsl2-host.ps1 pair"
 
 
