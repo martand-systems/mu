@@ -874,6 +874,7 @@ class App:
         self.metrics = {}
         self.lock = threading.Lock()
         self.status_cache = {}
+        self.detail_seen = {}
         self.open_file = None
         self.static = {}
 
@@ -993,12 +994,15 @@ class App:
         now = self.clock.wall()
         key = (w.name, job_id)
         cached = self.status_cache.get(key)
-        if cached is None or now - cached[0] > 2.0:
+        opened = now - self.detail_seen.get(key, -1e9) > VISIBLE_S
+        self.detail_seen[key] = now
+        if opened or cached is None:
+            # `status id=` once when the detail opens (§4.3); then the node's list (and watch) keep the row current
             ans = w.status(job_id) if w.state == "online" else None
             if ans is not None:
                 self.status_cache[key] = (now, ans)
                 s = ans
-        else:
+        elif cached[0] >= (w.list_t or 0):
             s = cached[1]
         with w.lock:
             live = w.live(now)
@@ -1162,8 +1166,11 @@ class App:
                 if self.clock.mono() - m["at"] > 600 and m["at"] > 0:
                     del self.metrics[jid]
             for k, v in list(self.status_cache.items()):
-                if self.clock.wall() - v[0] > 60:
+                if self.clock.wall() - v[0] > 600:
                     del self.status_cache[k]
+            for k, t in list(self.detail_seen.items()):
+                if self.clock.wall() - t > 600:
+                    del self.detail_seen[k]
         if self.open_file:
             try:
                 if time.time() - os.path.getmtime(self.open_file) > 60:
@@ -1242,7 +1249,9 @@ def load_static(root):
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
-    allow_reuse_address = False
+    # SO_REUSEADDR: a restart (launchd's KeepAlive) gets its port back while old connections sit in TIME_WAIT. It
+    # never lets two listeners share 127.0.0.1:<port> (that would need SO_REUSEPORT); the lock keeps one instance
+    allow_reuse_address = True
     request_queue_size = 32
 
     def server_bind(self):   # no getfqdn(): a DNS lookup at start could take seconds

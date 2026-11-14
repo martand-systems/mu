@@ -639,6 +639,14 @@ def t_oldnode():
             lag["since"] = None
     p.ticks(120, each=each)
     check("D39: an old node's state changes reach the API within 20 s", lag["max"] <= 20.0, lag["max"])
+    jid = target.id
+    n0 = len(calls(node, "status"))
+    for _ in range(30):                       # the detail open for a minute, polled every 2 s
+        p.app.last_api = clock.mono()
+        p.app.api_job(jid)
+        clock.advance(2.0)
+    check("§4.3: an open job detail asks the old node `status` once, not per poll", len(calls(node, "status")) - n0 == 1,
+          len(calls(node, "status")) - n0)
     card = p.app.workers["office-pc"].card()
     check("D04 (API): the old node's card says 'update μ on office-pc for live statistics'",
           card["old_node"] and card["old_node_text"] == "update μ on office-pc for live statistics" and

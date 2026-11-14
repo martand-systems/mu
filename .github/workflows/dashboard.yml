@@ -166,19 +166,23 @@ jobs:
           srv=$!
           for i in $(seq 50); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
           rc=0; (cd dashboard && npx --no-install playwright test) || rc=$?
-          kill "$srv"; exit "$rc"
+          kill "$srv" 2>/dev/null || true; exit "$rc"
       - name: "must-fail: with the server's csp-unsafe-inline fault the CSP test fails"
         run: |
-          export MU_HOME="$RUNNER_TEMP/mu fault" DASH_DEV_RUN="$RUNNER_TEMP/mu fault/run/dev"
+          export MU_HOME="$RUNNER_TEMP/mu fault" DASH_DEV_RUN="$RUNNER_TEMP/mu fault/run/dev" DASH_E2E_PORT=47998
           MU_JOBS_FAULT=csp-unsafe-inline "$RUNNER_TEMP/venv/bin/python" -I -S src/mu/cli.py dashboard serve --dev \
-            --fake-mac --port "$DASH_E2E_PORT" --static "$RUNNER_TEMP/build" > /dev/null 2>&1 &
+            --fake-mac --port "$DASH_E2E_PORT" --static "$RUNNER_TEMP/build" > "$RUNNER_TEMP/serve-fault.log" 2>&1 &
           srv=$!
-          for i in $(seq 50); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
+          for i in $(seq 100); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
+          [ -f "$DASH_DEV_RUN/dashboard.token" ] || { cat "$RUNNER_TEMP/serve-fault.log"; echo "::error::the fault server did not start"; exit 1; }
           cd dashboard
-          if npx --no-install playwright test --project chromium -g "loads under the CSP" --reporter=line --output "$RUNNER_TEMP/fault-results"; then
-            echo "::error::the CSP test passed against a server that allows unsafe-inline"; kill "$srv"; exit 1
-          fi
-          kill "$srv"; echo "ok: the CSP test fails with the fault"
+          rc=0; npx --no-install playwright test --project chromium -g "loads under the CSP" --reporter=line \
+            --output "$RUNNER_TEMP/fault-results" > "$RUNNER_TEMP/fault.out" 2>&1 || rc=$?
+          kill "$srv" 2>/dev/null || true
+          cat "$RUNNER_TEMP/fault.out"
+          if [ "$rc" = 0 ]; then echo "::error::the CSP test passed against a server that allows unsafe-inline"; exit 1; fi
+          grep -q "unsafe-inline" "$RUNNER_TEMP/fault.out" || { echo "::error::the CSP test failed, but not on the CSP"; exit 1; }
+          echo "ok: the CSP test fails on the CSP with the fault"
       - name: Upload screenshots and the report (the owner's review copy)
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
