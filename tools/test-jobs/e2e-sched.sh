@@ -75,7 +75,7 @@ def mask():
 seen = [("main", mask())]
 def worker():
     if len(sys.argv) > 1 and sys.argv[1] == "widen":
-        os.sched_setaffinity(0, set(range(os.cpu_count())))
+        os.sched_setaffinity(0, set(range(256)))   # every CPU there is (bits beyond them are ignored)
     seen.append(("thread", mask()))
     time.sleep(12)
 t = threading.Thread(target=worker); t.start(); time.sleep(1)
@@ -325,7 +325,7 @@ while time.time() - t < 8: pass')"
 # ---------------------------------------------------------------------------------------------- queue control (§20)
 q22() {
   qpre; local r a b c d e o1 o2 o3 qo seq es ec
-  r="$(blocker 12)"; wait_state "$r" running 60
+  r="$(blocker 35)"; wait_state "$r" running 60
   a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   o1="$(ws hold "$b" --json)"; o2="$(ws hold "$b" --json)"; o3="$(ws release "$b" --json)"
@@ -344,7 +344,7 @@ q22() {
 }
 q23() {
   qpre; local r a b c d m1 m2 rn qo seq
-  r="$(blocker 10)"; wait_state "$r" running 60
+  r="$(blocker 30)"; wait_state "$r" running 60
   a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; d="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   m1="$(ws move "$d" --before "$b" --json)"; m2="$(ws move "$d" --before "$b" --json)"
@@ -358,7 +358,7 @@ q23() {
 }
 q24() {
   qpre; local r n1 n2 h mv seq
-  r="$(blocker 10)"; wait_state "$r" running 60
+  r="$(blocker 25)"; wait_state "$r" running 60
   n1="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; n2="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   h="$(submit --cores 4 --mem 256M --time 1m --priority high --others -- sh -c "$(qcmd 1)")"
   mv="$(ws move "$n2" --front --json)"
@@ -369,7 +369,7 @@ q24() {
 }
 q25() {
   qpre; local r a b c n0 n1 bs seq
-  r="$(blocker 15)"; wait_state "$r" running 60
+  r="$(blocker 30)"; wait_state "$r" running 60
   a="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; b="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   c="$(submit --cores 4 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"
   ws hold "$b" --json >/dev/null; ws move "$c" --front --json >/dev/null
@@ -443,7 +443,7 @@ use_node() { echo "$1" | sudo tee /home/mu/.local/share/mu/default >/dev/null; a
 q28() {
   qpre; local r h a ho qo cs x y q hs xs n
   prev_release || { M="the previous release (v2026.11.9) could not be fetched"; return 1; }
-  r="$(blocker 15)"; wait_state "$r" running 60
+  r="$(blocker 30)"; wait_state "$r" running 60
   h="$(submit --cores 1 --mem 256M --time 1m -- true)"; ws hold "$h" --json >/dev/null
   a="$(submit --cores 1 --mem 256M --time 1m -- sh -c "$(qcmd 1)")"; ws move "$a" --front --json >/dev/null
   use_node v2026.11.9
@@ -467,13 +467,14 @@ q28() {
 
 # ---------------------------------------------------------------------------------------------- updates on a busy node
 REL=/home/mu/rel.git
-release_repo() {   # release_repo TAG...: fake releases of this checkout's src/mu in $REL; the node's source points there
-  local w; w="$(mktemp -d)"
-  sudo bash -s "$w" "$ROOT" "$@" <<'S'
-w="$1"; root="$2"; shift 2
-[ -d /home/mu/rel.git ] || { git init -q --bare /home/mu/rel.git; }
-cd "$w"; git init -q; git config user.name rel; git config user.email rel@example.invalid
-mkdir -p src; cp -R "$root/src/mu" src/mu
+release_repo() {   # release_repo TAG...: fake releases of this checkout's src/mu in $REL (as mu: git refuses repositories
+                   # of another owner); the node's auto-update source points there
+  local w; w="$(sudo -u mu mktemp -d /home/mu/relwork.XXXXXX)"
+  sudo cp -R "$ROOT/src" "$w/src"; sudo chown -R mu:mu "$w/src"
+  sudo -u mu -H bash -s "$w" "$@" <<'S'
+w="$1"; shift
+[ -d /home/mu/rel.git ] || git init -q --bare /home/mu/rel.git
+cd "$w" && git init -q && git config user.name rel && git config user.email rel@example.invalid
 cat > install.sh <<'I'
 #!/bin/bash
 # a stand-in release installer: a stub toolchain of this release's src/mu, MANIFEST.json last
@@ -487,11 +488,11 @@ ln -sfn /usr/bin/python3 "$T/env/bin/python"; sleep 3
 printf '{"version": "%s", "recipe_commit": "0", "installed": "x", "layers": []}\n' "$V" > "$T/MANIFEST.json"; rm -f "$T/.installing"
 echo "fake μ $V is ready"
 I
-chmod 755 install.sh; git add -A; git commit -qm rel
-for t in "$@"; do git tag -f "$t" >/dev/null; git push -q -f /home/mu/rel.git "refs/tags/$t"; done
-chown -R mu:mu /home/mu/rel.git
+chmod 755 install.sh && git add -A && git commit -qm rel
+for t in "$@"; do git tag -f "$t" >/dev/null && git push -q -f /home/mu/rel.git "refs/tags/$t"; done
 S
-  echo "file://$REL" | sudo tee /home/mu/.local/share/mu/source >/dev/null
+  sudo rm -rf "$w"
+  echo "file://$REL" | sudo -u mu tee /home/mu/.local/share/mu/source >/dev/null
   asmu "$NODEH/bin/mu" autoupdate set min_free_gb 0 >/dev/null 2>&1
 }
 au_state() { sudo sed -n "s/^$1=//p" /home/mu/.local/share/mu/state/autoupdate.state | tail -1; }
