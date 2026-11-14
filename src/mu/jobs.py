@@ -969,10 +969,12 @@ def secret_shared(conf):
     for n in paired_nodes():
         if n != conf["name"]:
             other = read_conf(os.path.join(node_dir(n), "node.conf")) or {}
-            if other.get("relay_url") and other.get("relay_user") and relay_account(other) == acct:
+            if other.get("secret_store") == "keychain" and other.get("relay_url") and other.get("relay_user") \
+                    and relay_account(other) == acct:
                 return True
     rc = read_conf(os.path.join(mu_home(), "relay", "relay.conf")) or {}
-    return bool(rc.get("url")) and "%s/%s" % (re.sub(r"^[a-z]+://", "", rc["url"]).split("/")[0], rc.get("workstation")) == acct
+    return rc.get("secret_store", "keychain") == "keychain" and bool(rc.get("url")) and \
+        "%s/%s" % (re.sub(r"^[a-z]+://", "", rc["url"]).split("/")[0], rc.get("workstation")) == acct
 
 
 def cmd_compute_remove(a):
