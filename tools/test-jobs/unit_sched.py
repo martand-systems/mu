@@ -815,7 +815,8 @@ def t_sched_runner(base, stubs_text):
               gone and os.path.isdir(lk), gone)
         shutil.rmtree(lk)
         # the default moved under the runner (au_switch dropped the lock right after): nothing more starts before
-        # the runner restarts on the new default
+        # the runner restarts on the new default (a node of its own: on Linux J0-J3 hold every core by now)
+        fresh("switched")
         mkjob(J[4], {"cores": 1, "mem_bytes": 256 * MI, "time_s": 60})
         os.makedirs(os.environ["MU_HOME"], exist_ok=True)
         with open(os.path.join(os.environ["MU_HOME"], "default"), "w") as f:
