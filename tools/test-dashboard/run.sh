@@ -88,8 +88,11 @@ must_fail serve-last-as-live  "$PY1" stale
 must_fail rename-field        "$PY1" fixtures
 must_fail stale-build         "$PY1" build
 [ -n "$SLOW" ] && must_fail no-lock "$PY1" lifecycle
-if [ -n "$SLOW" ] && "$PY1" -I -S -c 'import sys, sysconfig; sys.path.append(sysconfig.get_paths()["purelib"]); import psutil' 2>/dev/null; then
+if [ -n "$SLOW" ] && "$PY1" -I -S -c "import sys; sys.path.insert(0, '$REPO/src'); from mu import dashboard; sys.exit(dashboard.load_psutil() is None)" 2>/dev/null; then
   must_fail cpu-first-call    "$PY1" sampler
+elif [ -n "$SLOW" ]; then
+  if [ "${MU_TEST_NEED_PSUTIL:-0}" = 1 ]; then bad "must-fail: sampler, with fault cpu-first-call: no psutil in $PY1"
+  else printf '  skip  must-fail: sampler, with fault cpu-first-call (no psutil in %s)\n' "$PY1"; fi
 fi
 
 section "Repository checks"
