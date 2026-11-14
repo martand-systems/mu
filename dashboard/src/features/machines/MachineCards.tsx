@@ -122,7 +122,11 @@ function NodeProblem({ n, now }: { n: Node; now: number }) {
   if (n.state === "offline" || (n.state === "connecting" && e)) {
     const wait = e?.retry_at ? Math.max(0, e.retry_at - now) : null;
     return (
-      <div className="flex flex-col gap-1 text-sm" data-testid="node-offline">
+      <div
+        className="flex flex-col gap-1 text-sm"
+        data-testid="node-offline"
+        ref={__FAULT_VIOLATION_OFFLINE__ ? (el) => el?.setAttribute("style", "color: inherit") : undefined}
+      >
         <p className="text-text">
           offline{n.offline_since !== null && <> since <span className="tabular-nums">{clock(n.offline_since, now)}</span></>}
           {wait !== null && <span className="text-text-muted"> · next try in <span className="tabular-nums">{shortDuration(wait)}</span></span>}

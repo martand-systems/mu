@@ -276,14 +276,14 @@ export function decodeNode(v: unknown, c: Ctx, p = "node"): NodeCard {
   const stats = objOrNull(c, o, "stats", p);
   const ser = obj(c, o.series, `${p}.series`);
   const features = strList(c, o, "features", p, 32, 32);
-  if (__FAULT_ASSUME_FEATURES__ && stats === null && hello !== null) throw new Error("node without stats");
   return {
     name: sReq(c, o, "name", p, 64, "?"),
     link: "relay",
     state: oneOf(c, o, "state", p, NODE_STATES, "error"),
     reconnecting: b(c, o, "reconnecting", p),
     features,
-    old_node: b(c, o, "old_node", p),
+    // assume-features (D04's fault): a node without features taken for one that has them
+    old_node: __FAULT_ASSUME_FEATURES__ ? false : b(c, o, "old_node", p),
     old_node_text: s(c, o, "old_node_text", p, 200),
     error: err === null ? null : decodeNodeError(c, err, `${p}.error`),
     offline_since: n(c, o, "offline_since", p, 0, MAX_T),
