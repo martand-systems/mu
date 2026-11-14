@@ -1092,7 +1092,7 @@ took 32 s).
 | `ssh.socket` on Ubuntu 24.04 | Socket activation is the default; a generator turns `Port` and `ListenAddress` into `ListenStream=` lines; bugs are open for `ListenAddress` and `AddressFamily` (LP 2089198, 2103632). Reverting needs the generator masked, the socket disabled and the service enabled | A dedicated `mu-sshd.service` with its own config file; the distribution's two units masked before the package is installed |
 | A user without a password and `UsePAM` | Ubuntu's `ssh.service` is `Type=notify` with `RuntimeDirectory=sshd`; its README ties clean session ends to `UsePAM yes` | `UsePAM yes`, `Type=notify`, `RuntimeDirectory=sshd` in §13 |
 | WSL interop without `WSL_INTEROP` | `/init` tries `/run/WSL/<pid>_interop` for its own pid, then each parent's, up to init. `[interop]` in `wsl.conf` switches it per distro | A process in a user unit may well reach it. Tested, then switched off (§19) |
-| GitHub `ubuntu-24.04` runners | A VM with systemd as PID 1 and cgroup v2; `loginctl enable-linger` plus `XDG_RUNTIME_DIR=/run/user/<uid>` gives `systemctl --user` for another user | **Not confirmed here.** The probe job of §16 is first |
+| GitHub `ubuntu-24.04` runners | A VM with systemd as PID 1 and cgroup v2; `loginctl enable-linger` plus `XDG_RUNTIME_DIR=/run/user/<uid>` gives `systemctl --user` for another user | **Confirmed by the probe job** (CI run 43531869932, §21): systemd 255 as PID 1, cgroup2fs, `cpu memory pids` delegated to `mu`'s manager, `oom-kill` under `MemoryMax=64M`, `mu-sshd` with `UsePAM yes` |
 
 Sources: systemd `units/user@.service.in` at v255; microsoft/WSL PR 40519 and `wsl.dev/technical-documentation/interop`;
 Ubuntu's `openssh` `README.Debian` and `ssh.service` (noble); `receive.denyNonFastForwards` in git's
@@ -1161,3 +1161,117 @@ Against PLAN v6 (the lead merges; this document does not edit the plan):
   as §6.4a's stage table says.
 - Everything else agrees: the commands, port 7001, one job at a time, the refusal of a missing pin, relay path
   only, fallback rules (stage 2), 50 MB fetch limit, `state/busy`.
+
+## 21. Implemented: stage 1 in CI
+
+Branch `job-layer`. Proven on GitHub's `ubuntu-24.04` runners (`.github/workflows/job-layer.yml`, run
+43531869932: 4 jobs green; 38 rows passed, 24 faults each made their row fail) and in the fast tests on macOS 15 (bash 3.2) and Linux. Nothing has run on the office PC.
+
+### 21.1 Commands, as built
+
+| Command | What it does |
+|---|---|
+| `mu compute add` | makes `$MU_HOME/compute/<node>/` (key, `known_hosts`, `ssh_config`, `node.conf`), stores the relay password (Keychain via `security -i`, or `relay.auth`), prints the key, both fingerprints and the `authorize` command for the PC. `--name` sets this workstation's name on the node (default: the relay user) |
+| `mu compute list / status / remove` | `last-status.json`; `hello` through the relay with the round trip and whether the connection was reused; end the master, delete folder and Keychain item, print the `revoke` command |
+| `mu compute proxy` | ssh's ProxyCommand: `chisel client … stdio:` with `AUTH` in its environment, its log in `logs/compute-<node>.log`, its verdict in `$MU_PROXY_STATUS` |
+| `mu submit` | the checks of §4.2, the snapshot (§6.1), `hello`, push, `submit`; `.mu/jobs/<id>.json` before sending; `--resume <id>` sends the same job again |
+| `mu status [<id>] [--wait]` | one job, or this project's (`list` joined with `.mu/jobs`); exit 7 when it ended otherwise than `succeeded` |
+| `mu log <id> [-f] [--tail N] [--offset B] [--json]` | `-f` resumes from its own byte count after a lost link; `--json` gives `offset`, `next_offset`, `eof` |
+| `mu fetch <id>` | `status`, then `what=result`, then the stream; each output checked (§11) and written through a temp file; `runs/<id>.json` |
+| `mu cancel <id>` | queued: `cancelled` at once; running: the unit is stopped and the runner's classification is awaited (10 s) |
+| `mu node serve / run / run-job / enable / disable / selftest / info` | §7.3, §8.3, §8.4, §8.2, §10; `info` is the `hello` answer on the node itself; `enable --name N --min-free-gb G` |
+
+### 21.2 Where the implementation differs from the text above, and why
+
+| # | Text | Implementation | Why |
+|---|---|---|---|
+| 1 | — | `src/mu/proto.py`, a fifth module | what both sides share (protocol, exit codes, names, job id, globs) in one place |
+| 2 | gate "with the two values written in" | the file holds `@MU_BIN@` and `@MU_KEYS@`; until both are replaced it refuses everything (`not-installed`) | a gate copied without its values must not run anything |
+| 3 | `-o ControlPath=<P>` | `-o 'ControlPath="<P>"'`, also inside `GIT_SSH_COMMAND` | an unquoted path with a space fails on the command line as it does in the file (§17 A) |
+| 4 | the proxy writes one verdict | it writes `starting` first; on a failed new connection the client waits up to 2 s for the reason | chisel exits by itself on a refused credential or fingerprint, and ssh can end before the proxy has read chisel's last line: seen once on macOS CI as `proxy-failed` instead of `relay-credential` |
+| 5 | calls share the master for 300 s | `hello`, `status` and `list` on a shared connection give up after 12 s, end that master and ask once more on a new connection | when the node's tunnel died under an open master, a call hung for 44 s (3 × 15 s keepalive) in the local test; now it answers `node-offline` in under 16 s |
+| 6 | node faults "from the runner's and sshd's own environment" | `MU_NODE_FAULT`, and the root-owned file `/etc/mu/test-fault` | sshd gives a session none of its own environment; a job (user `mu`) cannot write `/etc/mu` |
+| 7 | `fetch` refuses a job without a result | the client asks `status` first (exit 2 "still running"); the node's `fetch` answers `not-finished` (64), which the client also maps to 2 | |
+| 8 | `result.json` fields of §11 | plus `job`: the spec's name, argv, cwd, outputs, snapshot, head, tree, dirty, pin and key | the run record can be written by a clone that did not submit the job |
+| 9 | the shim writes `failed` with the signal | when its child died by a signal and the unit's cgroup counted an OOM kill, it writes `oom` | `OOMPolicy=kill` and the shim race; both now give `oom` |
+| 10 | the shim exits after `SIGTERM` | it re-raises `SIGTERM` on itself | systemd then sees a stopped unit as stopped, not as an exit code |
+| 11 | `systemctl --user` "with `XDG_RUNTIME_DIR` if unset" | `XDG_RUNTIME_DIR` is set to `/run/user/<uid>` unless it is this user's, and a `DBUS_SESSION_BUS_ADDRESS` outside it is dropped | on the runner, `/etc/environment` reaches `mu`'s user manager through PAM; `systemd-run` from `mu-node.service` failed with "Failed to connect to bus: Permission denied" |
+| 12 | `ssh-keygen` makes the key | the modes are set afterwards (key 0600, `.pub` 0644) | a default ACL on the runner's home left the key 0644, and ssh refused it ("bad permissions") |
+| 13 | `sshd -t -f` checks the new configuration | `/run/sshd` must exist first (`install -d -m 755 /run/sshd`) | "Missing privilege separation directory" when the distribution's ssh units are masked and never ran: **the host script needs this** |
+| 14 | the runner's interrupted rule at start-up | applied in every pass | a shim that ends without a result during normal operation is the same case |
+| 15 | "Upload is incremental: one changed line" | one changed line of a small file beside 2 MB of data: +458 bytes on the node | git stores a changed large file as a new object (a 1.5 MB file changed by one line grows the node by about its compressed size); what is not sent again is everything unchanged |
+| 16 | torn records, fault "checksum check off" | in CI the fault is `trust-existence` (a `result.json` that exists counts); the checksum itself is shown by the unit test of a changed record with the old sum | a file of NUL bytes is not JSON, so the sum is not what rejects it |
+| 17 | push fault "`--no-verify` removed" | `push-hooks` removes `--no-verify` and `core.hooksPath=/dev/null` | either one alone keeps the LFS hook from running |
+| 18 | — | `.mu/jobs/.gitignore` (`*`) | the job records never show in `git status` |
+| 19 | `mu_disk_free` reads the record | `_mu_host_drive` in `bin/mu` and `install/disk.sh`, test hook `MU_WSL_HOST_DRIVE` | as §13.4 |
+
+### 21.3 The tests
+
+`tools/test-jobs/run.sh` (unit level, macOS and Linux): the gate's 28 requests under `sh`, `dash` and `bash`, the
+dispatcher's routing under `/bin/bash` 3.2, durable records (ten damaged forms, 120 kills), ids, globs, the proxy's
+rules against recorded chisel lines, the classification table, `ssh_config` byte for byte and through `ssh -G`, the
+ControlPath rule, unpacking (symlink, absolute, `..`, undeclared, size, SHA-256, a project folder that is a link),
+the snapshot, the chisel pins, `mu compute add / list / remove` with a stub for `security` (and a locked keychain).
+Each guarded check runs again with its fault and must fail. `tools/test-jobs/local.sh`: a user-level `sshd`, a
+chisel server and client on 127.0.0.1, stub `systemd-run`/`systemctl`; the whole cycle through the real gate.
+
+`tools/test-jobs/e2e.sh` (`ubuntu-24.04`): `tools/s4/run.sh relay` (Traefik 3.7.16 and the relay from `relay/`),
+`node-setup.sh` (§13 on the runner), the workstation as the user `ws`. Every row runs, then every row again with its
+fault, which must make it fail ("FAILS-OK"):
+
+| # | Check | Result, measured | Fault put in → result |
+|---|---|---|---|
+| S0 | chisel client from the apps.toml pin, SHA-256 checked | **PASS**: 1.12.0 | — |
+| S1 | relay and Traefik replica (tools/s4/run.sh relay) | **PASS**: relay up: https://relay.martand.systems (Traefik v3.7.16), credentials in /home/runner/work/mu/mu/.scratch/s4/env/ | — |
+| S2 | node set-up (§13 on the runner: mu-sshd, gate, /srv/mu, mu-tunnel, runner) | **PASS**: uid of mu 1002 | — |
+| S3 | mu compute add (file store on Linux), key authorised on the node | **PASS**: SHA256:ZUlFU18/16Kw4lydswNTTMfuw6CGNrjY4MZSeBDTqYI | — |
+| S4 | first hello through the relay | **PASS**: 0.071 s | — |
+| P1 | PID 1 is systemd | **PASS**: systemd | — |
+| P2 | /sys/fs/cgroup is cgroup v2 | **PASS**: cgroup2fs | — |
+| P3 | mu's user manager is delegated the memory controller | **PASS**: cpu memory pids | — |
+| P4 | systemd-run --user -p MemoryMax=64M ends a 256 MB allocation with Result=oom-kill | **PASS**: Result=oom-kill | — |
+| P5 | mu-sshd runs with UsePAM yes and logs mu in by key (through the relay) | **PASS**: mu-sshd active; usepam yes; hello: true as key avi-mac | — |
+| P6 | no listener on port 22; mu-sshd on 127.0.0.1:2222 only | **PASS**: 127.0.0.53%lo:53 0.0.0.0:443 0.0.0.0:80 127.0.0.1:2222 127.0.0.54:53 *:2377 [::]:443 [::]:80 *:7946 | — |
+| P7 | mu node selftest passes | **PASS**: MemoryMax=64M: 32 MB ran, 256 MB ended with oom-kill | — |
+| R00 | a whole job: submit, status --wait, log (argv as a list), fetch with a run record | **PASS**: status --wait exit 0; log: job ran ['two words', 'three']; fetch: ["results/out.json"]; run record: yes | — |
+| R01 | host key pin: another key in known_hosts gives exit 5 and nothing reaches the node | **PASS**: exit 5, host-key; node requests during it: 0 | `no-strict-hostkey` → **FAILS-OK**: exit 0, ; node requests during it: 1 |
+| R02 | key required: an unauthorised key gives exit 5 | **PASS**: exit 5, key-not-authorised | `key left in the key file` → **FAILS-OK**: exit 0, |
+| R03 | no shell: 'cat /etc/passwd' bad-character, 'id' unknown-verb, no command no-command | **PASS**: 'cat /etc/passwd': bad-character; 'id': unknown-verb; no command: no-command | `ForceCommand removed` → **FAILS-OK**: 'cat /etc/passwd': ; 'id': ; no command: ; A SHELL RAN |
+| R04 | no terminal (ssh -tt), no forwarding (ssh -N -L) | **PASS**: terminal: refused; forward: no channel (open failed: administratively prohibited: open failed | `both locks removed (restrict and the sshd lines)` → **FAILS-OK**: terminal: granted; forward: opened (got SSH-2.0) |
+| R06 | relay failures: password, fingerprint, port give exit 5 with the reason; node offline, relay down exit 4 within 5 s | **PASS**: wrong password: 5 relay-credential; wrong fingerprint: 5 relay-fingerprint; foreign port: 5 relay-rule; node offline: 4 node-offline in 0.2 s; relay down: 4 relay-unreach… | `bare-proxy` → **FAILS-OK**: wrong password: 4 unreachable; wrong fingerprint: 4 unreachable; foreign port: 4 unreachable; node offline: 4 … |
+| R07 | no relay password in any process's command line while calls run | **PASS**: 0 of 30 scans of every process's command line found a relay password (workstation chisel processes: 1, with --auth: 0) | `auth-in-argv` → **FAILS-OK**: 30 of 30 scans of every process's command line found a relay password (workstation chisel processes: 1, with -… |
+| R10 | push with git-lfs hooks installed succeeds | **PASS**: exit 0; queued; warnings: ["big.bin"] | `push-hooks (no --no-verify)` → **FAILS-OK**: exit 1; the snapshot could not be pushed to office-pc: Remote "mu-office-pc:lfsproj-88b2e9ef7860.git" does not… |
+| R11 | snapshots are write-once: overwrite, delete and another ref name refused | **PASS**: overwrite:  ! [remote rejected] HEAD -> refs/mu/snap/20261114-000907-6sjlht (hook declined) error: failed to push some refs to 'mu-office-pc:woproj-32154-6a0ed7b6f28b.git… | `no-update-hook` → **FAILS-OK**: overwrite: To mu-office-pc:woproj-21766-d5193d98a666.git  + bca7408...45d3aa6 HEAD -> refs/mu/snap/20261114-00… |
+| R12 | work folder equals the tree: export-ignore file present, export-subst unchanged | **PASS**: succeeded: tree-is-exact | `git-archive` → **FAILS-OK**: failed: |
+| R13 | upload is incremental: one changed line grows the node's repositories by under 10 kB | **PASS**: first snapshot (2 MB of data) +1574990 bytes on the node; second (one line of job.py changed, uncommitted) +454 bytes [20261114-000911-ck4i0x 20261114-000911-122ig8] | `full-push` → **FAILS-OK**: first snapshot (2 MB of data) +1574966 bytes on the node; second (one line of job.py changed, uncommitted) +15… |
+| R14 | durable result: the shim killed before result.json never gives succeeded; re-run once, then interrupted | **PASS**: interrupted, attempt 2; 1 re-run(s); note: the job's process ended without a result | `trust-unit-success` → **FAILS-OK**: succeeded, attempt 1; 0 re-run(s); note: |
+| R15 | torn records: result.json / state.json full of NUL bytes read as absent, the job recovered from job.json | **PASS**: result.json NUL-filled: succeeded attempt 2 (re-run from job.json); state.json NUL-filled while queued: succeeded | `trust-existence` → **FAILS-OK**: result.json NUL-filled: succeeded attempt 1 (re-run from job.json); state.json NUL-filled while queued: succee… |
+| R17 | memory limit: a job allocating twice its --mem ends as oom | **PASS**: oom: the job used more memory than its limit | `no-memory-max` → **FAILS-OK**: succeeded: |
+| R18 | time limit and cancel: timeout and cancelled, and a grandchild process is gone | **PASS**: --time 4s: timeout; cancel: cancelled; grandchildren 15106 15388 still alive: none | `killmode-process` → **FAILS-OK**: --time 4s: timeout; cancel: cancelled; grandchildren 28112 28374 still alive: 28112 28374 |
+| R19 | queue: three submits run one at a time in order of acceptance | **PASS**: start 20261114-000947-5ob83j end 20261114-000947-5ob83j start 20261114-000948-8hj820 end 20261114-000948-8hj820 start 20261114-000948-g0gl4a end 20261114-000948-g0gl4a | `start-on-submit` → **FAILS-OK**: start 20261114-001247-apazwe start 20261114-001247-f57p4c start 20261114-001247-dpj5wm end 20261114-001247-apa… |
+| R20 | repeat submit: a lost answer, then --resume: one job (duplicate: true) | **PASS**: lost answer: exit 4; --resume: duplicate true; again: duplicate true; job folders 17 -> 17 -> 17 | `node-id` → **FAILS-OK**: lost answer: exit 4; --resume: duplicate false; again: duplicate false; job folders 37 -> 38 -> 39 |
+| R21 | log resume: the link killed during log -f; the pieces joined by offset equal the node's log | **PASS**: joined pieces sha256 244c5b2ff54666e6, node's log 244c5b2ff54666e6 (3851 bytes; 1 resume(s)) | `log-from-zero` → **FAILS-OK**: joined pieces sha256 b7489ea22b813d5d, node's log 9be6e0fb49637ed0 (5307 bytes; 1 resume(s)) |
+| R22 | fetch integrity: an output changed on the node after the result gives exit 8 and is not written | **PASS**: exit 8 (integrity); results/out.json in the project: absent | `no-fetch-hash` → **FAILS-OK**: exit 0 (); results/out.json in the project: present |
+| R23 | fetch stays inside: a tar member outside the declared outputs is refused | **PASS**: exit 8 (integrity); outside.txt in the project: absent | `no-member-check` → **FAILS-OK**: exit 0 (); outside.txt in the project: WRITTEN |
+| R24 | link drop: the tunnel killed during a job; the job finishes, status and fetch work after | **PASS**: succeeded, attempt 1; fetch after the tunnel came back: exit 0 | `job-in-session` → **FAILS-OK**: succeeded, attempt 2 |
+| R25 | runner restart during a job: adopted, finishes once | **PASS**: succeeded, attempt 1, started 1 time(s) | `no-adopt` → **FAILS-OK**: failed, attempt 2, started 0 time(s) |
+| R26 | version rules: missing pin exit 3; a registered pin survives mu gc --yes; job commands work in a project pinned without them | **PASS**: exit 3 toolchain-missing, says mu install v2026.11.4; mu status in a project pinned to v2026.11.6: exit 0; after mu gc --yes the node has: v2026.11.6 v2026.11.7 | `no-pin-register` → **FAILS-OK**: exit 3 toolchain-missing, says mu install v2026.11.4; mu status in a project pinned to v2026.11.6: exit 0; aft…<br>`route-by-pin` → **FAILS-OK**: exit 3 ; mu status in a project pinned to v2026.11.6: exit 3; after mu gc --yes the node has: v2026.11.6 v2026… |
+| R27 | limits unavailable: with the self-test failing, submit is exit 6 | **PASS**: self-test failing: submit exit 6 (limits-unavailable) | `skip-limits-check` → **FAILS-OK**: self-test failing: submit exit 0 () |
+| R30 | disk low: below min_free_gb, submit is exit 6 (disk-low) | **PASS**: min_free_gb 100000: submit exit 6 (disk-low): office-pc has 83 GB free (/srv/mu); jobs need 100000 GB | — |
+| R31 | protocol mismatch: hello with protocol 2 is refused (65, protocol-mismatch) | **PASS**: hello protocol=2: exit 65, protocol-mismatch: protocol mismatch: the client speaks 2, this node 1 (accepts 1 to 1; μ v2026.11.7) | — |
+
+Run on the unit level only (fast jobs): gate grammar (R05), snapshot leaves the project alone and its content (R08,
+R09), atomic write (R16), pins agree (R28), bash 3.2 (R29), each with its fault.
+
+### 21.4 Not tested, and why
+
+- Everything of §19: WSL's cgroups and the memory limit there, interop and the drive mount, the office network, a
+  Windows restart or `wsl --shutdown` during a job, the real relay and Traefik with real latency.
+- The Keychain itself (a stub stands in for `security`; §17 E is the record of the real one); a session without a GUI.
+- An unclean stop of the node (power cut): the recovery table is exercised by a shim that ends without a result,
+  torn records and a runner restart, not by a stopped VM.
+- `mu fetch` above 50 MB and transfer speed; `--max-size` is checked by a unit of the client only.
+- `tools/test-autoupdate` runs on macOS only: on the Linux runner it reports shellcheck warnings on lines unchanged
+  from `main` and two checks that depend on the machine (a leftover `sleep 599`, `systemd-analyze --user verify`).
+  `tools/test-fetch` is timing-sensitive (failed once locally and once in CI, passed on the rerun; this branch does
+  not touch the downloader) and is not in this workflow.
