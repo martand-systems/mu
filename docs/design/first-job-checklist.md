@@ -5,9 +5,12 @@ What the owner does to send the first compute job from the Mac to the office PC 
 on a GitHub `ubuntu-24.04` runner (see "What CI already showed" at the end); nothing has run on the PC.
 
 **Order:** the [preconditions](#0-preconditions), then [now, on the Mac](#1-now-on-the-mac), then
-[the visit](#2-next-office-visit-one-sequence-about-15-minutes), which is one sequence of about 15 minutes. After it,
-optional: [the restart tests](#3-after-the-sequence-the-pending-restart-tests) and the
-[open points](#4-the-points-only-the-pc-settles-each-with-its-pass-criterion), each with its pass criterion.
+[the visit](#2-next-office-visit-one-sequence-30-45-minutes-at-the-pc): one sequence, 30–45 minutes at the PC (an
+install with packages and a download, a full restart of the distro, the stick moved three times). It ends with
+`ready for jobs: yes` on the PC's screen and one `mu compute status` from the Mac on the office network. The rest
+needs only the Mac and can be done [after the visit, from anywhere](#3-after-the-visit-from-anywhere-the-mac-only).
+Optional later: [the restart tests](#4-later-the-pending-restart-tests) and the
+[open points](#5-the-points-only-the-pc-settles-each-with-its-pass-criterion), each with its pass criterion.
 
 Each step shows what to type and what it prints. Stop at the first output that differs: the message says what to do.
 
@@ -15,6 +18,9 @@ Each step shows what to type and what it prints. Stop at the first output that d
 
 - The `job-layer` branch is merged and released (a version after v2026.11.6). The job commands, `libexec/chisel`
   and the new host scripts reach the PC only through a release that its daily auto-update installs.
+- That release changes no env or app layer (only recipe files and `libexec/chisel`), and it is tagged at least two
+  days before the visit, so the PC's daily auto-update has run twice. (A release that changes a layer hash means a
+  1–2 h build on the PC: then plan for it.)
 - The Mac runs that release (`mu update` on the Mac).
 - The relay is deployed with the clients `office-pc` (compute, port 7001) and `avi-mac` (workstation, 7001). It is.
 
@@ -24,7 +30,7 @@ Three texts go between the Mac and the PC. Only one is secret.
 
 | Text | Secret? | From → to | How |
 |---|---|---|---|
-| The relay settings of `office-pc` (`relay/gen-credentials.sh client office-pc`: URL, fingerprint, user, **password**, port) | **yes** | Mac → PC | **A USB stick**, written on the Mac at the visit and deleted right after use. Never chat, mail, git or a cloud folder. Fallback without a stick: type them at the PC (only the 48-character password is secret; what you type is not shown) |
+| The relay settings of `office-pc` (`relay/gen-credentials.sh client office-pc`: URL, fingerprint, user, **password**, port) | **yes** | Mac → PC | **A USB stick**, written on the Mac at the visit and deleted right after use. Never chat, mail, git or a cloud folder. Fallback without a stick: type them at the PC (it asks field by field; only the password is hidden, and asked twice) |
 | The PC's host key | no | PC → Mac | The same stick (or any channel: the Mac checks its fingerprint against the PC's screen) |
 | The Mac's public key | no | Mac → PC | The same stick (or any channel: the PC prints its fingerprint, compared with the Mac's screen) |
 
@@ -42,7 +48,7 @@ runs. What can be done now:
 
 | # | Do | Expect |
 |---|---|---|
-| 1.1 | `mu --version` | `μ v2026.11.N (dispatcher rev 7)`, N after 6. Otherwise `mu update` |
+| 1.1 | `mu --version` | `μ v2026.11.N (dispatcher rev 8)`, N after 6. Otherwise `mu update` |
 | 1.2 | `mu compute list` | `no compute node is paired: mu compute add <node> ...` (exit 0). `has no job commands` means the release is not installed |
 | 1.3 | In the mu clone: `relay/gen-credentials.sh show` | `compute office-pc ports 7001` and `workstation avi-mac ports 7001` |
 | 1.4 | `curl -sS https://relay.martand.systems/health` | `OK` |
@@ -60,10 +66,10 @@ git add -A && git commit -qm "first job: fea-cantilever"
 
 Bring: the Mac, its charger, a USB stick, a phone with a hotspot.
 
-## 2. Next office visit: one sequence, about 15 minutes
+## 2. Next office visit: one sequence, 30–45 minutes at the PC
 
 On the PC, open **Terminal (Admin)** (an elevated PowerShell): then nothing opens a second window. Commands that run as
-`mu` pass `--cd ~`: from step 2.6 on, `mu` may not enter the Windows folder PowerShell starts in.
+`mu` pass `--cd ~`: from step 2.7 on, `mu` may not enter the Windows folder PowerShell starts in.
 
 ### At the PC: check, then install
 
@@ -73,10 +79,10 @@ On the PC, open **Terminal (Admin)** (an elevated PowerShell): then nothing open
 wsl -d mu-compute -u mu --cd ~ -- mu --version
 ```
 
-Expect `μ v2026.11.N (dispatcher rev 7)`, the same N as the Mac. Otherwise
-`wsl -d mu-compute -u mu --cd ~ -- mu update` (it builds nothing new for this release; a few minutes) and repeat.
+Expect `μ v2026.11.N (dispatcher rev 8)`, the same N as the Mac. Otherwise
+`wsl -d mu-compute -u mu --cd ~ -- mu update` (a few minutes when the release changes no layer, §0) and repeat.
 
-**2.2 Memory limits for jobs work under this WSL** (§19 step 1; the one unknown that would stop everything):
+**2.2 Memory limits for jobs work under this WSL** (§19; the one unknown that would stop everything):
 
 ```powershell
 wsl -d mu-compute -u mu --cd ~ -- mu node selftest
@@ -93,22 +99,24 @@ writable by `mu`, so later runs use the copy in `C:\Mu\host`):
 ```powershell
 $v = (wsl -d mu-compute -u mu --cd ~ --exec cat .local/share/mu/default).Trim()
 $h = "$env:TEMP\mu-host-$v"
-Copy-Item -Recurse -Force "\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\$v\recipe\install\hosts\wsl2" $h
+New-Item -ItemType Directory -Force $h | Out-Null
+Copy-Item -Force "\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\$v\recipe\install\hosts\wsl2\*" $h
 Get-ChildItem $h -Name
 ```
 
 Expect `mu-node-gate`, `mu-wsl2-distro.sh`, `mu-wsl2-host.ps1`, `README.md`.
 
-**2.4 What Windows a process of the distro can reach today** (§19 step 2; changes nothing; write the answer down for
+**2.4 What Windows a process of the distro can reach today** (§19; changes nothing; write the answer down for
 PLAN §11):
 
 ```powershell
 wsl -d mu-compute -u root --exec bash "/home/mu/.local/share/mu/toolchains/$v/recipe/install/hosts/wsl2/mu-wsl2-distro.sh" windows-reach
+wsl -d mu-compute -u mu --cd ~ -- sh -c 'ls -l /run/WSL/; echo "WSL_INTEROP=$WSL_INTEROP"'
 ```
 
 Expected today (interop on, `C:` open): `FAIL reach.root` and `FAIL reach.mu.interop` (each shows what `whoami.exe`
-printed), `FAIL reach.mu.files`, `PASS reach.mu.df`, `FAIL host-drive`, then `windows-reach: N way(s) open`. Whatever
-it says is the record; nothing stops here.
+printed), `FAIL reach.mu.files`, `PASS reach.mu.df`, `FAIL host-drive`, then `windows-reach: N way(s) open`. The
+second line lists WSL's interop sockets as `mu` sees them. Whatever they say is the record; nothing stops here.
 
 **2.5 Install** (`-NoRestart`: step 2.7 restarts the distro the clean way):
 
@@ -122,15 +130,15 @@ It prints `ok` for everything set up before, and `changed` for the new steps; th
 ```
   warning  no relay credential yet: the tunnel starts once it has one. Run: mu-wsl2-distro tunnel credential ...
 mu-wsl2-distro: N change(s).
-Restart the distro to apply them all (from Windows: wsl --terminate mu-compute).
 Next: the relay credential, on stdin: mu-wsl2-distro tunnel credential
 ...
-  warning  not restarting (-NoRestart): the changes apply at the next start of WSL ...
+  note     not restarting (-NoRestart): apply the changes with a clean stop and start: C:\Mu\host\mu-wsl2-host.ps1 test-stop
 Done: N change(s) (3 on Windows, M in mu-compute).
 ```
 
 and under `== Job layer: the runner (as mu)` a `PASS  runner mu-node.service: active` and `PASS  memory limit
-self-test`. If it says instead that μ of `mu` has no job layer yet, step 2.1 was skipped.
+self-test`. If it says instead that μ of `mu` has no job layer yet, step 2.1 was skipped. (Do not restart any other
+way than step 2.7.)
 
 ### Mac, then PC: the relay credential
 
@@ -147,17 +155,18 @@ cmd /c "wsl -d mu-compute -u root --exec /usr/local/sbin/mu-wsl2-distro tunnel c
 Remove-Item E:\office-pc.relay
 ```
 
-Expect:
+(`Remove-Item` on a FAT stick does not erase the data: reformat the stick after the visit.) Expect:
 
 ```
 /etc/mu/tunnel.env written (root:mu-tunnel 0640): relay user office-pc, https://relay.martand.systems, port 7001
 mu-tunnel.service: connected (connected): 2026/…  client: Connected (Latency …)
 ```
 
-This is **the PC's end of the tunnel inside WSL2, through the office network** (S4's open point). Exit 1 names the
-reason and the next step (`relay-credential`, `relay-fingerprint`, `relay-rule`, `relay-port-busy`,
-`relay-unreachable`). Without a stick: `wsl -d mu-compute -u root -- mu-wsl2-distro tunnel credential`, type the six
-lines, then an empty line.
+This is **the PC's end of the tunnel inside WSL2, through the office network** (S4's open point), already through
+the tunnel's egress filter (loopback and the relay's addresses only). Exit 1 names the reason and the next step
+(`relay-credential`, `relay-fingerprint`, `relay-rule`, `relay-port-busy`, `relay-unreachable`). Without a stick:
+`wsl -d mu-compute -u root -- mu-wsl2-distro tunnel credential`; it asks each value (URL, fingerprint, user and port
+are shown; the password is hidden and asked twice).
 
 ### PC: the clean restart that applies `wsl.conf`, and the full status
 
@@ -168,7 +177,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 
 ```
 
 It stops WSL as SYSTEM (as the shutdown hook does), starts the distro through the startup task, and prints the
-distro's status. Every line must be `PASS` or `INFO`, except `WARN keys` (no workstation yet). The new lines:
+distro's status. Every line must be `PASS` or `INFO`, except `WARN keys` (no workstation yet), and the last line is
+`ready for jobs: no (keys)`. The new lines:
 
 | Check | Expect |
 |---|---|
@@ -179,10 +189,15 @@ distro's status. Every line must be `PASS` or `INFO`, except `WARN keys` (no wor
 | `sshd.config`, `sshd.service` | `36 settings in effect as §13.1 says`; active, listening on `127.0.0.1:2222` |
 | `gate`, `jobroot`, `cgroup.delegation` | as install writes it; `/srv/mu (mu, 0700)`; `cpu memory pids` |
 | `chisel`, `tunnel.credential`, `tunnel` | pinned; `relay user office-pc …`; `connected: … Connected` (after a restart, too) |
+| `tunnel.egress`, `tunnel.refresh` | `only loopback and the relay (…); a connection elsewhere is refused by the kernel`; the timer enabled |
 | `updates` | daily, security pockets only |
 | `node.runner`, `node.limits`, `node.disk`, `node.hello` | active after the restart (linger); memory limit enforced; `N GB free at C: (/mnt/c)`; one JSON line |
 | `host-drive`, `reach.root`, `reach.mu.interop` | `C /mnt/c`; a Windows program does not start (for root, and in a unit of `mu`) |
 | `reach.mu.files`, `reach.mu.df`, `disk.sure` | `mu` cannot open `/mnt/c`; can read its free space; μ's disk check counts `C:` as sure |
+
+A `FAIL tunnel.egress` that says "was not refused by it" means WSL's kernel does not enforce the filter (cgroup
+BPF): the tunnel and jobs still work, without that protection against a compromised relay. Note it for §19 and go
+on; the last line then also names `tunnel.egress`.
 
 Then the Windows side too: `powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 status`.
 `task.last-run` must stay `PASS` (the startup task runs `wsl.exe` as `mu` from a Windows folder `mu` can no longer
@@ -200,9 +215,10 @@ wsl -d mu-compute -u root --cd / -- mu-wsl2-distro host-key
 cmd /c "wsl -d mu-compute -u root --exec /usr/local/sbin/mu-wsl2-distro host-key > E:\office-pc.hostkey.txt"
 ```
 
-Note the `fingerprint SHA256:…` line on the screen.
+Note the `fingerprint SHA256:…` line on the screen. (The `mu compute add` line it prints is for reference; 2.9 is
+the same command with the values filled in.)
 
-**2.9** On the Mac, in the mu clone (the password goes through a pipe, never an argument):
+**2.9** On the Mac, in the mu clone (the password goes through a pipe, never an argument or the screen):
 
 ```sh
 HK="$(grep '^ssh-ed25519 ' /Volumes/STICK/office-pc.hostkey.txt)"
@@ -215,7 +231,8 @@ cp ~/Library/Mu/compute/office-pc/id_ed25519.pub /Volumes/STICK/avi-mac.pub
 
 Expect `paired office-pc (nothing was sent yet)`, `host key SHA256:…` **equal to the PC's screen in 2.8** (if not:
 `mu compute remove office-pc` and stop: the key was altered on the way), `this computer avi-mac key SHA256:…`, and
-`relay password stored in the login Keychain` (the Keychain write on the real Mac, §19 step 5).
+`relay password stored in the login Keychain` (the Keychain write on the real Mac, §19). It also prints two ways
+to authorise the key on the PC; 2.10 is the second (from the stick).
 
 **2.10** On the PC:
 
@@ -223,12 +240,19 @@ Expect `paired office-pc (nothing was sent yet)`, `host key SHA256:…` **equal 
 cmd /c "wsl -d mu-compute -u root --exec /usr/local/sbin/mu-wsl2-distro authorize avi-mac - < E:\avi-mac.pub"
 ```
 
-Expect `authorised avi-mac: SHA256:…`, **equal to `this computer … key` on the Mac**. Then delete the stick's three
-files (and reformat it later).
+Expect `authorised avi-mac: SHA256:…`, **equal to `this computer … key` on the Mac**. The two files left on the stick
+are public (the secret one went in 2.6); reformat the stick after the visit.
 
-### Mac: the whole path, then the first job
+**2.11 The last check at the PC:**
 
-**2.11** On the office network, then on the phone's hotspot (S4's second network):
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Mu\host\mu-wsl2-host.ps1 status
+```
+
+Expect every line `PASS` or `INFO`, `linux.keys  avi-mac SHA256:…` (the fingerprint of 2.10), and
+**`PASS  linux.ready  ready for jobs: yes`**. (`WARN linux.ready ready for jobs: no (…)` names what is missing.)
+
+**2.12 From the Mac, on the office network:**
 
 ```sh
 mu compute status office-pc
@@ -238,7 +262,14 @@ Expect exit 0 and `office-pc: up · <seconds> s · μ v2026.11.N … · runner a
 last stop clean`. Note the seconds: a first connection with PAM is about 12 round trips (around 1–3 s); run it twice
 within five minutes and the second says `(connection reused)`, well under 1 s.
 
-**2.12 The first job** (hotspot or office network):
+That ends the visit.
+
+## 3. After the visit, from anywhere (the Mac only)
+
+**3.1 Another network** (a phone's hotspot; S4's second network): `mu compute status office-pc`, as 2.12. Exit 0;
+note the seconds.
+
+**3.2 The first job** (any network):
 
 ```sh
 cd ~/mu-first-job
@@ -261,18 +292,16 @@ Pass: both `passed: True` (each against its own platform's reference, `benchmark
 within 0.5 % of each other, node counts within 5 %. `runs/<job-id>.json` names `office-pc`, the snapshot and the
 toolchain.
 
-**2.13 The three ways a job can end otherwise**, once each (each `mu status … --wait` exits 7):
+**3.3 The three ways a job can end otherwise**, once each:
 
 ```sh
-J=$(mu submit --on office-pc --mem 256M --json -- python -c "b = b'x' * (1 << 30)" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
-mu status $J --wait                # state oom
-J=$(mu submit --on office-pc --time 20s --json -- python -c "import time; time.sleep(600)" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
-mu status $J --wait                # state timeout, after about 20 s
-J=$(mu submit --on office-pc --json -- python -c "import time; time.sleep(600)" | python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])')
-sleep 10; mu cancel $J             # state cancelled
+mu submit --on office-pc --mem 256M --wait -- python -c "b = b'x' * (1 << 30)"            # ends: … oom, exit 7
+mu submit --on office-pc --time 20s --wait -- python -c "import time; time.sleep(600)"    # ends: … timeout, exit 7
+J=$(mu submit --on office-pc --json -- python -c "import time; time.sleep(600)" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("job_id", ""))')
+[ -n "$J" ] && { sleep 10; mu cancel "$J"; }                                              # … cancelled
 ```
 
-That ends the sequence. Stage 1b is done when 2.1–2.13 pass.
+Stage 1b is done when 2.1–2.12 and 3.1–3.3 pass.
 
 ### What install changes on this PC
 
@@ -300,7 +329,9 @@ In the distro (as root):
 - Only if `mu`'s user manager lacks `memory` or `pids`: `/etc/systemd/system/user@.service.d/60-mu-delegate.conf`
   (not expected on Ubuntu 24.04).
 - `/usr/local/lib/mu/chisel` (downloaded from GitHub, both sums checked); system user `mu-tunnel`;
-  `mu-tunnel.service` installed, not enabled until 2.6 gives it the credential.
+  `mu-tunnel.service` installed, not enabled until 2.6 gives it the credential; `mu-tunnel-refresh.timer` (hourly);
+  at 2.6, `/etc/mu/tunnel.hosts` and `mu-tunnel.service.d/50-mu-egress.conf` (the egress filter: loopback and the
+  relay's addresses only).
 - `/etc/apt/apt.conf.d/52mu-unattended-upgrades`; `apt-daily.timer` and `apt-daily-upgrade.timer` enabled if they
   were not.
 - As `mu`: `~mu/.config/systemd/user/mu-node.service`, enabled and started (with the memory self-test), and
@@ -311,43 +342,45 @@ In the distro (as root):
 
 Undo: `C:\Mu\host\mu-wsl2-host.ps1 uninstall` removes all of it except the node's host key and `/srv/mu`.
 
-## 3. After the sequence: the pending restart tests
+## 4. Later: the pending restart tests
 
 These are steps 3–5 of "Restart tests" in `install/hosts/wsl2/README.md`, unchanged, plus one with a job running.
 Each is a Windows restart; none is needed for the job layer to work.
 
 | # | Do | Pass |
 |---|---|---|
-| 3.1 | README step 3: `Stop-Service mu-wsl-shutdown`, `shutdown /r /t 0` | `last-stop: UNCLEAN`, `hook.last-shutdown: WARN` (the detector works) |
-| 3.2 | README step 4: restart from the sign-in screen; then `shutdown /r /t 0 /d p:2:17` | each: `hook.last-shutdown: PASS`, `last-stop: clean`, no NUL bytes, no event 7043 |
-| 3.3 | §19 step 9: from the Mac `mu submit --on office-pc -- python -c "import time; time.sleep(120)"`, then on the PC `C:\Mu\host\mu-wsl2-host.ps1 test-stop`; then `mu status <id> --wait` on the Mac | `succeeded`, `attempt 2`, `note` names the stop; `mu compute status office-pc` answers again within about a minute of the distro's start (tunnel and runner come back by themselves) |
-| 3.4 | README step 5: the first real Windows Update restart | the same as 3.2, and 3.3's tunnel and runner checks |
+| 4.1 | README step 3: `Stop-Service mu-wsl-shutdown`, `shutdown /r /t 0` | `last-stop: UNCLEAN`, `hook.last-shutdown: WARN` (the detector works) |
+| 4.2 | README step 4: restart from the sign-in screen; then `shutdown /r /t 0 /d p:2:17` | each: `hook.last-shutdown: PASS`, `last-stop: clean`, no NUL bytes, no event 7043 |
+| 4.3 | a clean stop during a job: from the Mac `mu submit --on office-pc -- python -c "import time; time.sleep(120)"`, then on the PC `C:\Mu\host\mu-wsl2-host.ps1 test-stop`; then `mu status <id> --wait` on the Mac | `succeeded`, `attempt 2`, `note` names the stop, and `mu log <id>` shows both attempts with the line `== μ: attempt 1 ended without a result …` between them; `mu compute status office-pc` answers again within about a minute of the distro's start (tunnel and runner come back by themselves) |
+| 4.4 | README step 5: the first real Windows Update restart | the same as 4.2, and 4.3's tunnel and runner checks |
 
-## 4. The points only the PC settles, each with its pass criterion
+## 5. The points only the PC settles, each with its pass criterion
 
 From `docs/design/job-layer.md` §19 and the host script's work; each is checked by a step above.
 
 | Point | Checked by | Pass |
 |---|---|---|
 | Auto-update carried a release to the PC | 2.1 | the PC reports the Mac's version |
-| cgroup v2 memory limits for user units under WSL 3.0.5 | 2.2, 2.7 `node.limits`, 2.13 `oom` | `oom-kill` in the self-test; the 1 GB job ends `oom` |
-| What a job could reach of Windows before the change | 2.4 | recorded (any answer) |
+| cgroup v2 memory limits for user units under WSL 3.0.5 | 2.2, 2.7 `node.limits`, 3.3 `oom` | `oom-kill` in the self-test; the 1 GB job ends `oom` |
+| What a job could reach of Windows before the change | 2.4 | recorded (any answer), WSL's interop sockets as `mu` sees them included |
 | `openssh-server` installs with port 22 never open; the root steps on real WSL | 2.5, 2.7 `listeners` | nothing on 22 at any point |
 | Interop off for root and for `mu`; `/mnt/c` closed to `mu` but measurable | 2.7 `reach.*` | all PASS after the restart |
 | μ's disk check sees `C:` with interop off | 2.7 `disk.sure`, `node.disk` | `C:` counted as sure |
 | The startup task still works with `/mnt/c` closed to `mu` | 2.7 Windows `status` | `task.last-run` PASS |
 | The sandboxed tunnel service under WSL's kernel | 2.6, 2.7 `tunnel` | connected, and again after the restart |
+| The tunnel's egress filter under WSL's kernel (cgroup BPF) | 2.7 `tunnel.egress` | "a connection elsewhere is refused by the kernel" |
 | The tunnel from WSL2 through the office network | 2.6 | `connected` |
-| The Keychain write on the real Mac | 2.9 | `stored in the login Keychain`; 2.11 works without a prompt |
-| The whole path, two networks, the real handshake time with PAM | 2.11 | exit 0 on both; the times noted |
-| The first real job, compared with the local reference | 2.12 | as stated there |
-| `oom`, `timeout`, `cancel` on the node | 2.13 | each state once |
-| A clean stop of the distro during a job | 3.3 | one re-run, a correct result |
-| Windows restarts with the hook | 3.1, 3.2, 3.4 | as README says |
+| The Keychain write on the real Mac | 2.9 | `stored in the login Keychain`; 2.12 works without a prompt |
+| Everything a job needs, in one line | 2.11 | `ready for jobs: yes` |
+| The whole path, two networks, the real handshake time with PAM | 2.12, 3.1 | exit 0 on both; the times noted |
+| The first real job, compared with the local reference | 3.2 | as stated there |
+| `oom`, `timeout`, `cancel` on the node | 3.3 | each state once |
+| A clean stop of the distro during a job | 4.3 | one re-run, a correct result, both attempts in the log |
+| Windows restarts with the hook | 4.1, 4.2, 4.4 | as README says |
 
 Still open after the visit (stage 2): an unclean stop during a job, a WSL update that changes the cgroup layout (the
 self-test runs again at each boot), idle beyond five minutes and a relay redeploy with a session open, the Keychain
-when the Mac is used over ssh.
+when the Mac is used over ssh, a change of the relay's address (`mu-tunnel-refresh.timer` follows it within the hour).
 
 ## What CI already showed
 

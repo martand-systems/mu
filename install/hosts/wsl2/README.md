@@ -140,6 +140,8 @@ workstation's pin) and the job folders in `/srv/mu` (data).
 | cgroup delegation | only if `mu`'s user manager lacks `memory` or `pids` (Ubuntu 24.04 delegates them already): `user@.service.d/60-mu-delegate.conf` |
 | `/usr/local/lib/mu/chisel`, user `mu-tunnel`, `mu-tunnel.service` | the relay tunnel: chisel 1.12.0 (SHA-256 of the archive and of the binary pinned; the archive of μ's download cache is the fallback), run as a system user without a login, sandboxed, `Restart=always`. It holds `R:127.0.0.1:<port>` in the relay, pointing at `127.0.0.1:2222` |
 | `/etc/mu/tunnel.env` | the relay credential: root:`mu-tunnel`, 0640. Written only by `tunnel credential` from stdin; a job (user `mu`) cannot read it |
+| `mu-tunnel.service.d/50-mu-egress.conf`, `/etc/mu/tunnel.hosts` | the tunnel's egress filter: `IPAddressDeny=any`, `IPAddressAllow=` loopback and the relay's own addresses, and the relay's name in a hosts file of the tunnel's own (no DNS server needed). chisel's client dials whatever address the relay names for a reverse remote, so without it a compromised relay could use the tunnel to reach the Windows host, the office LAN or the internet from the office (`docs/design/job-layer.md` §13.3). `status` proves it in effect (`tunnel.egress`: a probe unit with the same settings gets "Operation not permitted" for a UDP send) |
+| `mu-tunnel-refresh.timer` | hourly `tunnel refresh`: the relay's addresses again, the filter rewritten and the tunnel restarted only when they changed; a name that does not resolve changes nothing |
 | `/etc/apt/apt.conf.d/52mu-unattended-upgrades` | unattended upgrades every day, security pockets only, no automatic reboot; `apt-daily*.timer` enabled |
 | `/etc/wsl.conf` | also `[interop] enabled=false` (no Linux process starts a Windows program) and `[automount] options="uid=0,gid=0,umask=077"` (the drives stay mounted, for root only). They apply at the next start of the distro |
 | `/var/lib/mu-wsl2/host-drive` | `C /mnt/c`: the drive that holds the distro, passed by `mu-wsl2-host.ps1` (`--host-drive`). μ's disk check reads it first, since it can no longer ask Windows |
@@ -149,15 +151,24 @@ Commands, as root (`wsl -d mu-compute -u root -- mu-wsl2-distro …`); each take
 
 | Command | |
 |---|---|
-| `tunnel credential` | reads the relay settings **from stdin**: the lines `relay/gen-credentials.sh client office-pc` prints on the Mac (or `AUTH=`, `RELAY_URL=`, `RELAY_FINGERPRINT=`, `RELAY_PORT=`). From a terminal it reads until an empty line and shows nothing you paste. Writes `tunnel.env`, starts the tunnel, waits up to `--wait` seconds (30). Exit 0 connected, 1 not (with the reason and what to do), 2 input refused |
+| `tunnel credential` | reads the relay settings **from stdin**: the lines `relay/gen-credentials.sh client office-pc` prints on the Mac (or `AUTH=`, `RELAY_URL=`, `RELAY_FINGERPRINT=`, `RELAY_PORT=`). From a terminal it asks field by field: URL, fingerprint, user and port are public and shown; the password is not shown and is asked twice. Writes `tunnel.env` and the egress filter, starts the tunnel, waits up to `--wait` seconds (30). Exit 0 connected, 1 not (with the reason and what to do), 2 input refused |
 | `tunnel status` | connected or not, the reason, the last line of chisel's log. Exit 0, 1, or 3 when not set up |
+| `tunnel refresh` | the relay's addresses again, for the egress filter (the timer runs it hourly). Exit 0, 1 the name does not resolve (nothing changed), 3 no credential yet |
 | `host-key` | the node's public host key and its SHA256 fingerprint, and the `mu compute add` line for the workstation |
 | `authorize <name> '<key>'` | the line `mu compute add` printed; `-` reads the key from stdin. The name is `[a-z0-9-]`, 1–32 characters; the key must be one ed25519 key (`ssh-keygen -l` decides). Exit 2 refused, 3 the key is authorised under another name |
-| `revoke <name>`, `keys` | remove a workstation; list names and fingerprints |
+| `revoke <name>`, `keys` | remove a workstation, and end every open ssh connection of `mu` (a connection opened before the revoke could otherwise go on; the gate also refuses a key that is no longer in the file, and the other workstations reconnect by themselves); list names and fingerprints |
 | `windows-reach` | changes nothing: whether root, and `mu` inside a `systemd-run --user` unit, can start a Windows program, and whether `mu` can open or only measure the drive. Exit 0 closed, 1 open |
 
-`mu-wsl2-host.ps1 install` copies `mu-node-gate` into the distro with the script and passes `--host-drive`; on
-Windows nothing else changes. The owner's first visit is `docs/design/first-job-checklist.md`.
+`status` ends with one line that decides: `ready for jobs: yes`, or `ready for jobs: no (<checks>)` naming the checks
+a job needs that do not pass (`keys` until a workstation is authorised, `tunnel`, `tunnel.egress`, `node.runner`,
+`node.limits`, `node.disk`, `node.hello`); `--json` has `ready` and `not_ready`. `all checks pass` alone is not
+"ready": `WARN keys` (no workstation yet) does not fail a check.
+
+`mu-wsl2-host.ps1 install` copies `mu-node-gate` into the distro with the script and passes `--host-drive` and
+`--from-host` (the distro script then leaves the restart advice to the Windows script, which says: apply the
+changes with `C:\Mu\host\mu-wsl2-host.ps1 test-stop`, a clean stop and start, rather than `wsl --terminate`).
+On Windows nothing else changes. The owner's first visit is
+`docs/design/first-job-checklist.md`.
 
 ## GitHub access: the one manual step
 

@@ -139,6 +139,12 @@ Every command takes `--json` (one JSON object on stdout, nothing else there) and
 | 7 | the job ended, not as `succeeded` (only from `--wait`) | `mu log <id> --tail 50` |
 | 8 | integrity: a fetched output does not match the result record | fetch again; if it repeats, the node's copy changed after the job |
 | 9 | no such node or job | `mu compute list`, `mu status` |
+| 10 | still running after `--timeout` (`mu status <id> --wait --timeout S`, `mu submit --wait --timeout S`); the job goes on | ask again: `mu status <id> --wait --timeout S`, or `mu log <id> --tail 20` |
+
+Every error carries `exit`, `error`, `message` and `next` in its JSON. `next` is always the workstation's own text
+for that error: what a node says goes to `node_message` (cleaned of control characters, capped), never to `next`,
+`exit` or `ok` (§23, finding S4). Once a submit has a job id, every error carries `job_id`, and `next` says `mu
+submit --resume <id>`. The dispatcher's own refusals (no toolchain, no job layer) answer the same JSON with `--json`.
 
 | Command | Network | What it does |
 |---|---|---|
@@ -147,11 +153,11 @@ Every command takes `--json` (one JSON object on stdout, nothing else there) and
 | `mu compute list` | none | Paired nodes with `last-status.json` |
 | `mu compute remove <node>` | none | Ends a control connection, deletes the folder and the Keychain item, prints the revoke command for the node |
 | `mu compute proxy <node>` | | Internal: the ssh `ProxyCommand` (§5.2) |
-| `mu submit [--on <node>] [--name N] [--mem 16G] [--time 6h] [--cores N] [--output GLOB]… [--no-rerun] [--wait] -- <command…>` | `hello`, push, `submit` | §6, §7. `--on` may be left out when exactly one node is paired. `local` and `auto` are stage 2: exit 2 with that message |
+| `mu submit [--on <node>] [--name N] [--mem SIZE] [--time DUR] [--cores N] [--output GLOB]… [--no-rerun] [--wait [--timeout S]] [--allow-large] [--resume ID] -- <command…>` | `hello`, push, `submit` | §6, §7. `--on` may be left out when exactly one node is paired. `local` and `auto` are stage 2: exit 2 with that message. A command starting with `mu run` is refused (the node already runs `mu run <command>`). Over 100 MB of uncommitted or untracked files: exit 2 `large-untracked` unless `--allow-large` |
 | `mu status [<job-id>] [--wait [--timeout S]]` | `status` or `list` | One job, or this project's jobs (the files in `.mu/jobs` joined with the node's `list`). `--wait` asks every 5 s on the shared connection until the job has a result; after a lost link it reconnects for up to `--timeout` (default: no limit). Exit 7 when the job ended otherwise than `succeeded` |
 | `mu log <job-id> [--tail N] [--offset B] [-f]` | `log` | Prints the job's log from byte `B`. `--json` (not with `-f`) answers `{job_id, offset, next_offset, text, state, eof}`, so a caller polls with `--offset next_offset`. `-f` follows until the job has a result and resumes from its own byte count after a lost link |
-| `mu fetch <job-id> [--into DIR] [--max-size 50M]` | `fetch` | §11. Writes the declared outputs and `runs/<job-id>.json`. Refuses a job without a result (exit 2: "still running") |
-| `mu cancel <job-id>` | `cancel` | §8.4 |
+| `mu fetch <job-id> [--into DIR] [--max-size 50M] [--output GLOB]…` | `fetch` | §11. Writes the declared outputs and `runs/<job-id>.json`. The declared globs come from this clone's record of the job (`.mu/jobs/<id>.json`), never from the node; a clone without that record needs `--output` (exit 2 `no-local-record`). Refuses a job without a result (exit 2: "still running") |
+| `mu cancel <job-id> [--local]` | `cancel` | §8.4. A job this clone never got accepted (record in state `sending`, and the node answers `no-such-job`, or `--local`): its record and snapshot ref are removed |
 
 `mu submit`, in order. Each refusal happens before anything is sent.
 
@@ -161,13 +167,15 @@ Every command takes `--json` (one JSON object on stdout, nothing else there) and
 2. Pin: `[mu] version`. Missing or `unreleased`: exit 2 with `mu pin` as the hint.
 3. Outputs: every `--output`, else `[compute] outputs` in `mu.toml` (a list of globs relative to the project
    root), else none, with the note "no outputs declared: only the log and the result record come back".
-4. Job id (§7.4), then the snapshot (§6). Gitlinks and LFS pointers in the snapshot are listed as warnings.
-5. `hello`: protocol, pinned version installed on the node (else exit 3), disk and limits (else exit 6).
+4. `hello`: protocol, pinned version installed on the node (else exit 3), runner, disk and limits (else exit 6).
+   Asked before anything of the project is made, so a refused or offline node leaves no snapshot and no record.
+5. The size of the uncommitted and untracked files (exit 2 above 100 MB without `--allow-large`), the job id
+   (§7.4), then the snapshot (§6). Gitlinks and LFS pointers in the snapshot are listed as warnings.
 6. Push the snapshot (§6.3).
 7. `submit` with the job spec on stdin (§7.5). The node answers after its fsyncs.
 8. Write `.mu/jobs/<job-id>.json`. Print the job id, state and queue position.
 
-A submit interrupted after step 4 is repeated with **the same job id** (`mu submit --resume <job-id>` reads the
+A submit interrupted after step 5 is repeated with **the same job id** (`mu submit --resume <job-id>` reads the
 spec kept in `.mu/jobs/<job-id>.json`, which is written once before step 5 with `state: "sending"`). The node
 answers a known id with the existing job, never a second one.
 
@@ -353,7 +361,12 @@ git update-ref refs/mu/snap/<job-id> "$S"
   has no `user.name`. Fixed values also make the same job id give the same commit, so a repeated submit pushes
   nothing new.
 - `dirty = (T != HEAD^{tree})`. `head`, `tree`, `snapshot` and `dirty` go into the job spec and the run record.
-- `refs/mu/snap/<job-id>` stays in the project's repository: `git diff <S>` shows later exactly what ran.
+- `refs/mu/snap/<job-id>` stays in the project's repository: `git diff <S>` shows later exactly what ran. The refs of
+  accepted jobs beyond the newest 10 are removed at each submit (the node keeps them); the refs of jobs not yet
+  accepted stay for `--resume`.
+- **The push sends everything reachable from `HEAD` that the node lacks**, history included: a secret that was
+  committed once and deleted later reaches the node with the first push. Rewrite such history before the first
+  submit.
 
 What the snapshot holds, and its limits in stage 1:
 
@@ -643,19 +656,27 @@ sealed and written with `write_durable`.
 
 | Found | Action |
 |---|---|
-| a job folder without a valid `job.json` | deleted: the submit was never acknowledged, and the workstation sends it again with the same id |
+| a temporary job folder (`jobs/.<id>.<pid>`) | deleted: the submit was never acknowledged, and the workstation sends it again with the same id |
+| a job folder with its final name but no valid `job.json` (damage on disk) | moved to `/srv/mu/damaged/<id>.<time>` with whatever result and outputs it has, journalled; never deleted |
 | valid `result.json` | finished |
 | `cancel` marker, no result | `result.json = cancelled` |
-| `queued`, or a valid `job.json` and no valid `state.json` | queued (in `accepted_ns` order) |
-| `running`, unit still active | adopted: the runner restarted, the job did not |
-| `running`, unit ended with a failure `Result` | classified (§8.5) |
-| `running`, no unit, no valid result | attempt 1 and `rerun` true: `work/`, `index` and `log` deleted, back to `queued` with its old `accepted_ns` (so it is first), attempt 2. Otherwise `result.json = interrupted` |
+| `queued`, or a valid `job.json`, no valid `state.json` and no `start attempt` in `events.log` | queued (in `accepted_ns` order; `accepted_ns` never goes back, whatever the clock does) |
+| no valid `state.json`, but `events.log` records `start attempt N` | rebuilt as `running`, attempt N, and classified as below (never started twice, the attempt counter not reset) |
+| `running`, unit still active, or `systemctl show` failed (bus, re-exec, timeout) | adopted: the runner restarted, the job did not. A failed `show` is never taken as "ended" |
+| `running`, unit loaded and `inactive`/`failed` with a failure `Result` | classified (§8.5) |
+| `running`, `systemd-run` failed and systemd does not know the unit | back to `queued`, the attempt kept; `failed` after 3 such starts |
+| `running`, no unit, no valid result | attempt 1 and `rerun` true: `work/` and `index` deleted, the log **kept** with a line `== μ: attempt 1 ended without a result (…); re-run as attempt 2 ==` (offsets stay valid for a reader), back to `queued` with its old `accepted_ns` (so it is first), attempt 2. Otherwise `result.json = interrupted` |
 
 Each recovery writes to `events.log` whether the node's previous stop was clean (the last `previous-stop=` line of
 `/var/lib/mu-wsl2/stops.log`; `unknown` where that file does not exist). `mu status` shows it in `note`.
 
+`result.json` is written once: a valid one is never replaced (a shim that ends after the runner gave up on it cannot
+change the answer). One job's error (a full disk, an I/O error) is journalled and the pass goes on with the others;
+no job is started while another one's state is unknown, or while the free space is below `min_free_gb` (the job
+waits with a note). A job whose log grows past `log_cap_gb` (node.json, default 4) is stopped and ends `failed`.
+
 Not protected: the last seconds of `log` after a hard stop (about 6 s with the write-back settings of the host
-script). The log of a re-run job is discarded with its `work/`.
+script). fsync itself is not tested: the tests kill writers (SIGKILL), they do not cut power.
 
 ## 10. Limits and queue
 
@@ -670,7 +691,7 @@ queue on a laptop that sleeps is worth less than one on the node.
 | `OOMPolicy=kill` | | one process killed for memory ends the whole job, the shim included, so the outcome is one: `oom` |
 | `TasksMax` | 4096 | |
 | `KillMode=control-group`, `TimeoutStopSec=5` | | cancel and shutdown end MPI ranks and other children within the 8 s the host adapter gives user services |
-| `MU_JOB_CORES` | `--cores`, else the physical cores | for the wrappers (MPI ranks, OpenMP threads). No CPU quota: with one job it adds nothing |
+| `MU_JOB_CORES` | `--cores`, else the physical cores | an environment variable only: no μ wrapper reads it yet, so the job passes it on itself (`mpirun -np $MU_JOB_CORES`, `OMP_NUM_THREADS=$MU_JOB_CORES`). No CPU quota: with one job it adds nothing |
 
 `--mem` takes `K`, `M`, `G` (powers of 1024); `--time` takes `s`, `m`, `h`, `d`.
 
@@ -708,8 +729,12 @@ against the user slice. Sandboxing (`ProtectHome`, `PrivateTmp`) is stage 3.
   `interrupted`. `toolchain` is `MANIFEST.json` of the version that ran.
 - **`fetch`:** the node sends an uncompressed tar (ssh compresses): `result.json` first, then each output under its
   path. The client reads it as a stream. It accepts a member only if it is a regular file, its path is the next
-  entry of `outputs` in the result it just read, and its size and SHA-256 match; it writes each through a temp file
-  and a rename under `--into` (default: the project root). Anything else in the stream, or a mismatch, is exit 8
+  entry of `outputs` in the result it just read, it matches a glob **this clone declared** (its record in
+  `.mu/jobs`, or `--output`; never the globs the node's result names), no part of its path is `.git` or `.mu` (in
+  any case or Unicode form), its tar size equals the recorded size before anything is read, and its SHA-256
+  matches; it writes each through a temp file, fsync and a rename under `--into` (default: the project root). The
+  client's glob check matches no hidden name with a wildcard, as the node's `glob.glob` (a pattern part that itself
+  starts with `.` may). Anything else in the stream, or a mismatch, is exit 8
   and nothing is kept from that file on. The client asks for `what=result` first: when the outputs add up to more than
   `--max-size` (default 50 MB, PLAN §6.4) it stops with exit 2, the sizes and the option to pass.
 - **Run record,** `runs/<job-id>.json`, written at fetch (sealed):
@@ -851,7 +876,29 @@ WantedBy=multi-user.target
 ```
 
 The password is in `AUTH` in the environment file, never in the command line. A job (user `mu`) cannot read
-`/etc/mu/tunnel.env`.
+`/etc/mu/tunnel.env`. The unit also has `RestrictAddressFamilies`, `ProtectKernel*`, an empty capability set and
+the rest of `tunnel_unit_text` in the host script.
+
+**Egress filter** (§23, finding S2). chisel's client, when it holds a reverse remote, dials whatever `host:port`
+the server names when it opens a channel (`Outbound: hasReverse`, no ACL, in chisel 1.12.0's `client/client.go`);
+`127.0.0.1:2222` in `R:…` is only advice to the server. So the drop-in
+`/etc/systemd/system/mu-tunnel.service.d/50-mu-egress.conf` limits the unit to loopback and the relay:
+
+```ini
+[Service]
+BindReadOnlyPaths=/etc/mu/tunnel.hosts:/etc/hosts
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32 ::1/128 <the relay's addresses>
+```
+
+`/etc/mu/tunnel.hosts` maps the relay's name to its addresses, so chisel needs no DNS server (on WSL the resolver is
+an address of the Windows host, which must stay closed). `mu-wsl2-distro tunnel refresh` resolves the name (as
+root, outside the sandbox), rewrites both files when the addresses changed and restarts the tunnel;
+`mu-tunnel-refresh.timer` runs it hourly, `tunnel credential` and `install` too. A name that does not resolve leaves
+both as they were. `status` checks the filter in effect: a unit of `mu-tunnel` with the same `IPAddressDeny` and
+`IPAddressAllow` as the running unit must get "Operation not permitted" sending one UDP datagram to 192.0.2.1
+(TEST-NET-1). (UDP, because the filter drops a packet as it leaves: a UDP send then fails at once, while a TCP
+connect only times out; CI's first run showed exactly that.) The workstation's own chisel uses a `stdio:` remote, not a reverse one, so its client dials nothing for the server.
 
 ### 13.4 Windows reach: interop off, drives closed to `mu`, the drive recorded by root
 
@@ -899,19 +946,28 @@ too; key-only authentication covers it.
 | Who | Can | Cannot |
 |---|---|---|
 | Anyone on the internet or the office LAN | nothing: `mu-sshd` listens on loopback only | |
-| The relay container, or a holder of a relay credential | reach the node's ssh login | read or alter job data; pass as the node |
-| A paired workstation key | the verbs of §7.3, **which include running any command as `mu`** | get a terminal, forward ports, use sftp, read job data back through git, add or change keys, become root |
-| A job (project code as `mu`) | read and write everything `mu` owns: other jobs, the μ install, the read-only deploy key; open network connections from the PC, the office LAN included | add an ssh key (root-owned file), read the relay credential (root-owned, another user), start Windows programs or open Windows files (§13.4, to be confirmed at the PC), become root |
+| The relay container or its host (Dokploy), or a holder of a relay credential | reach the node's ssh login (127.0.0.1:2222 through the tunnel), and refuse or delay traffic | read or alter job data (ssh inside); pass as the node (pinned host key); use the node's tunnel to reach anything but loopback and the relay's own addresses (the egress filter, §13.3; before it, chisel's client would dial any address the relay named: the distro's loopback services, the Windows host, the office LAN, the internet from the office's address) |
+| A paired workstation key | the verbs of §7.3, **which include running any command as `mu`**, and therefore everything a job can do: read and change every other workstation's projects, snapshots, logs and results on the node, and make a later `mu fetch` of theirs carry whatever the node says | get a terminal, forward ports, use sftp, add or change keys, become root; make another workstation's `mu fetch` write outside the globs that workstation declared, or into `.git`/`.mu` (§11); set another workstation's `next`, `exit` or `ok` (§4.2) |
+| A job (project code as `mu`) | read and write everything `mu` owns: other jobs, the μ install, `node.py` itself, the read-only deploy key, `/srv/mu/audit.log`; open network connections from the PC, the office LAN included | add an ssh key (root-owned file), read the relay credential (root-owned, another user), start Windows programs or open Windows files (§13.4, to be confirmed at the PC), become root, keep using a revoked key's open connection |
 
 - `sshd` runs as root inside the distro, so a flaw in its login code would give root there. It is reachable only
   through the relay credential or from the PC itself, and gets Ubuntu's security updates.
 - The gate and `mu node serve` are not a defence against `mu`. `sshd`'s own settings are.
+- **The node is not trusted by the workstation.** Any job of any project can rewrite what the node answers. So
+  `mu fetch` takes the declared globs from the workstation's own record, never writes into `.git` or `.mu`, checks
+  each output's size before reading it and its SHA-256 after; answers are capped (1 MB, the result 16 MB).
+- **Attribution:** the `key=` in `/srv/mu/audit.log` and in the `mu-node` journal lines is written by code `mu`
+  owns (and `audit.log` is writable by `mu`), so any job can forge it. Only sshd's own root-written lines
+  (`Accepted publickey for mu … SHA256:…`, `journalctl -u mu-sshd`) are evidence of which key logged in.
+- **Revoking** removes the key line; the gate then refuses that key on every new session, also over a connection
+  opened before (sshd reads the key file only at login), and `revoke` ends `mu`'s open ssh connections (the other
+  workstations reconnect by themselves).
 
 ## 15. Stages
 
 | Stage | In | Out |
 |---|---|---|
-| **1** (this document; proven in CI) | dispatcher rev 7; `mu compute add / list / status / remove`; `mu submit / status / log / fetch / cancel`; the snapshot push; the gate; `mu node enable / disable / selftest / serve / run / run-job`; queue; memory and time limits; durable records and the recovery table; run records; pin refusal and pin registration; the chisel pin; the root steps of §13; relay path only | `--on local` and `auto`; remote toolchain install; clean-up of job folders; submodule and LFS content; `fetch --all`; a LAN path; more than one node per call |
+| **1** (this document; proven in CI) | dispatcher rev 8; `mu compute add / list / status / remove`; `mu submit / status / log / fetch / cancel`; the snapshot push; the gate; `mu node enable / disable / selftest / serve / run / run-job`; queue; memory and time limits; durable records and the recovery table; run records; pin refusal and pin registration; the chisel pin; the root steps of §13; relay path only | `--on local` and `auto`; remote toolchain install; clean-up of job folders; submodule and LFS content; `fetch --all`; a LAN path; more than one node per call |
 | **1b** (one visit) | §19 | |
 | **2** | restart recovery proven on the PC; `--on auto` fallback to local; `mu compute install`; `mu compute gc`; submodule and LFS inputs; `fetch --all` (rsync with `--partial`); the cross-host check of PLAN §9 | |
 | **3** | LAN-direct path; pairing by fingerprint (`--host-fingerprint`: the key is read through the tunnel and accepted only with that fingerprint) or one code; the ssh key in the Keychain; a job sandbox | |
@@ -969,6 +1025,15 @@ Two levels:
 | Limits unavailable | with the self-test failing, `submit` is exit 6 | the check skipped |
 | Pins agree | `apps.toml`, `relay/Dockerfile` and the distro script name the same chisel version and sums | one changed |
 | bash 3.2 | `bin/mu` passes `bash -n` and the routing test under `/bin/bash` on macOS | |
+| *Added with the review (§23):* | | |
+| Fetch trusts this clone, not the node (S1) | the real `mu fetch` against a lying node (`fake-node-ssh.py`, globs `**`) refuses `mu.toml`, `.git/config`, `.claude/settings.json` outside the declared `results/*.json`; without a local record, exit 2 | `trust-node-globs` |
+| Hidden names and `.git`/`.mu` (S1b) | `glob_match` accepts exactly what `glob.glob` finds; `.git/config`, `.GIT/config`, `.claude/settings.json` refused | `dot-globs` |
+| Revoke (S3) | the gate refuses a key no longer in the key file (unit, local sshd over an open ControlMaster, e2e R05: the master ends and a call after it is exit 5) | the gate's check removed, and `revoke-keeps-sessions` |
+| A node's words stay data (S4) | a refusal with `hint`, `next`, `exit`, `node`, `code` and escape sequences: `next` and `exit` are the workstation's, no crash, `node_message` cleaned | `node-hint` |
+| Size guard (S5) | a member of 3 MB recorded as 10 bytes is refused before it is read | `no-size-guard` |
+| Egress filter (S2) | R32: a unit with the real unit's `IPAddressDeny`/`IPAddressAllow` reaches mu-sshd over TCP; to the runner's own address (which answers without the filter) a TCP connect fails and a UDP send gets "Operation not permitted"; `status`'s `tunnel.egress` | `no-egress-filter` (R32 and H1) |
+| Runner against failing systemd (D1–D5) | stubs: a failed `show`; `systemd-run` failing after making the unit, and failing without one; `state.json` NUL-filled while running; a re-run's log; one job's folder unwritable; low disk; a log over its cap; a damaged folder at recovery; a second result | `bus-error-is-end`, `trust-run-rc`, `no-unit-check-torn`, `log-truncate-on-rerun`, `runner-pass-aborts`, `no-start-disk-check`, `no-log-cap`, `delete-damaged`, `overwrite-result` |
+| Every row ran | the IDs in `results.tsv` equal the expected rows and faults (Z1, Z2) | |
 
 Not testable in CI, and said so in the record: WSL's cgroups, Windows interop and the drive mount, the office
 network, a Windows restart during a job, the Keychain in a session without a GUI.
@@ -1102,29 +1167,32 @@ Ubuntu's `openssh` `README.Debian` and `ssh.service` (noble); `receive.denyNonFa
 
 ## 19. Still unverified until the PC
 
-Before the visit: the release with the job layer is merged, and the laptop runs it. Bring the laptop. Three texts
-must be at hand at the PC: the relay settings of `office-pc` (`relay/gen-credentials.sh client office-pc` on the
-laptop; the password is a secret), and the laptop's public key (printed by step 5).
+The owner's sequence is `docs/design/first-job-checklist.md`; its §4 lists what each step settles. (The table that
+was here was an older copy of that sequence and has been removed; the checklist is the one to follow.)
 
-The owner's sequence, in order. Each step prints PASS or FAIL lines; a FAIL has its fix next to it and stops the
-sequence. Nothing before step 3 changes the PC.
+What only the PC can settle:
 
-| # | Where | Do | Settles |
-|---|---|---|---|
-| 0 | PC | `wsl -d mu-compute -u mu -- mu --version`. If it is not the new release: `wsl -d mu-compute -u mu -- mu update` | auto-update carried a release on the PC (unproven so far, PLAN §14) |
-| 1 | PC | `wsl -d mu-compute -u mu -- mu node selftest` | **cgroup memory limits for user units under WSL 3.0.5.** FAIL: read `stat -fc %T /sys/fs/cgroup` and `cat /proc/1/cgroup`; on an older WSL add `kernelCommandLine = cgroup_no_v1=all` to `.wslconfig`, restart WSL, repeat |
-| 2 | PC | `wsl -d mu-compute -u root -- mu-wsl2-distro windows-reach` (new; changes nothing) | whether a process of `mu` in a `systemd-run --user` unit can start `/mnt/c/Windows/System32/whoami.exe` and read `C:` today. The answer goes into PLAN §11 either way |
-| 3 | PC, elevated PowerShell | `mu-wsl2-host.ps1 install` from the new release, then `mu-wsl2-host.ps1 test-stop` (restarts the distro, so `wsl.conf` applies). The new script is in the release μ installed in the distro: `\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\<version>\recipe\install\hosts\wsl2\`. Run it from there this once, before any job has run on the node (afterwards that folder is writable by jobs; later runs use the copy in `C:\Mu\host`) | the root steps of §13 on real WSL; that `openssh-server` installs with port 22 never open |
-| 4 | PC | `wsl -d mu-compute -u root -- mu-wsl2-distro status` | interop is off for `mu` and for root; `ls /mnt/c` fails and `df /mnt/c` works for `mu` (FAIL: `[automount] enabled=false`, §13.4); the disk check names `C:` as sure; `mu-sshd` listens on `127.0.0.1:2222` only; the effective sshd settings; the runner is active after the restart (linger); `limits.memory` |
-| 5 | Laptop | `mu compute add office-pc --host-key '<from step 4>' --relay https://relay.martand.systems --relay-fingerprint <FP> --relay-user avi-mac --relay-password-stdin`; compare the host key fingerprint with the PC's screen | the Keychain write on the real Mac |
-| 6 | PC | `wsl -d mu-compute -u root -- mu-wsl2-distro tunnel-credential` (paste the four lines), then `… authorize avi-mac '<public key from step 5>'`; compare the fingerprint with the laptop's screen | **the PC's end of the tunnel in WSL2, through the office network** (S4's open item): `status` shows `tunnel: Connected` |
-| 7 | Laptop, on the office network, then on a phone's hotspot | `mu compute status office-pc` | the whole path; S4's second network; the real handshake time, PAM included |
-| 8 | Laptop | the `fea-cantilever` benchmark as a job from a small project (a folder with a `mu.toml` and one commit; the test suite of stage 1 has it ready): `mu submit`, `mu status --wait`, `mu log`, `mu fetch`; compare with the local reference | the first real job; `oom`, `timeout` and `cancel` once each with a small script |
-| 9 | PC | during a 2-minute job: `mu-wsl2-host.ps1 test-stop`; then `mu status` on the laptop | a clean stop during a job: one re-run, a correct result, `note` says so. (The unclean cases are stage 2, with the S3 restart tests of `install/hosts/wsl2/README.md`.) |
+- auto-update carrying a release to the PC (PLAN §14);
+- cgroup v2 memory limits for user units under WSL 3.0.5 (`mu node selftest`);
+- **the tunnel's egress filter under WSL's kernel**: `IPAddressDeny`/`IPAddressAllow` need cgroup BPF; `status`'s
+  `tunnel.egress` check proves it there (a probe unit's UDP send must get "Operation not permitted"); and the
+  relay's name resolving from the distro for `tunnel refresh`;
+- interop off for root and for `mu`, and `/mnt/c` closed to `mu` but measurable, after a restart; **and whether `mu`
+  can still reach WSL's interop socket (`/run/WSL/*_interop`, `$WSL_INTEROP`) once interop is off** —
+  `windows-reach` tests starting a Windows program through binfmt only (to check at the visit:
+  `wsl -d mu-compute -u mu --cd ~ -- sh -c 'ls -l /run/WSL/; echo "$WSL_INTEROP"'`);
+- `openssh-server` installing with port 22 never open, and the other root steps on real WSL;
+- the startup task once `mu` cannot enter `/mnt/c` (`task.last-run`);
+- the tunnel from WSL2 through the office network, and the whole path from a second network with PAM's real
+  handshake time;
+- the Keychain write on the real Mac;
+- the first real job against the local reference, and `oom`, `timeout`, `cancel` once each;
+- a clean stop of the distro during a job (one re-run, a correct result, the log kept with its marker line).
 
-Also open after the visit: the first Windows Update restart during a job; a WSL update that changes the cgroup
-layout (the self-test runs again at each boot and refuses jobs if limits are gone); idle beyond five minutes and a
-relay redeploy with a session open; the Keychain when the Mac is used over ssh.
+Also open after the visit: the first Windows Update restart during a job; an unclean stop during a job; a WSL update
+that changes the cgroup layout (the self-test runs again at each boot and refuses jobs if limits are gone); idle
+beyond five minutes and a relay redeploy with a session open; the Keychain when the Mac is used over ssh; a change of
+the relay's address (the refresh timer follows it within the hour; CI only checks the files it writes).
 
 ## 20. Changes from the design note, and from PLAN v6
 
@@ -1271,7 +1339,11 @@ R09), atomic write (R16), pins agree (R28), bash 3.2 (R29), each with its fault.
   Windows restart or `wsl --shutdown` during a job, the real relay and Traefik with real latency.
 - The Keychain itself (a stub stands in for `security`; §17 E is the record of the real one); a session without a GUI.
 - An unclean stop of the node (power cut): the recovery table is exercised by a shim that ends without a result,
-  torn records and a runner restart, not by a stopped VM.
+  torn records and a runner restart, not by a stopped VM. fsync itself is untested: every test kills a writer with
+  SIGKILL, which loses nothing that was written; only a power cut (a VM, dm-log-writes) would show a missing fsync.
+- Since the review (§23), the runner's classification is also tested at unit level against stubs of `systemctl` and
+  `systemd-run` that fail on purpose (`tools/test-jobs/unit.py runner`); before, only end to end on a systemd that
+  never failed.
 - `mu fetch` above 50 MB and transfer speed; `--max-size` is checked by a unit of the client only.
 - `tools/test-autoupdate` runs on macOS only: on the Linux runner it reports shellcheck warnings on lines unchanged
   from `main` and two checks that depend on the machine (a leftover `sleep 599`, `systemd-analyze --user verify`).
@@ -1364,9 +1436,91 @@ the distro script, with a changed sum shown to fail.
   Windows; `--no-wsl` leaves these out).
 - The startup task as `mu` once `mu` cannot enter `/mnt/c/WINDOWS/system32` (WSL is expected to report the failed
   `chdir` and still run `/bin/true`): checklist 2.7, `task.last-run`.
-- The tunnel's sandbox under WSL's kernel, and the tunnel through the office network and its proxy, if any.
+- The tunnel's sandbox under WSL's kernel, its egress filter there (cgroup BPF), and the tunnel through the office
+  network and its proxy, if any. CI proves the filter on the runner's kernel (R32, and `status`'s `tunnel.egress`).
+- `mu-tunnel-refresh.timer` following a real change of the relay's address (CI checks the files `tunnel refresh`
+  writes and the filter they give, not a DNS change).
 - `mu-wsl2-host.ps1`'s new code on Windows (`Copy-IntoDistro`, `--host-drive`, the gate on an elevated relaunch from a
   UNC path): parsed under PowerShell 5.1 rules and its pure function tested under pwsh 7 only.
 - That `install` on the configured PC changes exactly the list in the checklist: CI starts from a fresh runner.
 - `apt-get remove` of `openssh-server` on uninstall is exercised only where the package was preinstalled (the runner),
   so the removal branch itself ran only for `unattended-upgrades`.
+
+## 23. Review
+
+Three independent reviews of this branch (security, durability and correctness, usability) found 33 problems:
+7 security findings (S1–S6, S1b) and 2 gaps, 10 durability findings (D1–D10), 16 usability findings (U1.1–U1.9,
+U2.1–U2.7) and a table of inconsistencies. Each finding was re-read in the code. All were real except where a row
+below says otherwise. Every security and durability fix has a test that is also run with the fault that undoes
+the fix, and must then fail (§16, the rows added with the review; `tools/test-jobs/run.sh` runs 27 such
+must-fail checks, `local.sh` one, e2e R05 and R32 and H1 one more each).
+
+### 23.1 Security
+
+| # | Finding | Fix | Test (fault) |
+|---|---|---|---|
+| S1 | **critical:** `mu fetch` took the allowed output globs from the node's own `result.json`; a node could write `.git/config` (a `core.fsmonitor` command runs at the next `git status`), `.claude/settings.json` hooks, `mu.toml`, sources | the globs come from this clone's record (`.mu/jobs/<id>.json`) only; without it, `--output` or exit 2 `no-local-record` | the real `mu fetch` against `fake-node-ssh.py` (`trust-node-globs`) |
+| S1b | the Mac's glob matched hidden names (`**/*.json` took `.claude/settings.json`; `.GIT` is `.git` on macOS) | a wildcard matches no hidden name (as `glob.glob`); no path part `.git` or `.mu` after case folding and NFC/NFD | unit, and `glob_match` = `glob.glob` on a tree (`dot-globs`) |
+| S2 | chisel's client dials whatever the relay names for a reverse remote: a compromised relay could use `mu-tunnel` to reach the distro's loopback, the Windows host, the office LAN, the internet | egress filter: `IPAddressDeny=any`, loopback and the relay's addresses only, the relay's name from a hosts file of the tunnel's own; hourly `tunnel refresh`; `status` proves it in effect | e2e R32 and H1 (`no-egress-filter`); host-script units |
+| S3 | after `revoke`, a ControlMaster opened before could keep opening sessions (each one any verb) | the gate refuses a key that is not in the key file; `revoke` ends `mu`'s open ssh connections | unit gate, `local.sh` over a real master, e2e R05 (the gate's check removed + `revoke-keeps-sessions`) |
+| S4 | the node's `hint` became the client's `next`; its extra keys overrode `exit`, `next`; `node`/`code` crashed the client; node text reached the terminal raw | `next` is the workstation's text per error code; node text in `node_message`, cleaned, capped; an allowlist of extra fields; every node string cleaned of control characters; a job's log is cleaned when stdout is a terminal | unit and the real CLI (`node-hint`) |
+| S5 | the node could fill the Mac's memory (unbounded answers) or disk (a member longer than recorded was written to its end) | answers capped at 1 MB, the result at 16 MB; a member's tar size is checked before it is read and writing stops past it | unit, a 3 MB member recorded as 10 bytes (`no-size-guard`) |
+| S6 | §14 understated what a paired key and the audit log mean; history travels with the push | §14 rewritten (a paired key = everything a job can do; `key=` lines are forgeable, sshd's are not); §6.1 says history travels | documentation |
+| gap | interop off: can `mu` still reach WSL's interop socket? | a check at the visit (checklist 2.4) and §19 | at the PC |
+| gap | root's cache fallback in `ensure_tunnel` read a file in `mu`'s `~/.cache` | a regular file, not a link, ≤ 50 MB, copied with a time limit, the copy's sum decides | by reading (the download works in CI) |
+| hardening | `runuser` to `mu` with root's terminal (TIOCSTI) | `setsid -w` and stdin from `/dev/null` in `as_mu_sd` (TIOCSTI is off in WSL's kernel anyway) | the e2e set-up runs through it |
+
+### 23.2 Durability and correctness
+
+| # | Finding | Fix | Test (fault) |
+|---|---|---|---|
+| D1 | **high:** one failed `systemctl show` (bus error, user-manager re-exec, timeout) made a running job "interrupted": its `work/` and log deleted, a second start, the queue freed beside it, the result later overwritten | a failed `show` is "still running"; "ended" only for `not-found`, or `inactive`/`failed` with a `Result`; `result.json` written once | `unit.py runner` (`bus-error-is-end`, `overwrite-result`) |
+| D2 | any `systemd-run` failure was `failed`, even when the unit had started | systemd is asked: a known unit stays running; an unknown one goes back to the queue (3 tries); no start once the runner has SIGTERM | `trust-run-rc` |
+| D3 | a re-run deleted the log: a reader at byte N got attempt 2's bytes from N on, spliced | the log is kept, with a fsynced marker line; `log --json` has `attempt` | `log-truncate-on-rerun` |
+| D4 | one job's I/O error stopped the whole runner; nothing capped a log; free space was not checked at start; a shim that could not write its result left no reason | per-job `try`; a job is never started beside one in an unknown state; no start below `min_free_gb` (a note says so); `log_cap_gb` (4) stops a job; the shim writes why to the log and the runner's note quotes it | `runner-pass-aborts`, `no-start-disk-check`, `no-log-cap` |
+| D5 | a torn `state.json` made a running job "queued" (started twice, attempt reset); a torn `job.json` made recovery delete the folder | the state is rebuilt from `events.log` and the unit; damaged folders go to `/srv/mu/damaged/`, never deleted (submit's duplicate path too) | `no-unit-check-torn`, `delete-damaged` |
+| D6 | a new project repository was renamed before its files were on disk | `os.sync()` before the rename | by reading (a power cut is not testable here) |
+| D7 | the pin was registered after the job existed (a crash between: auto-update could remove the version) | registered before the rename, and again on a duplicate submit | by reading; R26 covers registration |
+| D8 | fetched outputs were not fsynced, the run record was | each output fsynced before its rename, the folders synced at the end | by reading |
+| D9 | the queue followed the wall clock (WSL's can step back); the busy marker is dropped on SIGTERM with jobs running | `accepted_ns` never goes back (node.json keeps the last). **The busy marker is not changed:** `au_busy` already ignores a marker whose pid has exited, so keeping it would not hold anything back; `keep_previous=1` keeps the running job's toolchain for one switch | unit (the clock) |
+| D10 | tests: classification only end to end; fsync untested; nothing checked that every row ran | the runner section of `unit.py`; Z1/Z2 compare the rows and faults that ran with the expected list; §21.4 says fsync is untested | Z1, Z2 |
+
+### 23.3 Usability (Claude Code, and the owner)
+
+| # | Finding | Fix |
+|---|---|---|
+| U1.1 | `--timeout` ran out with exit 4 ("unreachable") | exit 10 `still-running`; `mu submit --wait --timeout`; `mu status --wait` without an id is exit 2 |
+| U1.2 | a refused or offline node still cost a snapshot, a ref and a record; errors lacked the job id | `hello` before the snapshot; over 100 MB uncommitted is exit 2 unless `--allow-large`; `job_id` and `--resume` in every later error; `mu cancel` forgets an unaccepted job; refs of accepted jobs beyond the newest 10 are removed |
+| U1.3 | no Claude-facing doc for remote jobs | `claude/CLAUDE-toolchain.md`, "Compute jobs on a remote node" |
+| U1.4 | `--relay-password-stdin` echoed a typed password | `getpass` at a terminal; `host-key` prints the command with the pipe |
+| U1.5 | hints named the wrong command, name or form | `host-key`; `authorize <workstation> '<key>'` with its fingerprint; `--cd ~` in every `-u mu` hint; `toolchain-missing` and `disk-low` say what to do at the PC. **Not added:** a `mu node prune` verb (a paired key could then delete others' results); the hint names `rm -rf /srv/mu/jobs/<id>` |
+| U1.6 | thin help | `mu compute --help`, help strings, exit codes in every parser's epilog and in `mu help`, `mu node --help`, a forgotten `--` explained |
+| U1.7 | the `--json` contract | the dispatcher's own errors in JSON (rev 8); `submit --wait --json` includes `submitted`; `exit` in the status object (`ok` = exit 0); concrete `next` everywhere |
+| U1.8 | `mu` said nothing of nodes and jobs | two local lines (no network) and the cheat-sheet |
+| U1.9 | a long push was silent | one line before the push (snapshot, HEAD, uncommitted). **Not done:** git's `--progress` (stderr is parsed for errors) |
+| U2.1 | "about 15 minutes" | 30–45 min at the PC; the hotspot, the first job and the three endings moved after the visit (Mac only); §0 asks for a release with no layer change, tagged two days ahead |
+| U2.2 | no single "ready" check | `status` ends with `ready for jobs: yes/no (…)`, `ready` in JSON, `linux.ready` on Windows; checklist 2.11 |
+| U2.3 | three restart instructions | `--from-host`: the distro script leaves it to the ps1, which says `test-stop` |
+| U2.4 | two authorize commands; blind typing of six values | `mu compute add` prints both forms and writes `authorize.txt`; `tunnel credential` asks field by field, the password hidden and asked twice |
+| U2.5 | `Copy-Item` nesting | `New-Item` and `…\wsl2\*` |
+| U2.6 | 2.13's snippet broke on a failed submit | `--wait` forms; the cancel case guarded |
+| U2.7 | §19 was a stale second sequence | replaced by a pointer to the checklist and the list of open points |
+| table | `MU_JOB_CORES` "for the wrappers" | says the job passes it on; the other rows are covered above |
+
+### 23.4 What each party can still do
+
+- **A holder of a paired workstation key**, or **any job** (they are the same power): run anything as `mu` on the
+  node; read and change every other workstation's projects, snapshots, logs and results there; forge the `key=`
+  attribution in `audit.log`; make another workstation's `mu fetch` bring back wrong *content* for the files that
+  workstation declared (each checked against the node's own record, which the same party controls). They cannot get
+  root, read the relay credential, add a key, reach Windows (if §13.4 holds at the PC), or make a fetch write outside
+  the declared globs or into `.git`/`.mu`, or steer a workstation's `next`.
+- **A compromised relay or Dokploy host:** see, delay or cut the encrypted ssh traffic, and reach the node's sshd
+  login (key-only). With the egress filter, nothing else through the node's tunnel; without it (a kernel without
+  cgroup BPF: `tunnel.egress` fails) the reach of S2 remains.
+- **A revoked key:** nothing from the moment `revoke` returns (new sessions refused by the gate, open connections
+  ended).
+
+### 23.5 CI
+
+The fixes were proven in run CI_RUN_ID (CI_SUMMARY).

@@ -1669,12 +1669,14 @@ status_jobs() {
   else check fail node.hello "the gate's answer to hello is not one JSON line: '$(printf '%s' "$out" | head -c 160 | tr '\n' ' ')' (~$MU_USER/.bashrc must print nothing; μ with the job layer)"; fi
 }
 
-# egress_probe DENY ALLOW [TARGET]: in a unit of mu-tunnel with these IPAddressDeny/IPAddressAllow values, a TCP
-# connection to TARGET (default 192.0.2.1:9, TEST-NET-1: no real host). Prints what bash said and rc=N
+# egress_probe DENY ALLOW [TARGET]: in a unit of mu-tunnel with these IPAddressDeny/IPAddressAllow values, one UDP
+# datagram to TARGET (default 192.0.2.1:9, TEST-NET-1: no real host). The filter drops a packet as it leaves; for
+# UDP the send itself then fails with "Operation not permitted" (a TCP connect would only time out). Without the
+# filter the datagram is sent (rc=0). Prints what bash said and rc=N
 egress_probe() {
   local t="${3:-192.0.2.1/9}"
   timeout 40 systemd-run --quiet --wait --pipe --collect -p User="$TUNNEL_USER" -p IPAddressDeny="$1" -p IPAddressAllow="$2" \
-    -p RuntimeMaxSec=30 /bin/bash -c 'timeout 5 bash -c "exec 3<>/dev/tcp/$0" 2>&1; echo "rc=$?"' "$t" 2>&1 < /dev/null || true
+    -p RuntimeMaxSec=30 /bin/bash -c 'timeout 5 bash -c "exec 3<>/dev/udp/$0 && printf x >&3" 2>&1; echo "rc=$?"' "$t" 2>&1 < /dev/null || true
 }
 status_egress() {   # the tunnel's egress filter, in effect (review finding 2)
   local deny allow probe host now rec
@@ -1687,7 +1689,7 @@ status_egress() {   # the tunnel's egress filter, in effect (review finding 2)
     probe="$(egress_probe "$deny" "$allow" | tr '\n' ' ')"
     case "$probe" in
       *"Operation not permitted"*) check pass tunnel.egress "only loopback and the relay ($allow); a connection elsewhere is refused by the kernel" ;;
-      *) check fail tunnel.egress "the filter is set ($allow), but a connection to 192.0.2.1 was not refused by it: '$(printf '%s' "$probe" | cut -c1-120)' (the kernel may lack cgroup BPF: docs/design/job-layer.md §19)" ;;
+      *) check fail tunnel.egress "the filter is set ($allow), but a datagram to 192.0.2.1 was not refused by it: '$(printf '%s' "$probe" | cut -c1-120)' (the kernel may lack cgroup BPF: docs/design/job-layer.md §19)" ;;
     esac
     host="$(relay_host)"
     now="$(getent ahosts "$host" 2> /dev/null | egress_ips | sort | tr '\n' ' ' || true)"

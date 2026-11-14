@@ -197,16 +197,18 @@ f_keep_off() { KEEP_KEY=0; }
 
 # R05: revoke ends what a connection opened before it could still do (review finding 3)
 RFAULT=""
+nsessions() { pgrep -u mu -x 'sshd|sshd-session' 2>/dev/null | wc -l | tr -d ' '; }   # mu's side of each open connection
 r_revoke() {
-  local out rc m0 m1
+  local out rc m0 n0 n1
   close_master; ws compute status office-pc --json > /dev/null 2>&1   # a shared connection (ControlMaster) is open
   asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O check mu-office-pc > /dev/null 2>&1 && m0=open || m0=none
+  n0="$(nsessions)"
   sudo ${RFAULT:+MU_HOST_FAULT=$RFAULT} mu-wsl2-distro revoke avi-mac > /dev/null; sleep 2
-  asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O check mu-office-pc > /dev/null 2>&1 && m1=open || m1=gone
-  out="$(ws compute status office-pc --json 2>&1)"; rc=$?
+  n1="$(nsessions)"
+  out="$(ws compute status office-pc --json 2>&1)"; rc=$?   # over the master if it still works, else a new connection
   authorize; close_master
-  M="master before the revoke: $m0, after: $m1; a call after it: exit $rc $(printf '%s' "$out" | jget error)"
-  [ "$m0" = open ] && [ "$m1" = gone ] && [ "$rc" = 5 ]
+  M="master before the revoke: $m0; mu's ssh connections on the node: $n0 before, $n1 after; a call after it: exit $rc $(printf '%s' "$out" | jget error)"
+  [ "$m0" = open ] && [ "$n0" -ge 1 ] && [ "$n1" = 0 ] && [ "$rc" = 5 ]
 }
 f_revoke_on() { RFAULT=revoke-keeps-sessions; sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.revoke.good"; sudo sed -i '/mu-gate: revoke check/d' /usr/local/lib/mu/mu-node-gate; }
 f_revoke_off() { RFAULT=""; sudo cp "$WORK/gate.revoke.good" /usr/local/lib/mu/mu-node-gate; close_master; }
@@ -449,7 +451,7 @@ r_fetchint() {
   local id out rc
   asws rm -rf "$WCWD/results"
   id="$(submit -- python3 job.py fetchint)"; wait_state "$id" "succeeded failed" 90
-  sudo sh -c "echo tampered >> /srv/mu/jobs/$id/work/results/out.json"
+  sudo sed -i 's/1/2/' "/srv/mu/jobs/$id/work/results/out.json"   # the same size, another SHA-256 (a longer file stops at the size check)
   out="$(ws fetch "$id" --json 2>&1)"; rc=$?
   M="exit $rc ($(printf '%s' "$out" | jget error)); results/out.json in the project: $(asws test -e "$WCWD/results/out.json" && echo present || echo absent)"
   [ "$rc" = 8 ] && ! asws test -e "$WCWD/results/out.json"
@@ -566,20 +568,23 @@ r_protocol() {
 # R32: the tunnel's egress filter (review finding 2): what mu-tunnel.service may connect to, tested in a unit of
 # mu-tunnel with the values systemd has for the real unit: mu-sshd yes, the runner's own address no (a listener there
 # answers anything else)
-eprobe() {   # eprobe DENY ALLOW HOST/PORT
+eprobe() {   # eprobe DENY ALLOW tcp|udp HOST/PORT: a TCP connection, or one UDP datagram (the filter's drop is EPERM for UDP)
+  local what='exec 3<>/dev/tcp/$0'; [ "$3" = udp ] && what='exec 3<>/dev/udp/$0 && printf x >&3'
   sudo timeout 40 systemd-run --quiet --wait --pipe --collect -p User=mu-tunnel ${1:+-p "IPAddressDeny=$1"} ${2:+-p "IPAddressAllow=$2"} \
-    /bin/bash -c 'timeout 5 bash -c "exec 3<>/dev/tcp/$0" 2>&1; echo "rc=$?"' "$3" 2>&1 < /dev/null | tr '\n' ' '
+    /bin/bash -c "timeout 5 bash -c '$what' \"\$0\" 2>&1; echo \"rc=\$?\"" "$4" 2>&1 < /dev/null | tr '\n' ' '
 }
 r_egress() {
-  local deny allow ip a b c
+  local deny allow ip a b u c
   deny="$(systemctl show mu-tunnel.service -p IPAddressDeny --value)"; allow="$(systemctl show mu-tunnel.service -p IPAddressAllow --value)"
   ip="$(ip -4 route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1) }')"
   sudo sh -c 'nohup python3 -m http.server 18555 --bind 0.0.0.0 > /dev/null 2>&1 & echo $! > /tmp/mu-egress-listener.pid'; sleep 1
-  a="$(eprobe "$deny" "$allow" 127.0.0.1/2222)"; b="$(eprobe "$deny" "$allow" "$ip/18555")"; c="$(eprobe "" "" "$ip/18555")"
+  a="$(eprobe "$deny" "$allow" tcp 127.0.0.1/2222)"; b="$(eprobe "$deny" "$allow" tcp "$ip/18555")"
+  u="$(eprobe "$deny" "$allow" udp "$ip/18555")"; c="$(eprobe "" "" tcp "$ip/18555")"
   sudo sh -c 'kill "$(cat /tmp/mu-egress-listener.pid)"; rm -f /tmp/mu-egress-listener.pid'
-  M="unit: IPAddressDeny=[$deny] IPAddressAllow=[$allow]; mu-sshd: $a; $ip:18555: $b; the same without the filter: $c"
+  M="unit: IPAddressDeny=[$deny] IPAddressAllow=[$allow]; tcp mu-sshd: $a; tcp $ip:18555: $b; udp $ip:18555: $u; tcp without the filter: $c"
   case "$a" in *rc=0*) ;; *) return 1 ;; esac
-  case "$b" in *"Operation not permitted"*) ;; *) return 1 ;; esac
+  case "$b" in *rc=0*) return 1 ;; esac
+  case "$u" in *"Operation not permitted"*) ;; *) return 1 ;; esac
   case "$c" in *rc=0*) ;; *) return 1 ;; esac
   wait_up 60 > /dev/null   # and the tunnel itself works through it
 }

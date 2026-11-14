@@ -1138,7 +1138,8 @@ def check_running(j, first, cap):
     if not unit_ended(props):
         if props.get("LoadState") == "error":
             event(j["dir"], "systemctl show failed (%s): taken as still running" % (props.get("error") or "")[:200])
-        if first and fault("no-adopt"):
+        if first and fault("no-adopt"):   # a runner that does not adopt: it stops the job and runs it again
+            systemctl("stop", st["unit"], timeout=30)
             interrupted(j, "the runner restarted (test fault: not adopted)")
             return False
         if os.path.exists(os.path.join(j["dir"], "cancel")):

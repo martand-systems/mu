@@ -1465,6 +1465,11 @@ function Invoke-Status {
     if ($null -eq $j) { Add-Check 'fail' 'linux' "mu-wsl2-distro status did not answer (exit $($r.ExitCode)): $($r.Error) $($r.Output)".Trim() }
     else {
       foreach ($c in @($j.checks)) { Add-Check ([string]$c.result) ("linux.$($c.name)") ([string]$c.detail) }
+      # the distro's own verdict on the job layer (a distro script without it answers no 'ready')
+      if ($null -ne $j.ready) {
+        if ($j.ready) { Add-Check 'pass' 'linux.ready' 'ready for jobs: yes' }
+        else { Add-Check 'warn' 'linux.ready' "ready for jobs: no ($([string]$j.not_ready))" }
+      }
       if ([int]$j.cpus -eq $script:Cpus) { Add-Check 'pass' 'vm.processors' "$($j.cpus)" } else { Add-Check 'fail' 'vm.processors' "$($j.cpus), want $($script:Cpus) (wsl --shutdown applies .wslconfig)" }
       $wantMiB = $script:Mem * 1024
       if ([int]$j.mem_mib -le $wantMiB -and [int]$j.mem_mib -ge [int]($wantMiB * 0.85)) { Add-Check 'pass' 'vm.memory' "$($j.mem_mib) MiB" }
