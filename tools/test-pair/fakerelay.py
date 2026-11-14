@@ -4,7 +4,7 @@ shapes; it can also play the attacker (TAMPER) and the flaky proxy (502 answers)
 
 Test controls (POST, no auth): /test/tamper {"what": "offer-key|offer-fp|offer-url|answer-key|"}; /test/fail502 {"n": N}
 (the next N requests answer 502 with an empty body, as Traefik does while chisel restarts); /test/expire {"id": ID};
-/test/finish-fails {"n": N} (the next N finish calls answer 500).
+/test/finish-fails {"n": N} (the next N finish calls answer 500); /test/state {"id": ID, "state": S} (sets it).
 """
 import hashlib
 import json
@@ -153,6 +153,10 @@ class Handler(BaseHTTPRequestHandler):
                     S.fail502 = int(body.get("n", 0))
                 elif path == "/test/finish-fails":
                     S.finish_fails = int(body.get("n", 0))
+                elif path == "/test/state":   # the relay lies about an invite's state
+                    x = S.invites[body["id"]]
+                    x["state"] = body["state"]
+                    S.note(x, body["state"], "")
                 elif path == "/test/expire":
                     x = S.invites[body["id"]]
                     x["expires"] = x["answer_by"] = time.time() - 1
@@ -186,7 +190,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not c:
                     return self.err(404, "no-such-client")
                 out = {"name": name, "role": c["role"], "ports": c["ports"],
-                       "source": "dynamic" if name in S.dynamic else "static"}
+                       "source": "dynamic" if name in S.dynamic else "static",
+                       "overrides_static": name in S.dynamic and name in S.static and name not in S.tombstones}
                 if name in S.dynamic and q.get("secret") == "1":
                     out["password"] = c["password"]
                 return self.ok(client=out)

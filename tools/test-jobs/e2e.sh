@@ -35,7 +35,9 @@ must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row
   printf '\n-- %s with fault %s\n' "$1" "$2"
   eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
-  else row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M"; fi
+  else case "$M" in   # a row that could not even start shows nothing about the fault
+    "invite failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
+    *) row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M" ;; esac; fi
   eval "$4"
 }
 jget() { python3 -c 'import json,sys
@@ -145,13 +147,21 @@ rfault() {   # rfault NAMES: the relay's faults (mu-relayd -tags faults, from-fi
   docker exec "$(relay_ctr)" sh -c 'printf "%s\n" "$1" > /var/lib/mu-relay/test-fault' sh "${*:-}" ; sleep 1.5
 }
 noderun() {   # noderun ACTION [ARGS]: mu-wsl2-distro pair ACTION as root, the code on stdin; $PF the node's MU_PAIR_FAULT
-  sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@"
+  # root's pair.py reads MU_PAIR_* only while the root-owned /etc/mu/test-hooks exists (NOHOOKS=1: without it;
+  # HOOKSFORCE=1: with it regardless, Q14's must-fail)
+  if [ -z "$NOHOOKS" ] || [ -n "$HOOKSFORCE" ]; then sudo install -m 644 -o root -g root /dev/null /etc/mu/test-hooks
+  else sudo rm -f /etc/mu/test-hooks; fi
+  local rc=0
+  sudo env ${PF:+MU_PAIR_FAULT=$PF} MU_PAIR_CONFIRM_WAIT="${PCW:-120}" mu-wsl2-distro pair "$@" || rc=$?
+  sudo rm -f /etc/mu/test-hooks   # never left behind: status fails while it exists (H1)
+  return $rc
 }
-PF=""; PCW=""
+PF=""; PCW=""; NOHOOKS=""; HOOKSFORCE=""
 invite_new() {   # invite_new NODE [OPTS]: sets INV (the id) and CODE; the invite's JSON is kept without the code
   local j
   j="$(ws compute invite "$@" --no-wait --json --show-code stdout 2> "$WORK/logs/invite-$1.err")"
   INV="$(printf '%s' "$j" | jget invite)"; CODE="$(printf '%s' "$j" | jget code)"; CODES="$CODES $CODE"
+  INVERR="$(printf '%s' "$j" | jget error)"
   printf '%s' "$j" | python3 -c 'import json,sys; d=json.loads(sys.stdin.read() or "{}"); d.pop("code", None); print(json.dumps(d))' > "$WORK/out/invite-$1-$INV.json"
   [ -n "$INV" ] && [ -n "$CODE" ]
 }
@@ -776,14 +786,36 @@ host_rows() {
   run_row H3 "tunnel status: connected; the relay password in no output of the set-up" h_tunnel
   run_row H4 "keys, host-key: the workstation's key under its name, with restrict; the pinned host key is the node's" h_keys
   run_row H5 "unattended-upgrades takes the security pocket only (its own dry run)" h_updates
+  run_row H8 "pair reads the mu user's default release as that user: a symlink to a root-only file sends 'unknown', not its line" h_pairver
 }
 # the faults that status must notice, each put in and taken out again
+# H8 (security review of ff2c707, 10): a throwaway user stands in for mu; DISTRO is the script to source (the fault: a
+# copy that reads as root)
+h_pairver() {
+  local d="${DISTRO:-/usr/local/sbin/mu-wsl2-distro}" leak ok
+  id muvtest > /dev/null 2>&1 || sudo useradd --create-home --shell /bin/bash muvtest
+  sudo install -d -o muvtest -g muvtest /home/muvtest/.local /home/muvtest/.local/share /home/muvtest/.local/share/mu
+  printf 'leakme-1\n' | sudo tee /root/mu-ver-secret > /dev/null; sudo chmod 600 /root/mu-ver-secret
+  sudo ln -sfn /root/mu-ver-secret /home/muvtest/.local/share/mu/default
+  leak="$(sudo bash -c '. "$1"; MU_USER=muvtest; pair_mu_version' sh "$d" 2>&1)"
+  sudo rm -f /home/muvtest/.local/share/mu/default; printf 'v2026.11.99\n' | sudo -u muvtest tee /home/muvtest/.local/share/mu/default > /dev/null
+  ok="$(sudo bash -c '. "$1"; MU_USER=muvtest; pair_mu_version' sh "$d" 2>&1)"
+  M="through a symlink to a root-only file: '$leak'; a regular file: '$ok'"
+  [ "$leak" = unknown ] && [ "$ok" = v2026.11.99 ]
+}
+hf_pairver_on() {
+  sed 's/v="$(runuser -u "$MU_USER" -- head -n 1 /v="$(head -n 1 /' /usr/local/sbin/mu-wsl2-distro > "$WORK/distro-asroot"
+  DISTRO="$WORK/distro-asroot"
+}
+hf_pairver_off() { DISTRO=""; }
 hf_sshd_on() { sshd_edit 's/^PermitTTY no$/PermitTTY yes/'; }
 hf_sshd_off() { sshd_restore; }
 hf_gate_on() { sudo cp /usr/local/lib/mu/mu-node-gate "$WORK/gate.good"; echo '# changed' | sudo tee -a /usr/local/lib/mu/mu-node-gate > /dev/null; }
 hf_gate_off() { sudo cp "$WORK/gate.good" /usr/local/lib/mu/mu-node-gate; }
 hf_testfault_on() { echo nothing | sudo tee /etc/mu/test-fault > /dev/null; }
 hf_testfault_off() { sudo rm -f /etc/mu/test-fault; }
+hf_testhooks_on() { sudo install -m 644 -o root -g root /dev/null /etc/mu/test-hooks; }
+hf_testhooks_off() { sudo rm -f /etc/mu/test-hooks; }
 hf_envmode_on() { sudo chmod 644 /etc/mu/tunnel.env; }
 hf_envmode_off() { sudo chmod 640 /etc/mu/tunnel.env; }
 hf_22_on() { sudo sh -c 'nohup python3 -m http.server 22 --bind 127.0.0.1 > /dev/null 2>&1 & echo $! > /tmp/mu-port22.pid'; sleep 1; }
@@ -792,8 +824,10 @@ hf_tunnel_on() { sudo systemctl stop mu-tunnel.service; }
 hf_tunnel_off() { sudo systemctl start mu-tunnel.service; wait_up 90 > /dev/null; }
 host_faults() {
   must_fail H1 "PermitTTY yes in /etc/mu/sshd_config" hf_sshd_on hf_sshd_off h_status
+  must_fail H8 "the default release read as root" hf_pairver_on hf_pairver_off h_pairver
   must_fail H1 "a line added to the gate" hf_gate_on hf_gate_off h_status
   must_fail H1 "/etc/mu/test-fault present" hf_testfault_on hf_testfault_off h_status
+  must_fail H1 "/etc/mu/test-hooks present" hf_testhooks_on hf_testhooks_off h_status
   must_fail H1 "tunnel.env readable by everyone (0644)" hf_envmode_on hf_envmode_off h_status
   must_fail H1 "something listening on port 22" hf_22_on hf_22_off h_status
   must_fail H1 "the tunnel stopped" hf_tunnel_on hf_tunnel_off h_status
@@ -856,7 +890,7 @@ q_paired() {
 }
 q_typo() {
   local t out rc
-  invite_new q2-pc || { M="invite failed"; return 1; }
+  invite_new q2-pc || { M="invite failed ($INVERR)"; return 1; }
   t="$(printf '%s' "$CODE" | python3 -c 'import sys; c=sys.stdin.read().strip(); i=6; print(c[:i] + ("X" if c[i] != "X" else "Y") + c[i+1:])')"
   out="$(printf '%s\n' "$t" | noderun claim --json 2>/dev/null)"; rc=$?
   M="exit $rc $(printf '%s' "$out" | jget error); the relay: state $(inv_field "$INV" state), wrong claims $(inv_field "$INV" wrong_claims)"
@@ -865,7 +899,7 @@ q_typo() {
 }
 q_wrong() {
   local w out rc
-  invite_new q3-pc || { M="invite failed"; return 1; }
+  invite_new q3-pc || { M="invite failed ($INVERR)"; return 1; }
   w="$(printf '%s' "$CODE" | python3 -I -S -c 'import sys; sys.path.insert(0, sys.argv[1]); from mu import pair
 i, s = pair.parse_code(sys.stdin.read()); print(pair.format_code(i, ("1" if s[0] != "1" else "2") + s[1:]))' "$ROOT/src")"
   snap_node
@@ -876,7 +910,7 @@ i, s = pair.parse_code(sys.stdin.read()); print(pair.format_code(i, ("1" if s[0]
 }
 q_expired() {
   local out rc mac mrc
-  invite_new q4-pc --ttl 1m || { M="invite failed"; return 1; }
+  invite_new q4-pc --ttl 1m || { M="invite failed ($INVERR)"; return 1; }
   snap_node; sleep 65
   out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
   mac="$(mac_wait "$INV" 10)"; mrc=$?
@@ -886,10 +920,11 @@ q_expired() {
 # q_tampered WHAT: the relay changes the offer (WHAT: its fault); the PC must refuse, set nothing up, abort the invite
 q_tampered() {
   local out rc
-  invite_new "q-$1" || { M="invite failed"; return 1; }
+  invite_new "q-$1" || { M="invite failed ($INVERR)"; return 1; }
   snap_node; rfault "$1"
   out="$(printf '%s\n' "$CODE" | PCW=5 noderun run --json 2>/dev/null)"; rc=$?
   rfault
+  ws compute invite --cancel "$INV" --json > /dev/null 2>&1 || true   # the relay aborted it; the Mac's side waits until told
   M="relay fault $1: the PC exit $rc $(printf '%s' "$out" | jget error); node unchanged: $(node_unchanged && echo yes || echo no); invite $(inv_field "$INV" state), relay client q-$1: $(adm GET "/mu/v1/clients/q-$1" | jget error)"
   [ "$rc" = 5 ] && [ "$(printf '%s' "$out" | jget error)" = pair-integrity ] && node_unchanged && [ "$(inv_field "$INV" state)" = aborted ] \
     && [ "$(adm GET "/mu/v1/clients/q-$1" | jget error)" = no-such-client ]
@@ -897,9 +932,15 @@ q_tampered() {
 q_offer_key() { q_tampered tamper-offer; }
 q_offer_fp() { q_tampered tamper-offer-fp; }
 q_offer_url() { q_tampered tamper-offer-url; }
+q_hooks_gated() {   # security review of ff2c707, 6: an environment fault (WSLENV) never reaches root's checks
+  local r; PF=skip-offer-mac,trust-relay-fields; NOHOOKS=1
+  q_tampered tamper-offer; r=$?
+  PF=""; NOHOOKS=""; sudo rm -f /etc/mu/test-hooks
+  M="MU_PAIR_FAULT=skip-offer-mac,trust-relay-fields, no /etc/mu/test-hooks: $M"; return $r
+}
 q_answer_key() {
   local out mac mrc pcrc pid
-  invite_new q9-pc || { M="invite failed"; return 1; }
+  invite_new q9-pc || { M="invite failed ($INVERR)"; return 1; }
   snap_node; rfault tamper-answer
   ( printf '%s\n' "$CODE" | PCW=40 noderun run --json > "$WORK/out/pc-$INV.json" 2> "$WORK/logs/pc-$INV.log"; echo $? > "$WORK/out/pc-$INV.rc" ) &
   pid=$!
@@ -965,6 +1006,7 @@ pair_rows() {
   run_row Q10 "the used code again at the paired node: exit 5 already-paired, no contest, the pairing stands" q_reused
   run_row Q11 "--replace, the Mac's confirm missing: the node exits 0 'not yet confirmed' and undoes nothing; the Mac completes later with --wait" q_noconfirm
   run_row Q12 "no code, relay password or admin token in any sampled argument list, log, journal or the relay's log" q_secrets
+  run_row Q14 "root's pair run ignores MU_PAIR_FAULT without the root-owned /etc/mu/test-hooks: a tampered offer is still refused" q_hooks_gated
 }
 pair_faults() {
   must_fail Q2 "no-check (the node)" 'eval PF=no-check' 'eval PF=""' q_typo
@@ -977,14 +1019,15 @@ pair_faults() {
   must_fail Q10 "forget-done (the node)" 'eval PF=forget-done' qf_reused_off q_reused
   must_fail Q11 "rollback-on-no-confirm (the node)" qf_rollback_on qf_rollback_off q_noconfirm
   must_fail Q12 "code-in-argv (the node)" qf_argv_on qf_argv_off q_secrets
+  must_fail Q14 "the root gate bypassed (/etc/mu/test-hooks present)" 'eval HOOKSFORCE=1' 'eval HOOKSFORCE=""; qf_restore' q_hooks_gated
 }
 qf_restore() { PF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
 qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /dev/null 2>&1; restore_node; }
 qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 check_ran() {
   local want got
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"

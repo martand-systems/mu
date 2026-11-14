@@ -347,6 +347,18 @@ if command -v pwsh > /dev/null 2>&1; then
     printf '%s\n' "$out" | sed 's/^/      /'
     PASS=$((PASS + $(printf '%s\n' "$out" | grep -c '^ok ' || true))); FAILN=$((FAILN + $(printf '%s\n' "$out" | grep -c '^FAIL ' || true) + 1))
   fi
+  # must-fail: the stage folder without C:\Mu's owner check and ACL first (security review of ff2c707, 4)
+  sed '/^function New-StageDir/,/^}/{/^  Initialize-MuDirs$/d;}' "$PS1" > "$TD/stage.ps1"
+  if cmp -s "$PS1" "$TD/stage.ps1"; then bad "must-fail: the stage fault did not apply"
+  elif out="$(pwsh -NoProfile -NonInteractive -File "$HERE/ps-tests.ps1" "$TD/stage.ps1" 2>&1)"; printf '%s\n' "$out" | grep -q '^FAIL  pair stage:'; then
+    ok "must-fail: New-StageDir without Initialize-MuDirs: the stage check fails, as it must"
+  else bad "must-fail: New-StageDir without Initialize-MuDirs: nothing failed"; fi
+  # must-fail: pair's last line as v2026.11.8 had it (the node's own record ignored: "not paired" after exit 4)
+  sed 's/} elseif ($Paired -and $ExitCode -eq 4) {/} elseif ($false) {/; s/} elseif ($Paired) {/} elseif ($false) {/' "$PS1" > "$TD/verdict.ps1"
+  if cmp -s "$PS1" "$TD/verdict.ps1"; then bad "must-fail: the verdict fault did not apply"
+  elif out="$(pwsh -NoProfile -NonInteractive -File "$HERE/ps-tests.ps1" "$TD/verdict.ps1" 2>&1)"; printf '%s\n' "$out" | grep -q '^FAIL  pair verdict: exit 4 after the finish'; then
+    ok "must-fail: pair's last line without the node's record: the exit-4 verdict fails, as it must"
+  else bad "must-fail: pair's last line without the node's record: nothing failed"; fi
 else
   echo "(pwsh not installed: the Windows script is not checked)"
 fi

@@ -118,7 +118,14 @@ func (l *Limits) Unauth(addr string) bool {
 	return take(&l.get(addr).unauth, l.UnauthPerMin, l.now())
 }
 
-// Admin: one admin request (global bucket), and whether addr is held off after failed admin auth.
+// AdminHeldOff: whether addr is held off after failed admin logins.
+func (l *Limits) AdminHeldOff(addr string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.now().Before(l.get(addr).adminUntil)
+}
+
+// Admin: one verified admin request (global bucket), and whether addr is held off after failed admin auth.
 func (l *Limits) Admin(addr string) (ok bool, heldOff bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

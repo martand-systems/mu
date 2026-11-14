@@ -14,15 +14,18 @@ You do not need to know WSL; each step says where to type, what to type and what
 > but on Windows they have only run on a PC that was already set up. If a step prints something this guide does not
 > show, stop and send the window's text and the log in `C:\Mu\logs\` to the lead.
 
-> **Known issues in v2026.11.8, and how this guide routes around them** (to be fixed in the next release):
+> **Known issues of v2026.11.8, fixed in the release after it** (dispatcher rev 10; this guide's lines work with both):
 > 1. `wsl -d mu-compute -u mu --cd ~ -- mu …` fails with **`mu: command not found`**: that kind of command starts a
 >    shell that does not read `~/.profile`, so `~/.local/bin` is not on its PATH. This guide always writes the full
->    path, `/home/mu/.local/bin/mu`. The Mac's `mu compute invite` and some of μ's own hints still print the short
->    form: use the lines in this guide instead.
-> 2. The installer **asks for a sudo password** that the user `mu` does not have when a new release needs a new
->    Ubuntu package. Run the system step as root first (§11.2).
-> 3. The `mu autoupdate on` at the end of an install can fail with systemctl's error hidden in the log (the install
->    ends with `auto-update could not be turned on`). Run it by hand (§7.4).
+>    path, `/home/mu/.local/bin/mu`, and `--cd /home/mu`. From the release after v2026.11.8 the Mac's
+>    `mu compute invite` and μ's own hints print that form too; v2026.11.8 still prints the short form: use the lines
+>    in this guide instead.
+> 2. The installer **asked for a sudo password** that the user `mu` does not have when a new release needs a new
+>    Ubuntu package. The release after v2026.11.8 stops instead and names the `apt-get install` line to run as root
+>    (§11.2 does the same).
+> 3. The `mu autoupdate on` at the end of an install could fail with systemctl's error hidden in the log (the install
+>    ends with `auto-update could not be turned on`). The release after v2026.11.8 shows the error on that line. Run
+>    it by hand (§7.4).
 
 **Contents:** [0 Before you start](#0-before-you-start) · [1 Hardware and BIOS](#1-hardware-and-bios) ·
 [2 Windows](#2-windows) · [3 WSL](#3-install-wsl) · [4 The scripts](#4-put-the-scripts-on-the-pc) ·
@@ -289,7 +292,7 @@ two commands.)*
    (**Terminal (Admin)**):
 
    ```powershell
-   wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu autoupdate on
+   wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu autoupdate on
    ```
 
    Expect `auto-update: on. Daily from HH:MM μ checks … for a newer release, installs it, runs` and two more lines.
@@ -376,16 +379,18 @@ code, made on the Mac and typed at the PC, authenticates all of it; the relay ne
 
    At the office PC, open Terminal (Admin) and type these two lines:
 
-     wsl -d mu-compute -u mu --cd ~ -- mu update
-     powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- mu node host-script) pair
+     wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
+     powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
 
    When it asks for the pairing code, type:
 
      7K3M-Q9TD-4WXR-HN2C-PB8F-ZJ6R
    ```
 
-   **Do not type those two lines as printed** (known issue 1): type the ones in steps 2 and 3 below. They do the
-   same with the full path to `mu`. The Mac keeps waiting and stays awake.
+   These are the lines of steps 2 and 3 below. A Mac on v2026.11.8 prints them without the full path (`-- mu …`,
+   known issue 1): then type the ones in steps 2 and 3 instead. The Mac keeps waiting and stays awake. The PC asks for
+   the code only after `mu update` and the install (10–20 minutes), and the code is valid 30 minutes: you can type
+   steps 2 and 3 first and make the invite when the PC shows `Pairing code (from the Mac):`.
 
    Through Claude Code the command is `mu compute invite office-pc --no-wait --json`; the code then appears in a
    dialog on the Mac's screen, never in Claude's output (`claude/CLAUDE-toolchain.md`, "Pairing a node").
@@ -393,7 +398,7 @@ code, made on the Mac and typed at the PC, authenticates all of it; the relay ne
 2. **At the PC, Terminal (Admin).** First make sure the PC runs the latest release:
 
    ```powershell
-   wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu update
+   wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
    ```
 
    It prints `checking … for the latest release…`, then either `μ v2026.11.N is the latest release. Nothing to do.`
@@ -403,14 +408,14 @@ code, made on the Mac and typed at the PC, authenticates all of it; the relay ne
 3. **Same window.** The pairing line (this exact line worked on the office PC on 2026-11-14):
 
    ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu node host-script) pair
+   powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
    ```
 
    The part in brackets asks μ inside Linux for the Windows path of the release's host script
    (`\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\v2026.11.N\recipe\install\hosts\wsl2\mu-wsl2-host.ps1`);
    PowerShell then runs that script with `pair`. In order, it prints:
 
-   1. `mu WSL2 host: pair (the scripts copied to C:\Mu\stage\v2026.11.N)`: it runs from a copy only administrators
+   1. `mu WSL2 host: pair (the scripts copied to C:\Mu\stage\v2026.11.N-<12 hex digits>)` (v2026.11.8: `C:\Mu\stage\v2026.11.8`): it runs from a copy only administrators
       can change.
    2. The first time only, `== What a process of the distro can reach of Windows now (before the change; saved in
       C:\Mu\logs\windows-reach-before.txt)`.
@@ -503,10 +508,10 @@ only if they pass. Projects keep their pins; jobs hold it off while they run. Th
 `README.md` ("Updates"). To look (**Terminal (Admin)** or PowerShell):
 
 ```powershell
-wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu autoupdate
+wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu autoupdate
 ```
 
-To update now: `wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu update`.
+To update now: `wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update`.
 
 The host scripts in `C:\Mu\host` (Windows) and `/usr/local/sbin/mu-wsl2-distro` (Linux, root) are **not** updated
 by auto-update. How they should take a newer release's copy once jobs have run on the node is still open
@@ -521,13 +526,13 @@ prompt that has no right answer (known issue 2): press Ctrl+C. Then, in **Termin
 the new release (as `mu`, who owns it) and run the system step from it as root (put the new release's name in):
 
 ```powershell
-wsl -d mu-compute -u mu --cd ~ -- git -C /home/mu/mu fetch --tags --quiet
-wsl -d mu-compute -u mu --cd ~ -- git -C /home/mu/mu checkout --quiet v2026.11.N
+wsl -d mu-compute -u mu --cd /home/mu -- git -C /home/mu/mu fetch --tags --quiet
+wsl -d mu-compute -u mu --cd /home/mu -- git -C /home/mu/mu checkout --quiet v2026.11.N
 wsl -d mu-compute -u root -- /home/mu/mu/install.sh --system --user mu
 ```
 
 The last line lists the packages it installs and ends with `system packages: ready`. Then run the update again:
-`wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu update`. *(The office PC hit this with v2026.11.6, which
+`wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update`. *(The office PC hit this with v2026.11.6, which
 added `ostree`; it was installed as root by hand. These three lines have not been run.)*
 
 ### 11.3 Checking the node
@@ -595,7 +600,7 @@ Also remove the deploy key on GitHub (`…/mu/settings/keys`) and, from the Mac,
 
 | What you see | Where | What to do |
 |---|---|---|
-| `mu: command not found` | any `wsl … -- mu …` line | known issue 1: write `/home/mu/.local/bin/mu` instead of `mu` |
+| `mu: command not found` | any `wsl … -- mu …` line (as v2026.11.8 prints them) | known issue 1: write `/home/mu/.local/bin/mu` instead of `mu` |
 | `… is not recognized as the name of a cmdlet …` | PowerShell | a Linux command in PowerShell: use the `wsl -d mu-compute -u … -- …` form |
 | `wsl: command not found`, `powershell: command not found` | a `root@…#` or `mu@…$` prompt | you are in Linux: type `exit` |
 | `wsl --install --no-distribution: exit code N. Restart Windows, then run this script again.` | step 5 | restart Windows, run the same line |
@@ -609,7 +614,7 @@ Also remove the deploy key on GitHub (`…/mu/settings/keys`) and, from the Mac,
 | `WARN distro.running unknown: the startup task has not run successfully since WSL started …` | `status` | wait 5 minutes, or `Start-ScheduledTask -TaskPath \mu\ -TaskName mu-compute` (Terminal (Admin)), then `status` again |
 | `FAIL distro.running … is not running` | `status` | the same; if it stays, `FAIL task.last-run` names the task's error |
 | `FAIL vm.memory` / `FAIL vm.processors` | `status` | `.wslconfig` was changed but WSL not restarted: `test-stop` |
-| `FAIL linux.node.limits memory limit not proven …` | `status` | `wsl -d mu-compute -u mu --cd ~ -- /home/mu/.local/bin/mu node selftest`. Jobs are refused until it passes. On a WSL older than 2.9.5 the fix is `kernelCommandLine = cgroup_no_v1=all` in `.wslconfig`, then `test-stop` (`docs/design/first-job-checklist.md` A.2) |
+| `FAIL linux.node.limits memory limit not proven …` | `status` | `wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node selftest`. Jobs are refused until it passes. On a WSL older than 2.9.5 the fix is `kernelCommandLine = cgroup_no_v1=all` in `.wslconfig`, then `test-stop` (`docs/design/first-job-checklist.md` A.2) |
 | `FAIL linux.tunnel …` after pairing | `status` | `wsl -d mu-compute -u root -- /usr/local/sbin/mu-wsl2-distro tunnel status` gives the reason; usually the network or the relay. It reconnects by itself |
 | `FAIL linux.node.disk … GB free …` | `status` | free space on `C:`; old job folders are in `/srv/mu/jobs` |
 | from the Mac, `mu compute status` exit 4 | Mac | the PC is off, asleep, or the distro is not running: `status` at the PC |

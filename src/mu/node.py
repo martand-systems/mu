@@ -632,7 +632,7 @@ def verb_submit(key, args):
                 return {"ok": True, "job_id": job_id, "state": s["state"], "position": s["position"], "duplicate": True}
             set_aside(job_id, "its job.json is unreadable; submitted again")
         if runner_state() != "active" and not fault("start-on-submit") and not fault("job-in-session"):
-            raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu node enable",
+            raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "on the PC: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node enable",
                             message="the job runner (mu-node.service) is not running")
         disk = disk_info(node)
         if disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]:
@@ -641,11 +641,11 @@ def verb_submit(key, args):
                             largest=largest_jobs())
         if not limits_ok(node) and not fault("skip-limits-check"):
             raise NodeError(proto.NODE_UNAVAILABLE, "limits-unavailable",
-                            "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu node selftest (design §19 step 1)",
+                            "on the PC: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node selftest (design §19 step 1)",
                             message="the node cannot enforce a job's memory limit (self-test: %s)" % (
                                 (node.get("selftest") or {}).get("detail") or "not run since this boot"))
         if spec["mu_version"] not in installed_versions():
-            raise NodeError(proto.NODE_TOOLCHAIN, "toolchain-missing", "on the PC: wsl -d mu-compute -u mu --cd ~ -- mu install %s"
+            raise NodeError(proto.NODE_TOOLCHAIN, "toolchain-missing", "on the PC: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu install %s"
                             % spec["mu_version"], message="μ %s is not installed on the node" % spec["mu_version"],
                             installed=installed_versions())
         check_snapshot(spec)
@@ -1559,7 +1559,7 @@ def cmd_host_script(as_json):
         text = ""
     if not v or not re.search(r"ValidateSet\([^)]*'pair'", text):
         sys.stderr.write("mu node host-script: the default μ %s has no host script with the pair action\n    next: run: "
-                         "mu update\n" % (v or "(none)"))
+                         "wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update\n" % (v or "(none)"))
         return 3
     real = os.path.realpath(script)
     if any(c in real for c in "\"'`$\n\r") or not real.startswith("/"):

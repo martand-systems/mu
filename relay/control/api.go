@@ -124,36 +124,60 @@ func (r *Relay) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.serveAdmin(w, req, seg, body, from)
 }
 
-// adminOK checks the bearer token; it writes the error itself.
+// adminOK checks the bearer token; it writes the error itself. The order matters (security review of ff2c707, finding
+// 1): an address held off after failed logins is refused first; a request is charged to its address's unauthenticated
+// bucket, and a missing or malformed header counts as a failed login, until its token verifies; only a verified request
+// takes from the global admin bucket. So nobody without the token can empty the bucket the owner's requests need.
 func (r *Relay) adminOK(w http.ResponseWriter, req *http.Request, from string) bool {
-	if okRate, heldOff := r.limits.Admin(from); !okRate {
-		if heldOff {
-			writeErr(w, errf(429, "rate-limited", "too many failed admin logins from this address: wait 15 minutes"))
-		} else {
-			writeErr(w, errf(429, "rate-limited", "too many admin requests"))
+	if fault("admin-bucket-first") {
+		if okRate, heldOff := r.limits.Admin(from); !okRate {
+			if heldOff {
+				writeErr(w, errf(429, "rate-limited", "too many failed admin logins from this address: wait 15 minutes"))
+			} else {
+				writeErr(w, errf(429, "rate-limited", "too many admin requests"))
+			}
+			return false
 		}
+	} else if r.limits.AdminHeldOff(from) {
+		writeErr(w, errf(429, "rate-limited", "too many failed admin logins from this address: wait 15 minutes"))
 		return false
 	}
 	h := req.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
-		writeErr(w, errf(401, "admin-required", "this needs the admin token"))
-		return false
-	}
-	given := strings.TrimPrefix(h, "Bearer ")
+	given, hasBearer := strings.CutPrefix(h, "Bearer ")
 	var good bool
-	if fault("admin-prefix") {
+	switch {
+	case !hasBearer:
+	case fault("admin-prefix"):
 		good = len(given) >= 8 && len(r.cfg.AdminToken) >= 8 && given[:8] == r.cfg.AdminToken[:8]
-	} else {
+	default:
 		g := sha256.Sum256([]byte(given))
 		good = subtle.ConstantTimeCompare(g[:], r.token[:]) == 1
 	}
 	if !good {
-		r.limits.AdminFailed(from)
+		if !fault("admin-bucket-first") {
+			r.limits.AdminFailed(from)
+			if !r.limits.Unauth(from) {
+				writeErr(w, errf(429, "rate-limited", "too many requests from this address"))
+				return false
+			}
+		} else if hasBearer {
+			r.limits.AdminFailed(from)
+		}
+		if !hasBearer {
+			writeErr(w, errf(401, "admin-required", "this needs the admin token"))
+			return false
+		}
 		r.mu.Lock()
 		r.event("", "admin token refused", from, "")
 		r.mu.Unlock()
 		writeErr(w, errf(403, "admin-refused", "the admin token was refused"))
 		return false
+	}
+	if !fault("admin-bucket-first") {
+		if okRate, _ := r.limits.Admin(from); !okRate {
+			writeErr(w, errf(429, "rate-limited", "too many admin requests"))
+			return false
+		}
 	}
 	return true
 }
@@ -618,7 +642,9 @@ func (r *Relay) putClient(name, role, password string, ports []int) (int, error)
 			r.stripPort(s, old.Ports[0])
 		}
 		s.Clients[name] = &DynClient{Role: role, Password: password, Ports: sortedInts(ports), Created: r.unix(), Via: "put"}
-		delete(s.Tombstones, name)
+		if fault("untombstone") { // a tombstone stays (see install)
+			delete(s.Tombstones, name)
+		}
 		if exists {
 			// any change to an existing client may take access away: its old sessions must go (§6.7)
 			t.evictFor(name + " replaced")

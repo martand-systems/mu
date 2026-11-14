@@ -37,6 +37,9 @@ tamper-offer-fp|TestOfferAndAnswerUnchanged
 tamper-offer-url|TestOfferAndAnswerUnchanged
 any-claim|TestWrongCodeSameAsUnknownAndLockout
 evil-text|TestErrorTextIsFixed
+admin-bucket-first|TestAdminBucketNotStarved
+untombstone|TestTombstoneOutlivesDynamicClient
+bad-state-fatal|TestParseableBadStateDoesNotStopTheRelay
 '
 go test -count=1 -tags faults ./... > /dev/null 2>&1 || { echo "FAIL  the faults build fails with no fault set"; N_FAIL=$((N_FAIL + 1)); }
 while IFS='|' read -r f tests; do

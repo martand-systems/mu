@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(REPO, "src"))
+SRC = os.environ.get("MU_TEST_SRC") or os.path.join(REPO, "src")   # run.sh: a patched copy for a must-fail
+sys.path.insert(0, SRC)
 sys.path.insert(0, HERE)
 sys.dont_write_bytecode = True
 
@@ -413,6 +415,17 @@ def read(p):
         return ""
 
 
+def wait_file(p, text, s=5.0):
+    """The file's text once it contains TEXT (a stub that runs in the background writes it), or after S seconds."""
+    end = time.time() + s
+    while time.time() < end:
+        t = read(p)
+        if text in t:
+            return t
+        time.sleep(0.1)
+    return read(p)
+
+
 def wrong_secret(code):
     """The same id with another secret and a valid check: looks right, is wrong."""
     iid, sec = pair.parse_code(code)
@@ -505,7 +518,8 @@ def flow(E):
     n_contest = sum(1 for (m, pth, b) in S.log if pth.endswith("/contest"))
     rc, out, err = E.pc("run", code, state="pc")
     ok("the paired PC runs the old code again: exit 5 already-paired, no contest, its relay client stays",
-       rc == 5 and jl(out).get("error") == "already-paired" and "office-pc" in S.dynamic and n_contest ==
+       rc == 5 and jl(out).get("error") == "already-paired" and jl(out).get("invite") == iid and "office-pc" in S.dynamic
+       and n_contest ==
        sum(1 for (m, pth, b) in S.log if pth.endswith("/contest")), out + err)
 
     # ---- typo, wrong secret
@@ -552,6 +566,8 @@ def flow(E):
     E.post("/test/expire", {"id": j4.get("invite")})
     rc, out, err = E.pc("run", j4.get("code") or "", state="pc-exp")
     ok("an expired code: exit 9 invite-expired at the PC", rc == 9 and jl(out).get("error") == "invite-expired", out + err)
+    ok("  its next step: a new code on the Mac, then this same line again", "then run this same line again here"
+       in jl(out).get("next", ""), jl(out).get("next"))
     rc, out, err = E.mu(["compute", "invite", "--wait", j4.get("invite"), "--json", "--timeout", "5"])
     ok("  and at the Mac (exit 9), the staging folder gone", rc == 9 and not os.path.exists(os.path.join(
         home, "relay", "invites", j4.get("invite"))), out + err)
@@ -615,7 +631,7 @@ def flow(E):
     # ---- the code is shown in a dialog (osascript, on stdin), not in --json output, unless --show-code stdout
     rc, out, err = E.mu(["compute", "invite", "d-pc", "--no-wait", "--json"])
     jd = jl(out)
-    dialog = read(os.path.join(E.stub, "osascript.in"))
+    dialog = wait_file(os.path.join(E.stub, "osascript.in"), jd.get("invite", "????"))
     ok("--json without --show-code: the code is null in the output and goes to the dialog on stdin",
        rc == 0 and jd.get("code") is None and jd.get("invite", "????") in dialog, out)
     ok("  osascript got no argument with the code", jd.get("invite", "????") not in read(os.path.join(E.stub, "osascript-argv.log")))
@@ -670,13 +686,146 @@ def flow(E):
         read(os.path.join(E.stub, "osascript-argv.log"))
     secrets_ = [E.token, E.ws_pw] + [x.get("password") for x in S.dynamic.values() if x.get("password")]
     codes = [c for c in [code, code3, j4.get("code"), j7.get("code"), j8.get("code")] if c]
-    leaked = [s[:6] for s in secrets_ + codes + [c.replace("-", "") for c in codes] if s and s in argv_logs]
-    ok("no code, token or password in any argument list (distro, security, osascript)", not leaked, leaked)
+    # the invite's MAC keys (what the Keychain holds instead of the code, security review 5) are secrets too
+    mac_keys = []
+    for c in codes:
+        pc_ = pair.parse_code(c)
+        if pc_:
+            kk = pair.keys(pc_[1], pc_[0])
+            mac_keys += [kk["ic"].hex(), kk["ci"].hex(), kk["claim"]]
+    leaked = [s[:6] for s in secrets_ + codes + [c.replace("-", "") for c in codes] + mac_keys if s and s in argv_logs]
+    ok("no code, MAC key, token or password in any argument list (distro, security, osascript)", not leaked, leaked)
     allout = "\n".join(E.outputs)
     leaked = [s[:6] for s in secrets_ if s in allout]
     ok("no token or relay password in any output of any command", not leaked, leaked)
     pc_out = "".join(o for o in E.outputs if '"inviter"' in o or "mu-pair" in o)
     ok("the PC side never prints the code", not any(c in pc_out for c in codes))
+
+
+# ================================================================================================ review (ff2c707)
+def sec_review():
+    E = Env()
+    try:
+        review(E)
+    finally:
+        E.close()
+
+
+def pair_one(E, node, *extra, **kw):
+    """invite NODE --no-wait, the PC's run, the Mac's --wait. -> (invite json, Mac rc, Mac json)."""
+    rc, j, err = E.invite(node, *extra, **kw)
+    if rc != 0:
+        return j, rc, {"error": "invite failed: %s %s" % (j, err)}
+    pc = E.pc("run", j.get("code") or "", state="pc-" + node, bg=True)
+    time.sleep(1.5)
+    rc, out, err = E.mu(["compute", "invite", "--wait", j["invite"], "--json", "--timeout", "30"], **kw)
+    E.finish_pc(pc)
+    return j, rc, jl(out)
+
+
+def review(E):
+    """The fixes of the security and usability reviews of ff2c707 (docs/design/pairing.md §17)."""
+    S = E.srv.st
+    home = os.path.join(E.root, "mu home")
+    kc = os.path.join(E.root, "keychain")
+    E.login()
+
+    # security 5: the Keychain item of an invite holds the MAC keys, never the code
+    rc, j, err = E.invite("k-pc")
+    code, iid = j.get("code") or "", j.get("invite") or "????"
+    items = [f for f in os.listdir(kc) if iid in f]
+    held = read(os.path.join(kc, items[0])) if items else ""
+    sec = (pair.parse_code(code) or ("", "????"))[1]
+    ok("security 5: the invite's Keychain item holds two MAC keys, not the code (nor its secret)",
+       len(items) == 1 and held.startswith("k1:") and code not in held and sec not in held and sec not in
+       held.replace("-", ""), held[:12])
+    pc = E.pc("run", code, state="pc-k", bg=True)
+    time.sleep(1.5)
+    rc, out, err = E.mu(["compute", "invite", "--wait", iid, "--json", "--timeout", "30"])
+    E.finish_pc(pc)
+    ok("  --wait completes the pairing with the keys alone", rc == 0 and jl(out).get("state") == "finished", out + err)
+    rc, out, err = E.pc("status", "", state="pc-k")
+    ok("usability 5: the PC's pair status --json lists the invite it finished (pair's last line at the PC reads it)",
+       rc == 0 and iid in (jl(out).get("done") or []), out + err)
+
+    # usability 2c: --wait again after the folder is gone (a run killed after finish): exit 0, finished
+    rc, out, err = E.mu(["compute", "invite", "--wait", iid, "--json", "--timeout", "5"])
+    ok("usability 2: --wait of an invite this computer finished: exit 0 finished, the node named",
+       rc == 0 and jl(out).get("state") == "finished" and jl(out).get("node") == "k-pc", out + err)
+
+    # security 7: the relay's "finished" alone is not a pairing
+    rc, j, err = E.invite("f-pc")
+    E.post("/test/state", {"id": j.get("invite"), "state": "finished"})
+    rc, out, err = E.mu(["compute", "invite", "--wait", j.get("invite"), "--json", "--timeout", "5"])
+    ok("security 7: the relay says finished, this computer installed nothing: exit 5 not-installed, no node folder",
+       rc == 5 and jl(out).get("error") == "not-installed" and not os.path.exists(os.path.join(home, "compute", "f-pc")),
+       out + err)
+
+    # security 3b: compute remove deletes only a client whose port is the node's
+    j, rc, jm = pair_one(E, "p-pc")
+    ok("  (p-pc paired)", rc == 0, jm)
+    S.dynamic["p-pc"]["ports"] = [7077]   # the relay's p-pc is another machine's client now
+    rc, out, err = E.mu(["compute", "remove", "p-pc", "--json"])
+    ok("security 3: compute remove of a node whose relay client of that name has another port: kept",
+       rc == 0 and jl(out).get("relay_client") == "kept" and "p-pc" in S.dynamic and "7077" in jl(out).get(
+           "relay_detail", "") and "uses 7" in jl(out).get("relay_detail", ""), out + err)
+
+    # security 3a: a node that replaced a static client of its name: removing it removes the static one too
+    S.static["s-pc"] = {"role": "compute", "ports": [7009], "password": "static-s-pc-password-0123456789"}
+    j, rc, jm = pair_one(E, "s-pc", "--replace")
+    ok("  (s-pc paired over the static s-pc with --replace)", rc == 0 and S.dynamic.get("s-pc", {}).get("via", "")
+       .startswith("invite"), jm)
+    rc, out, err = E.mu(["compute", "remove", "s-pc", "--json"])
+    ok("security 3: compute remove of a node that replaced a static client: the static one is tombstoned too",
+       rc == 0 and jl(out).get("relay_client") == "removed" and "s-pc" not in S.dynamic and "s-pc" in S.tombstones,
+       out + err)
+
+    # usability 3: a dialog that cannot be shown: refused, the invite cancelled
+    bad = os.path.join(E.stub, "osascript-fails")
+    with open(bad, "w") as f:
+        f.write("#!/bin/sh\ncat > /dev/null\necho 'no GUI session' >&2\nexit 1\n")
+    os.chmod(bad, 0o755)
+    rc, out, err = E.mu(["compute", "invite", "g-pc", "--no-wait", "--json"], MU_OSASCRIPT=bad)
+    jg = jl(out)
+    gone = not [n for n in os.listdir(os.path.join(home, "relay", "invites")) if n not in ("",)
+                if (jl(read(os.path.join(home, "relay", "invites", n, "invite.json"))) or {}).get("node") == "g-pc"]
+    ok("usability 3: osascript fails: exit 1 no-dialog, the invite aborted at the relay, nothing left here",
+       rc == 1 and jg.get("error") == "no-dialog" and all(x["state"] == "aborted" for x in S.invites.values()
+                                                          if x["name"] == "g-pc") and gone, out + err)
+
+    # usability 1: --json without --no-wait shows the PC lines and (with --show-code stdout) the code on stderr
+    rc, out, err = E.mu(["compute", "invite", "w-pc", "--json", "--show-code", "stdout", "--timeout", "2"])
+    jw = jl(out)
+    wcode = (re.findall(r"Pairing code: (\S+)", err) or [""])[0]
+    ok("usability 1: --json, waiting: stderr has both PC lines and the code; still-waiting JSON has pc_commands",
+       rc == 10 and "mu update" in err and "host-script) pair" in err and pair.parse_code(wcode) and
+       len(jw.get("pc_commands", [])) == 2, err)
+
+    # usability 14: a second invite for a node with one waiting: refused unless --again
+    rc, j2, err = E.invite("w-pc")
+    ok("usability 14: a second invite while one waits: exit 2 invite-pending, the waiting id in next",
+       rc == 2 and j2.get("error") == "invite-pending" and jw.get("invite", "????") in j2.get("next", ""), j2)
+    rc, j3, err = E.invite("w-pc", "--again")
+    ok("  --again makes it; expires is UTC (Z)", rc == 0 and str(j3.get("expires", "")).endswith("Z"), j3)
+
+    # usability 14: --wait with a whole code: no part of it echoed
+    rc, out, err = E.mu(["compute", "invite", "--wait", wcode or "ABCD-EFGH", "--json"])
+    ok("usability 14: --wait given a whole code: exit 2, the code not echoed", rc == 2 and
+       (wcode or "ABCD-EFGH")[5:] not in out + err and (wcode or "ABCD")[:4] not in out + err, out + err)
+
+    # security 6: as root, the environment's test hooks count only with the root-owned marker
+    env = dict(os.environ, MU_PAIR_AS_ROOT="1", MU_PAIR_FAULT="skip-offer-mac,trust-relay-fields",
+               MU_PAIR_CONFIRM_WAIT="3", MU_PAIR_TEST_HTTP="1")
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); from mu import pair; "
+             "print(sorted(pair.faults()), pair.hook('MU_PAIR_CONFIRM_WAIT'), pair.test_http())")
+    p = subprocess.run([PY, "-I", "-S", "-c", probe, SRC], env=env, capture_output=True)
+    ok("security 6: as root without %s, MU_PAIR_FAULT, the waits and plain http are ignored" % pair.TEST_HOOKS_MARKER,
+       os.path.exists(pair.TEST_HOOKS_MARKER) or p.stdout.decode().strip() == "[] None False", p.stdout + p.stderr)
+    env.pop("MU_PAIR_AS_ROOT")
+    p = subprocess.run([PY, "-I", "-S", "-c", probe, SRC], env=env, capture_output=True)
+    ok("  as another user they count, and active faults are announced on stderr",
+       p.stdout.decode().startswith("['skip-offer-mac', 'trust-relay-fields'] 3") and b"TEST FAULTS ACTIVE" in p.stderr,
+       p.stdout + p.stderr)
 
 
 def _post(E, path, body):
@@ -687,7 +836,7 @@ def _post(E, path, body):
 Env.post = _post
 
 SECTIONS = {"code": sec_code, "vectors": sec_vectors, "fields": sec_fields, "reflection": sec_reflection,
-            "offer": sec_offer, "http": sec_http, "flow": sec_flow}
+            "offer": sec_offer, "http": sec_http, "flow": sec_flow, "review": sec_review}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(SECTIONS)

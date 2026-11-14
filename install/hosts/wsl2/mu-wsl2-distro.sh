@@ -51,6 +51,8 @@
 #   --no-wsl             not a WSL distro (the CI runner): leave out the Windows steps and checks (interop, drives)
 #   --wait SECONDS       tunnel credential: how long to wait for the tunnel to connect (default 30)
 #   --from-host          install: run by mu-wsl2-host.ps1, which says how to restart (this script then does not)
+#   --from-pair          install: run by mu-wsl2-host.ps1 pair, where the relay credential comes from the pairing code
+#                        next (this script then does not tell the owner to do the manual steps)
 #   --relay URL          pair: the relay (default https://relay.martand.systems)
 #
 # What install does, each step only when needed:
@@ -87,7 +89,7 @@ set -euo pipefail
 MU_USER="mu"
 REPO="git@github.com:martand-systems/mu.git"
 BRANCH=""; CLONE=0; INSTALL_MU=0; HEARTBEAT=""; JSON=0; OFFLINE=0; GAP=90
-NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""; FROM_HOST=0; RELAY_URL_ARG="https://relay.martand.systems"
+NO_WSL=0; HOST_DRIVE=""; NODE_NAME=""; WAIT=30; ARG1=""; ARG2=""; FROM_HOST=0; FROM_PAIR=0; RELAY_URL_ARG="https://relay.martand.systems"
 # [automount] options: Windows drives mounted for root only (§13.4); mu can still ask their free space (statfs)
 AUTOMOUNT_OPTIONS='"uid=0,gid=0,umask=077"'
 STATE_DIR="/var/lib/mu-wsl2"
@@ -558,6 +560,7 @@ CHANGED=0; RESTART=0
 changed() { CHANGED=$((CHANGED + 1)); printf '  changed  %s\n' "$*"; }
 same() { printf '  ok       %s\n' "$*"; }
 warn() { printf '  warning  %s\n' "$*"; }
+info() { printf '  info     %s\n' "$*"; }
 die() { printf 'mu-wsl2-distro: %s\n' "$*" >&2; exit 1; }
 step() { printf '\n== %s\n' "$*"; }
 systemd_running() { [ "$(cat /proc/1/comm 2>/dev/null)" = systemd ]; }
@@ -662,12 +665,21 @@ ensure_user() {
   fi
 }
 
+# interop_live: root can start a Windows program now (as status's reach.root checks)
+interop_live() {
+  local exe; exe="$(reach_mount)/Windows/System32/whoami.exe"
+  [ -f "$exe" ] && timeout 20 "$exe" > /dev/null 2>&1 < /dev/null
+}
+
 ensure_wsl_conf() {
   local f=/etc/wsl.conf tmp
   mkdir -p "$STATE_DIR"
   tmp="$(mktemp)"
   if [ -f "$f" ]; then cat "$f"; fi | wsl_conf_merge "$MU_USER" "$NO_WSL" > "$tmp"
-  if [ -f "$f" ] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; same "/etc/wsl.conf: systemd, default user $MU_USER, no Windows PATH$([ "$NO_WSL" = 1 ] || echo ', interop off, drives for root only')"; return 0; fi
+  if [ -f "$f" ] && cmp -s "$tmp" "$f"; then rm -f "$tmp"; same "/etc/wsl.conf: systemd, default user $MU_USER, no Windows PATH$([ "$NO_WSL" = 1 ] || echo ', interop off, drives for root only')"
+    # written by an earlier run whose restart did not happen: interop is still on, so the restart is still needed
+    if [ "$NO_WSL" = 0 ] && interop_live; then RESTART=1; info "interop is still on (the restart after wsl.conf did not happen yet): the distro needs a restart"; fi
+    return 0; fi
   if [ ! -e "$STATE_DIR/wsl.conf.orig" ] && [ ! -e "$STATE_DIR/wsl.conf.absent" ]; then
     if [ -f "$f" ]; then cp -p "$f" "$STATE_DIR/wsl.conf.orig"; else : > "$STATE_DIR/wsl.conf.absent"; fi
   fi
@@ -1237,7 +1249,8 @@ ensure_tunnel() {
   else same "mu-tunnel.service"; fi
   refresh_units
   if [ ! -f "$TUNNEL_ENV" ]; then
-    warn "no relay credential yet: the tunnel starts once it has one. Run: mu-wsl2-distro tunnel credential (it reads the lines of relay/gen-credentials.sh client <node> from stdin, never from an argument)"
+    if [ "$FROM_PAIR" = 1 ]; then info "the relay credential comes from the pairing code (next)"
+    else warn "no relay credential yet: the tunnel starts once it has one. Run: mu-wsl2-distro tunnel credential (it reads the lines of relay/gen-credentials.sh client <node> from stdin, never from an argument)"; fi
     return 0
   fi
   fix_owner_mode "$TUNNEL_ENV" "root:$TUNNEL_USER" 640
@@ -1270,7 +1283,7 @@ ensure_node_enabled() {
   local mubin name cur out rc=0
   mubin="$(mu_bin_of)"
   if ! mu_job_layer; then
-    warn "μ of $MU_USER has no job layer yet (it comes with the release after v2026.11.6; μ updates itself daily, or now: wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu update). Then run install again: it enables the runner"
+    warn "μ of $MU_USER has no job layer yet (it comes with the release after v2026.11.6; μ updates itself daily, or now: wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu update). Then run install again: it enables the runner"
     return 0
   fi
   if ! user_manager_up; then warn "$MU_USER's systemd user manager is not running (linger, a restart of the distro): the runner is enabled by the next install"; return 0; fi
@@ -1323,8 +1336,9 @@ do_install() {
   if [ "$CHANGED" = 0 ]; then echo "mu-wsl2-distro: nothing to change, already set up."
   else echo "mu-wsl2-distro: $CHANGED change(s)."; fi
   if [ "$RESTART" = 1 ] && [ "$FROM_HOST" = 0 ]; then echo "Restart the distro to apply them (from Windows, cleanly: C:\\Mu\\host\\mu-wsl2-host.ps1 test-stop)."; fi
-  # what is left for the job layer, in order
-  if [ ! -f "$TUNNEL_ENV" ]; then echo "Next: the relay credential, on stdin: mu-wsl2-distro tunnel credential"
+  # what is left for the job layer, in order (pair does both: nothing to tell)
+  if [ "$FROM_PAIR" = 1 ]; then :
+  elif [ ! -f "$TUNNEL_ENV" ]; then echo "Next: the relay credential, on stdin: mu-wsl2-distro tunnel credential"
   elif [ ! -s "$KEYS_DIR/$MU_USER" ]; then echo "Next: authorise a workstation: mu-wsl2-distro authorize <name> '<public key printed by mu compute add>' (the host key for it: mu-wsl2-distro host-key)"; fi
 }
 
@@ -1669,9 +1683,10 @@ status_jobs() {
     else check fail updates "unattended-upgrades: Unattended-Upgrade '$v', not security: '$(printf '%s' "$bad" | tr '\n' ' ')', apt-daily-upgrade.timer $u (run install)"; fi
   else check fail updates "unattended-upgrades or $UU_CONF missing (run install)"; fi
   if [ -e "$TEST_FAULT" ]; then check fail test-fault "$TEST_FAULT exists: a test hook that must never be on a real node (rm $TEST_FAULT)"; fi
+  if [ -e "$ETC_MU/test-hooks" ]; then check fail test-fault "$ETC_MU/test-hooks exists: root's pairing client then obeys MU_PAIR_* test hooks, which must never happen on a real node (rm $ETC_MU/test-hooks)"; fi
   # the runner, the limits, the gate's answer
   if ! mu_job_layer; then
-    check warn node.runner "μ of $MU_USER has no job layer yet (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu update; then install again)"
+    check warn node.runner "μ of $MU_USER has no job layer yet (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu update; then install again)"
     return 0
   fi
   if user_manager_up; then
@@ -1680,7 +1695,7 @@ status_jobs() {
     else check fail node.runner "mu-node.service is $v (run install: it runs mu node enable as $MU_USER)"; fi
     info="$(as_mu_sd "$(mu_bin_of)" node info --json 2> /dev/null || true)"
     if [ "$(printf '%s' "$info" | json_get limits.memory)" = true ]; then check pass node.limits "memory limit enforced: $(printf '%s' "$info" | json_get limits.selftest_detail)"
-    else check fail node.limits "memory limit not proven: $(printf '%s' "$info" | json_get limits.selftest_detail) (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd ~ -- mu node selftest; §19 step 1)"; fi
+    else check fail node.limits "memory limit not proven: $(printf '%s' "$info" | json_get limits.selftest_detail) (wsl -d ${WSL_DISTRO_NAME:-<distro>} -u $MU_USER --cd $(user_home "$MU_USER") -- $(user_home "$MU_USER")/.local/bin/mu node selftest; §19 step 1)"; fi
     free="$(printf '%s' "$info" | json_get disk.free_gb)"; min="$(printf '%s' "$info" | json_get disk.min_free_gb)"
     where="$(printf '%s' "$info" | json_get disk.where)"; host="$(printf '%s' "$info" | json_get disk.host)"
     if [ -n "$free" ] && [ -n "$min" ] && [ "$free" -ge "$min" ]; then check pass node.disk "$free GB free at $where (jobs need $min)${host:+, Windows drive $host}"
@@ -1984,6 +1999,16 @@ cmd_windows_reach() {
   [ "$nfail" = 0 ]
 }
 
+# pair_mu_version: the default release of MU_USER, as pair sends it (unknown when unreadable or odd). Read as MU_USER:
+# ~/.local/share/mu/default is that user's file, and a symlink there must not make root read another file and send its
+# first line to the relay (security review of ff2c707, 10; tools/test-jobs/e2e.sh H8)
+pair_mu_version() {
+  local v
+  v="$(runuser -u "$MU_USER" -- head -n 1 "$(mu_home_of)/default" 2> /dev/null < /dev/null || true)"
+  case "$v" in ''|*[!A-Za-z0-9._-]*|?????????????????????????????????????????????????????????????????*) v=unknown ;; esac
+  printf '%s\n' "$v"
+}
+
 # pair claim|finish|run|abort|status: the node's side of pairing by one code (docs/design/pairing.md §9.3). The code
 # comes on stdin (a terminal: asked without echo); mu-pair.py calls this script back for the credential, the key and the
 # tunnel's state. Exit codes are mu-pair.py's: 0 paired, 2 typo or usage, 4 unreachable, 5 refused, 9 expired
@@ -1993,8 +2018,7 @@ cmd_pair() {
   [ -f "$PAIR_PY" ] || fail_with 1 "the pairing client $PAIR_PY is missing" "run mu-wsl2-distro install (from the release that has pairing)"
   [ -x "$py" ] || py="$(command -v python3 || true)"
   [ -n "$py" ] || fail_with 1 "python3 is missing" "apt-get install python3-minimal"
-  ver="$(head -n 1 "$(mu_home_of)/default" 2> /dev/null || true)"
-  case "$ver" in ''|*[!A-Za-z0-9._-]*) ver=unknown ;; esac
+  ver="$(pair_mu_version)"
   set -- "$ARG1" --relay "$RELAY_URL_ARG" --mu-version "$ver"
   [ "$JSON" = 0 ] || set -- "$@" --json
   # a clean environment: nothing of the caller's reaches root's Python but the test hooks named here
@@ -2037,6 +2061,7 @@ main() {
       --node-name) NODE_NAME="${2:-}"; shift 2 ;;
       --wait) WAIT="${2:-}"; shift 2 ;;
       --from-host) FROM_HOST=1; shift ;;
+      --from-pair) FROM_PAIR=1; shift ;;
       --relay) RELAY_URL_ARG="${2:-}"; shift 2 ;;
       *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac

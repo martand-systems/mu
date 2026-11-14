@@ -48,7 +48,10 @@ DEFAULT_PORT = 7001
 CALL_TIMEOUT = 300
 ANSWER_CAP = 1 << 20          # a JSON answer of the node: at most 1 MB is read (review finding 5)
 RESULT_CAP = durable.MAX_RECORD + (1 << 16)   # fetch what=result: the record (16 MB at most) in one tar member
-PC_MU = "wsl -d mu-compute -u mu --cd ~ --"       # what the owner types at the PC (PowerShell), as mu or as root
+PC_MU = "wsl -d mu-compute -u mu --cd /home/mu --"   # what the owner types at the PC (PowerShell), as mu or as root
+# wsl ... -- CMD runs a non-login shell, whose PATH lacks ~/.local/bin: mu is named by its full path (seen at the
+# first visit: "mu: command not found"). No ~ either: a newer PowerShell may expand it to the Windows home
+PC_MUCMD = PC_MU + " /home/mu/.local/bin/mu"
 PC_ROOT = "wsl -d mu-compute -u root --"
 LARGE_UNTRACKED = 100 << 20   # the snapshot's uncommitted and untracked files above which submit asks --allow-large
 KEEP_SNAP_REFS = 10           # refs/mu/snap/* of accepted jobs kept in this clone (all unaccepted ones are kept)
@@ -113,7 +116,7 @@ def load_node(name):
     conf = read_conf(os.path.join(node_dir(name), "node.conf"))
     if conf is None:
         raise MuError(proto.EXIT_NO_SUCH, "no-such-node", "no compute node '%s' is paired with this computer" % name,
-                      "mu compute list; pair one with: mu compute add %s --host-key ... --relay ..." % name)
+                      "mu compute list; pair one: mu compute invite %s (docs/design/first-job-checklist.md)" % name)
     conf["_dir"] = node_dir(name)
     return conf
 
@@ -129,8 +132,7 @@ def pick_node(on):
         return load_node(nodes[0])
     if not nodes:
         raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired with this computer",
-                      "mu compute add <node> --host-key '...' --relay URL --relay-fingerprint FP --relay-user NAME "
-                      "--relay-password-stdin")
+                      "pair one: mu compute invite <node> (docs/design/first-job-checklist.md)")
     raise MuError(proto.EXIT_USAGE, "which-node", "%d nodes are paired (%s): say which one" % (len(nodes), ", ".join(nodes)),
                   "--on <node>")
 
@@ -387,7 +389,7 @@ class Conn:
         if rc == 255:
             classify_255(self.conf, err, st, muxed)
         raise MuError(proto.EXIT_ERROR, "node-error", "%s answered with exit %d" % (self.name, rc),
-                      "if μ on the node is older than the job layer: on the PC, %s mu update" % PC_MU,
+                      "if μ on the node is older than the job layer: on the PC, %s update" % PC_MUCMD,
                       node_message=proto.clean_text((err.strip() or "(no message)")[-600:], 600))
 
     def call(self, verb, data=None, timeout=CALL_TIMEOUT, **args):
@@ -406,8 +408,8 @@ class Conn:
                           node_message=proto.clean_text(repr(out[:200]), 300))
         if not isinstance(ans, dict):
             raise MuError(proto.EXIT_ERROR, "bad-answer", "%s's answer is not a JSON object" % self.name,
-                          "the node's μ may differ from this one: mu compute status %s; on the PC: %s mu update"
-                          % (self.name, PC_MU))
+                          "the node's μ may differ from this one: mu compute status %s; on the PC: %s update"
+                          % (self.name, PC_MUCMD))
         return proto.clean_obj(ans)   # every string from the node: no control characters, length-capped
 
     def stream(self, request, on_data, data=None):
@@ -548,10 +550,25 @@ RELAY_REASONS = {
 }
 
 
+def by_invite(conf):
+    """Was this node paired by one code (mu compute invite)? Its remedies differ from a node paired by hand."""
+    return str((conf or {}).get("paired_via", "")).startswith("invite ")
+
+
+def pair_again(conf):
+    n = (conf or {}).get("name") or "<node>"
+    if by_invite(conf):
+        return "mu compute invite %s --replace" % n
+    return "mu compute remove %s; mu compute add %s --host-key ..." % (n, n)
+
+
 def classify_255(conf, err, st, muxed):
     n, u, p, url = conf["name"], conf.get("relay_user"), conf.get("relay_port"), conf.get("relay_url")
     if st and st[0] in ("refused", "unreachable") and st[1] in RELAY_REASONS:
         msg, hint = RELAY_REASONS[st[1]]
+        if st[1] == "relay-credential" and by_invite(conf):   # the password came from mu relay login
+            hint = ("the owner logs in again in Terminal (not through Claude Code): relay/gen-credentials.sh "
+                    "login-bundle {u} | mu relay login --stdin")
         code = proto.EXIT_REFUSED if st[0] == "refused" else proto.EXIT_UNREACHABLE
         raise MuError(code, st[1], msg.format(n=n, u=u, p=p, url=url) + " [%s]" % st[1],
                       hint.format(n=n, u=u, p=p, url=url), reason=st[1], node=n)
@@ -563,8 +580,8 @@ def classify_255(conf, err, st, muxed):
         raise MuError(proto.EXIT_REFUSED, "host-key", "%s's host key differs from the key pinned at pairing. Never "
                       "retried; nothing was sent [host-key]" % n,
                       "tell the user. If the node was reinstalled on purpose, compare the key the PC shows (%s "
-                      "mu-wsl2-distro host-key) and pair again: mu compute remove %s; mu compute add %s --host-key ..."
-                      % (PC_ROOT, n, n), reason="host-key", node=n)
+                      "mu-wsl2-distro host-key) and pair again: %s" % (PC_ROOT, pair_again(conf)),
+                      reason="host-key", node=n)
     if "Permission denied (publickey" in err:
         ws = conf.get("workstation") or u
         pub, fp = "<public key: mu compute list --json>", "?"
@@ -590,17 +607,17 @@ def classify_255(conf, err, st, muxed):
 # step: they go to node_message, cleaned and capped (review finding 4). {n} the node, {j} the job id.
 NODE_REFUSALS = {
     "protocol-mismatch": ("{n} speaks another protocol version", "run mu update on the older side (on the PC: "
-                          + PC_MU + " mu update)"),
+                          + PC_MUCMD + " update)"),
     "no-such-job": ("{n} has no job {j}", "mu status (this project's jobs); --on NODE if it ran on another node"),
     "no-such-snapshot": ("{n} does not have the snapshot of job {j}", "mu submit --resume {j} pushes it again"),
     "not-finished": ("job {j} has no result yet", "mu status {j} --wait --timeout 500"),
-    "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MU + " mu node enable"),
+    "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MUCMD + " node enable"),
     "limits-unavailable": ("{n} cannot enforce a job's memory limit (its self-test failed), so it takes no jobs",
-                           "tell the user; on the PC: " + PC_MU + " mu node selftest (docs/design/job-layer.md §19)"),
+                           "tell the user; on the PC: " + PC_MUCMD + " node selftest (docs/design/job-layer.md §19)"),
     "disk-low": ("{n} has too little free disk space for a job", "tell the user; on the PC, delete the folders of old "
                  "finished jobs: " + PC_MU + " rm -rf /srv/mu/jobs/<job-id> (largest: see `largest`)"),
     "toolchain-missing": ("{n} lacks the μ version this project pins", "tell the user: an install at the PC takes over "
-                          "an hour (" + PC_MU + " mu install <version>); or, with the user's agreement, mu pin a version "
+                          "an hour (" + PC_MUCMD + " install <version>); or, with the user's agreement, mu pin a version "
                           "the node has (`installed`)"),
     "bad-spec": ("{n} refused the job spec", "mu update on both sides, then submit again"),
     "key-revoked": ("this workstation's key was revoked on {n}", "tell the user; pairing again: mu compute remove {n}, "
@@ -641,6 +658,9 @@ def node_error(rc, text, name, job_id=None):
     msg, hint = NODE_REFUSALS.get(err, ("{n} refused the request (%s)" % err, "the node's μ may differ from this "
                                          "one: mu compute status {n}; mu update on the older side"))
     j = job_id or "<job-id>"
+    if err == "key-revoked":
+        hint = "tell the user; pairing again: " + pair_again(
+            read_conf(os.path.join(node_dir(name), "node.conf")) or {"name": name}).replace("{", "{{").replace("}", "}}")
     extra = {k: proto.clean_obj(ans[k]) for k in NODE_EXTRA_KEYS if k in ans}
     if said:
         extra["node_message"] = said
@@ -898,7 +918,7 @@ def cmd_compute_list(a):
     if a.json:
         proto.emit_json({"ok": True, "nodes": rows})
     elif not rows:
-        print("no compute node is paired: mu compute add <node> ...")
+        print("no compute node is paired: pair one with mu compute invite <node> (docs/design/first-job-checklist.md)")
     else:
         for r in rows:
             ls = r["last_status"] or {}
@@ -923,8 +943,7 @@ def cmd_compute_status(a):
     names = [a.node] if a.node else paired_nodes()
     if not names:
         raise MuError(proto.EXIT_NO_SUCH, "no-node", "no compute node is paired",
-                      "mu compute add <node> --host-key '...' --relay URL --relay-fingerprint FP --relay-user NAME "
-                      "--relay-password-stdin (docs/design/first-job-checklist.md)")
+                      "pair one: mu compute invite <node> (docs/design/first-job-checklist.md)")
     results, worst = [], 0
     for n in names:
         conf = load_node(n)
@@ -1101,8 +1120,12 @@ def snapshot(root, job_id):
                 shutil.copyfile(os.path.join(gitdir, "index"), idx)
             except FileNotFoundError:
                 git(root, "read-tree", "HEAD", env=env)
-        spec = ["--", "."] if fault("no-mu-exclude") else ["--", ".", ":(exclude).mu"]
-        git(root, "add", "-A", *spec, env=env)
+        # Add everything, then drop .mu from this temporary index. An exclude pathspec (':(exclude).mu') makes
+        # `git add` exit 1 when .mu/ is gitignored ("The following paths are ignored"), seen with git 2.40 in JATAYU
+        # on 2026-11-14; removing it afterwards works whether .mu is ignored, not ignored, or ignored as '.mu/*'.
+        git(root, "add", "-A", "--", ".", env=env)
+        if not fault("no-mu-exclude"):
+            git(root, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".mu", env=env)
         tree = git(root, "write-tree", env=env)
     finally:
         for f in (idx, idx + ".lock"):
@@ -1189,16 +1212,16 @@ def check_node(ans, node_name, pin, job_id=None):
         have = sorted(installed)[-1] if installed else None
         raise MuError(proto.EXIT_VERSION, "toolchain-missing", "%s has no μ %s, which this project pins (installed "
                       "there: %s)" % (node_name, pin, ", ".join(installed) or "none"),
-                      "tell the user: the node needs μ %s; at the PC (an install takes over an hour): %s mu install %s"
-                      "%s" % (pin, PC_MU, pin, "; or, with the user's agreement, pin a version the node has: mu pin %s"
+                      "tell the user: the node needs μ %s; at the PC (an install takes over an hour): %s install %s"
+                      "%s" % (pin, PC_MUCMD, pin, "; or, with the user's agreement, pin a version the node has: mu pin %s"
                               % have if have else ""), installed=installed, **extra)
     if ans.get("runner") != "active":
         raise MuError(proto.EXIT_NODE_CANNOT, "not-enabled", "the job runner on %s is not running" % node_name,
-                      "tell the user; on the PC: %s mu node enable" % PC_MU, **extra)
+                      "tell the user; on the PC: %s node enable" % PC_MUCMD, **extra)
     if not (ans.get("limits") or {}).get("memory"):
         raise MuError(proto.EXIT_NODE_CANNOT, "limits-unavailable", "%s cannot enforce a job's memory limit (its "
                       "self-test failed), so it takes no jobs" % node_name,
-                      "tell the user; on the PC: %s mu node selftest (docs/design/job-layer.md §19 step 1)" % PC_MU,
+                      "tell the user; on the PC: %s node selftest (docs/design/job-layer.md §19 step 1)" % PC_MUCMD,
                       **extra)
     disk = ans.get("disk") or {}
     if isinstance(disk.get("free_gb"), (int, float)) and disk["free_gb"] < disk.get("min_free_gb", 0):

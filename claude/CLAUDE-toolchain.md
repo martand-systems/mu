@@ -97,14 +97,24 @@ computer. `mu compute list` shows what is paired (no network); `mu compute statu
 - No node paired, or `mu compute status` not exit 0: run locally or tell the user. Do not loop on retries.
 
 **Pairing a node** (docs/design/pairing.md; the owner walks to the PC, so it never fits one call):
-- `mu compute invite office-pc --no-wait --json`: the code goes to a dialog on the Mac's screen (`"code": null` in
-  the JSON; never ask the user to paste it to you). Show the user the two `pc_commands` lines; they type them in
-  Terminal (Admin) at the PC and then the code.
-- Then repeat `mu compute invite --wait <id> --json --timeout 540` while it exits 10 (`still-waiting`). Exit 0 with
-  `"state": "finished"` is paired; 4 paired but not answering yet (`mu compute status`); 5 refused (report `error`,
-  never retry the same code); 9 expired (a new invite).
-- `mu relay login` takes the admin token and must be typed by the owner in Terminal, never through you. Without it
-  invite exits 2 `not-logged-in`: tell the user the `next` line.
+- Give the user the two PC lines first (Terminal (Admin) at the PC; `mu` by its full path: `wsl … --` runs no login
+  shell, so a bare `mu` is "command not found"):
+    wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu update
+    powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
+  Make the invite only when the user says the PC asks for the code (it is valid 30 minutes):
+  `mu compute invite office-pc --no-wait --json`. The code appears in a dialog on this Mac's screen (`"code": null`
+  in the JSON). Never ask the user to paste it to you, and never read it from the Keychain. Tell them: keep the dialog
+  open until the PC says "code accepted"; the Mac must be with them, or someone must read the code to them. Exit 1
+  `no-dialog`: no one can see this Mac's screen; the invite was cancelled: the user runs it in Terminal.
+- Then repeat `mu compute invite --wait <id> --json --timeout 400` with the Bash timeout at 600000 ms, while it exits
+  10 (`still-waiting`). It is fine to stop and resume later: the PC finishes on its own ("not yet confirmed") and
+  `--wait` completes it up to 24 h later.
+  Exit 0 `"state": "finished"`: paired. 4 with `node` in the JSON: paired but not answering yet (`mu compute status`);
+  4 `relay-unreachable` from the first call: nothing was made, retry later. 5: report `error`, never reuse that code
+  (`invite-used`, `pair-integrity`, `invite-locked`, `not-installed`: a new invite). 9 `invite-expired`/`no-such-invite`:
+  a new invite. 2 `exists` or `client-exists`: the node is already paired; ask the user before `--replace`.
+  2 `invite-pending`: one already waits: `--wait` it, or `--cancel <id>` first (never `--again` on your own).
+- `mu relay login` (exit 2 `not-logged-in`): the owner types the `next` line in Terminal in the mu clone, never you.
 - `mu compute remove NODE` also deletes the node's relay client (`--keep-relay-client` to keep it): ask first.
 
 **What runs on the node**

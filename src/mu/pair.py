@@ -17,7 +17,9 @@ The code is read from stdin only, never from an argument; at a terminal it is as
 refused (wrong code, used, changed on the way, locked, aborted), 9 expired.
 
 Test hooks: MU_PAIR_FAULT (comma-separated; each switches off one protection, tools/test-pair), MU_PAIR_TEST_HTTP=1
-(plain http to a loopback relay), MU_PAIR_STATE_DIR, MU_PAIR_DISTRO, MU_PAIR_TUNNEL_ENV, MU_PAIR_OWNERS (paths).
+(plain http to a loopback relay), MU_PAIR_STATE_DIR, MU_PAIR_DISTRO, MU_PAIR_TUNNEL_ENV, MU_PAIR_OWNERS (paths),
+MU_PAIR_CONFIRM_WAIT, MU_PAIR_CONNECT_WAIT, MU_PAIR_RETRY_S (seconds). As root they count only while the root-owned
+marker /etc/mu/test-hooks exists (hooks_allowed); active faults are announced on stderr.
 """
 import argparse
 import base64
@@ -29,6 +31,7 @@ import os
 import re
 import secrets
 import ssl
+import stat
 import subprocess
 import sys
 import time
@@ -51,11 +54,48 @@ OUTCOMES = ("ok", "unreachable:node-offline", "unreachable:relay-credential", "u
             "unreachable:timeout")
 
 EXIT_OK, EXIT_USAGE, EXIT_UNREACHABLE, EXIT_REFUSED, EXIT_EXPIRED = 0, 2, 4, 5, 9
+# hints shown at the PC are typed in PowerShell (Terminal (Admin)): the node's commands go through wsl.exe as root
+PC_ROOT = "wsl -d mu-compute -u root -- "
+NEW_CODE = "on the Mac: mu compute invite <node> (a new code); then run this same line again here"
 
 
 # ------------------------------------------------------------------------------------------------ test faults
+TEST_HOOKS_MARKER = "/etc/mu/test-hooks"
+_warned = [False]
+
+
+def as_root():
+    """Root (the node's side), or a test that asks for root's rules (MU_PAIR_AS_ROOT=1 only makes them stricter)."""
+    return (hasattr(os, "geteuid") and os.geteuid() == 0) or os.environ.get("MU_PAIR_AS_ROOT") == "1"
+
+
+def hooks_allowed():
+    """Test hooks from the environment (MU_PAIR_*): as root only with the root-owned marker /etc/mu/test-hooks (a
+    regular file, not writable by group or others), so that a variable carried in from Windows (WSLENV) never switches
+    off a check in the elevated pair run (security review of ff2c707, finding 6). Another user's process: always (who
+    sets its environment already is that user)."""
+    if not as_root():
+        return True
+    try:
+        st = os.lstat(TEST_HOOKS_MARKER)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not (st.st_mode & 0o022)
+
+
+def hook(name, default=None):
+    """A test hook's value from the environment, or default when hooks are not allowed here."""
+    v = os.environ.get(name)
+    return v if v and hooks_allowed() else default
+
+
 def faults():
-    return set(x.strip() for x in os.environ.get("MU_PAIR_FAULT", "").split(",") if x.strip())
+    names = set(x.strip() for x in (hook("MU_PAIR_FAULT") or "").split(",") if x.strip())
+    if names and not _warned[0]:
+        _warned[0] = True
+        sys.stderr.write("mu: TEST FAULTS ACTIVE (MU_PAIR_FAULT=%s): checks are switched off; never on a real pairing\n"
+                         % ",".join(sorted(names)))
+    return names
 
 
 def fault(name):
@@ -219,7 +259,7 @@ def key_fingerprint(key):
 
 
 def test_http():
-    return os.environ.get("MU_PAIR_TEST_HTTP") == "1"
+    return hook("MU_PAIR_TEST_HTTP") == "1"
 
 
 def normalise_url(u):
@@ -351,19 +391,19 @@ class PairError(Exception):
 
 
 def state_dir():
-    return os.environ.get("MU_PAIR_STATE_DIR") or "/var/lib/mu-wsl2/pair"
+    return hook("MU_PAIR_STATE_DIR") or "/var/lib/mu-wsl2/pair"
 
 
 def distro_bin():
-    return os.environ.get("MU_PAIR_DISTRO") or "/usr/local/sbin/mu-wsl2-distro"
+    return hook("MU_PAIR_DISTRO") or "/usr/local/sbin/mu-wsl2-distro"
 
 
 def tunnel_env_path():
-    return os.environ.get("MU_PAIR_TUNNEL_ENV") or "/etc/mu/tunnel.env"
+    return hook("MU_PAIR_TUNNEL_ENV") or "/etc/mu/tunnel.env"
 
 
 def owners_path():
-    return os.environ.get("MU_PAIR_OWNERS") or "/etc/mu/owners"
+    return hook("MU_PAIR_OWNERS") or "/etc/mu/owners"
 
 
 def write_private(path, text):
@@ -407,8 +447,8 @@ class Claimer:
         self.first_path = os.path.join(self.dir, "first-use.json")
         self.done_path = os.path.join(self.dir, "done.json")
         self.backup_env = os.path.join(self.dir, "tunnel.env.before-pair")
-        self.confirm_wait = float(os.environ.get("MU_PAIR_CONFIRM_WAIT") or 120)
-        self.connect_wait = float(os.environ.get("MU_PAIR_CONNECT_WAIT") or 60)
+        self.confirm_wait = float(hook("MU_PAIR_CONFIRM_WAIT") or 120)
+        self.connect_wait = float(hook("MU_PAIR_CONNECT_WAIT") or 60)
 
     # -- output
     def say(self, text):
@@ -472,15 +512,15 @@ class Claimer:
     def relay_fail(self, st, ans, iid):
         e = slug(ans)
         if st == 404 and e in ("not-found", "relay-error"):
-            raise PairError(EXIT_REFUSED, "pairing-unsupported", "the relay has no pairing service",
-                            "use the manual path (docs/design/first-job-checklist.md, appendix)")
+            raise PairError(EXIT_REFUSED, "pairing-unsupported", "the relay answering here has no pairing service",
+                            "tell the Mac's owner (curl -sS %s/mu/v1/ must say \"pairing\":true; "
+                            "docs/design/first-job-checklist.md §1), then run this same line again" % self.relay_url)
         table = {
             "wrong-code": (EXIT_REFUSED, "the relay does not accept this code: check it on the Mac's screen",
                            "type the code again"),
             "invite-locked": (EXIT_REFUSED, "invite %s is locked (too many wrong codes): ask for a new code on the Mac"
-                              % iid, "on the Mac: mu compute invite <node>"),
-            "invite-expired": (EXIT_EXPIRED, "invite %s expired: make a new one on the Mac" % iid,
-                               "on the Mac: mu compute invite <node>"),
+                              % iid, NEW_CODE),
+            "invite-expired": (EXIT_EXPIRED, "invite %s expired: make a new one on the Mac" % iid, NEW_CODE),
             "invite-aborted": (EXIT_REFUSED, "invite %s was cancelled (on the Mac, or after a problem)" % iid,
                                "make a new one on the Mac: mu compute invite <node>"),
             "bad-session": (EXIT_REFUSED, "the relay no longer knows this PC's claim of invite %s" % iid,
@@ -499,7 +539,7 @@ class Claimer:
         raise PairError(code, e, msg, hint)
 
     def relay(self):
-        return Relay(self.relay_url, retry_s=float(os.environ.get("MU_PAIR_RETRY_S") or 30))
+        return Relay(self.relay_url, retry_s=float(hook("MU_PAIR_RETRY_S") or 30))
 
     def call(self, method, path, body=None, auth=None, timeout=10.0):
         try:
@@ -563,11 +603,12 @@ class Claimer:
                     "inviter": cur.get("inviter")}
         if iid in self.done():
             raise PairError(EXIT_REFUSED, "already-paired", "this PC already paired with invite %s: a code works once"
-                            % iid, "to pair again, make a new invite on the Mac (mu compute invite <node> --replace)")
+                            % iid, "nothing to do; to pair again, make a new invite on the Mac (mu compute invite "
+                            "<node> --replace)", invite=iid)
         first = self.first_use(iid)
         if time.time() - first > 3600:
             raise PairError(EXIT_EXPIRED, "invite-expired", "this PC first used invite %s more than 60 minutes ago: "
-                            "make a new one on the Mac" % iid, "on the Mac: mu compute invite <node>")
+                            "make a new one on the Mac" % iid, NEW_CODE)
         if cur and cur.get("session") and not fault("no-resume"):
             session = cur["session"]
         else:
@@ -606,9 +647,10 @@ class Claimer:
                     "contest_mac": mac(k["ci"], msg_bytes("contest", contest, CONTEST))}, retry_s=15)
             except Unreachable:
                 pass
-        raise PairError(EXIT_REFUSED, "invite-used", "SOMEONE ELSE USED THIS CODE FIRST. The relay client it made "
-                        "has been removed and the Mac's owner has been told. Make a new invite on the Mac.",
-                        "on the Mac: mu compute invite <node>")
+        # the Mac sees a contest only while its invite is not finished (D10): say what is known, no more
+        raise PairError(EXIT_REFUSED, "invite-used", "SOMEONE ELSE USED THIS CODE FIRST. This PC told the relay, which "
+                        "removes the relay client the other machine got. Tell the Mac's owner, and make a new invite "
+                        "on the Mac.", NEW_CODE)
 
     # -- finish
     def finish(self, iid, sec):
@@ -647,7 +689,7 @@ class Claimer:
             if not host_key:
                 self.undo(cur)
                 raise PairError(1, "host-key", "this node has no host key (mu-wsl2-distro host-key failed: %s)" % clean(err),
-                                "run mu-wsl2-distro install")
+                                "run: %smu-wsl2-distro install" % PC_ROOT)
             answer = {"kind": "node", "id": iid, "offer_digest": d, "node_name": node, "host_key": host_key,
                       "mu_version": self.mu_version}
             body = {"answer": answer, "answer_mac": mac(k["ci"], msg_bytes("answer", answer, NODE_ANSWER)),
@@ -689,7 +731,7 @@ class Claimer:
         if rc not in (0, 1):
             self.undo(cur)
             raise PairError(1, "tunnel-credential", "the relay credential was refused by mu-wsl2-distro (exit %d): %s"
-                            % (rc, clean(ans.get("message") or err)), "mu-wsl2-distro tunnel status")
+                            % (rc, clean(ans.get("message") or err)), PC_ROOT + "mu-wsl2-distro tunnel status")
         self.say("  relay credential written: relay user %s, %s, port %s" % (offer["node_name"], offer["relay_url"],
                                                                          offer["port"]))
         inviter, key = offer["inviter_name"], offer["inviter_key"]
@@ -705,7 +747,7 @@ class Claimer:
         if rc != 0:
             self.undo(cur)
             raise PairError(1, "authorize", "%s's key could not be authorised (mu-wsl2-distro authorize, exit %d): %s"
-                            % (inviter, rc, clean(ans.get("message") or err)), "mu-wsl2-distro keys")
+                            % (inviter, rc, clean(ans.get("message") or err)), PC_ROOT + "mu-wsl2-distro keys")
         self.say("  %s's key authorised: %s (authenticated by the code)" % (inviter, key_fingerprint(key)))
 
     def write_owner(self, inviter):
@@ -763,7 +805,7 @@ class Claimer:
                 if c["outcome"] != "ok":
                     why = c["outcome"].split(":", 1)[-1]
                     raise PairError(EXIT_UNREACHABLE, why, "%s has the keys but could not reach this PC through the "
-                                    "relay: %s" % (inviter, why), "mu-wsl2-distro tunnel status", inviter=inviter,
+                                    "relay: %s" % (inviter, why), PC_ROOT + "mu-wsl2-distro tunnel status", inviter=inviter,
                                     node=node)
                 self.say("  confirmed: %s reached this PC through the relay" % inviter)
                 return {"ok": True, "invite": iid, "node": node, "inviter": inviter, "confirmed": True,
@@ -857,14 +899,17 @@ class Claimer:
             self.forget()
             return
         raise PairError(EXIT_REFUSED, "pairing-in-progress", "this PC is in the middle of pairing invite %s (%s)" % (
-            iid, state or "relay unreachable"), "finish it with that code, or: mu-wsl2-distro pair abort")
+            iid, state or "relay unreachable"), "finish it with that code, or: %smu-wsl2-distro pair abort" % PC_ROOT)
 
     def status(self):
+        """The half-done pairing, if any, and the invites this PC finished (48 h): mu-wsl2-host.ps1 pair's last line
+        says "paired" when its invite is among them, whatever the exit code (usability review of ff2c707, 5)."""
         cur = self.current()
+        done = sorted(self.done())
         if not cur:
-            return {"ok": True, "pairing": None}
+            return {"ok": True, "pairing": None, "done": done}
         return {"ok": True, "pairing": {"invite": cur.get("id"), "phase": cur.get("phase"), "node": cur.get("node"),
-                                        "inviter": cur.get("inviter"), "relay": cur.get("relay")}}
+                                        "inviter": cur.get("inviter"), "relay": cur.get("relay")}, "done": done}
 
 
 # ------------------------------------------------------------------------------------------------ the command line

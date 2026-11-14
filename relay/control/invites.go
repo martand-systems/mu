@@ -488,7 +488,12 @@ func (r *Relay) install(s *State, t *txn, x *Invite, password string) {
 		x.ReplacedNone = true
 	}
 	s.Clients[x.Name] = &DynClient{Role: role, Password: password, Ports: ports, Created: r.unix(), Via: "invite " + x.ID}
-	delete(s.Tombstones, x.Name)
+	// A tombstone stays (security review of ff2c707, finding 2): the dynamic client wins over the static entry anyway
+	// (merge), and when the dynamic client goes again (abort, contest, DELETE) the removed static one must not come back
+	// with its old password. Only DELETE /mu/v1/tombstones/{name} clears it.
+	if fault("untombstone") {
+		delete(s.Tombstones, x.Name)
+	}
 	x.Client = "created"
 	x.Pending = ""
 	if x.Kind == kindNode && r.grantPort(s, x.Inviter, x.Port) {
