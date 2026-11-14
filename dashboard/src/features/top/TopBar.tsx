@@ -71,9 +71,12 @@ export function TopBar({ session, overview, updatedAt, down = false }: { session
             </span>
           )}
           {s && !down && (
-            <span className="hidden items-center gap-1.5 text-xs text-text-muted sm:flex" data-testid="nodes-online">
+            <span className="flex items-center gap-1.5 text-xs text-text-muted" data-testid="nodes-online">
               <span aria-hidden="true" className={`inline-block h-1.5 w-1.5 rounded-full ${s.nodes > 0 && s.online === s.nodes ? "bg-succeeded" : s.online > 0 ? "bg-attention" : "bg-text-muted"}`} />
-              <span className="tabular-nums text-text">{s.online} of {s.nodes}</span> {s.nodes === 1 ? "node" : "nodes"} online
+              <span className="hidden sm:inline">
+                <span className="tabular-nums text-text">{s.online} of {s.nodes}</span> {s.nodes === 1 ? "node" : "nodes"} online
+              </span>
+              <span className="tabular-nums text-text sm:hidden" aria-label={`${s.online} of ${s.nodes} nodes online`}>{s.online}/{s.nodes}</span>
             </span>
           )}
           {updatedAt !== null && <span data-testid="updated" className="min-w-0 truncate"><AgeLabel t={updatedAt} prefix="updated " /></span>}

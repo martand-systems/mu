@@ -8,6 +8,7 @@ import { isStale, useNow } from "../../lib/clock";
 import { bytes, bytesOf, clock, num, pct, plural, shortDuration } from "../../lib/format";
 import { AgeLabel } from "../../ui/AgeLabel";
 import { Card } from "../../ui/Card";
+import { CopyCommand } from "../../ui/CopyCommand";
 import { Meter } from "../../ui/Meter";
 import { Skeleton } from "../../ui/Skeleton";
 import { Sparkline } from "../../ui/Sparkline";
@@ -45,6 +46,17 @@ function CpuRow({ cpu, series, now, stale, label }: { cpu: number | null; series
   );
 }
 
+/** The old node's one line: "office-pc runs μ v2026.11.8, older than this Mac's: live figures start after it updates". */
+export function oldNodeLine(name: string, nodeVer: string | null, macVer: string | null): string {
+  return `${name} runs ${nodeVer ? `μ ${nodeVer}` : "an older μ"}${macVer ? ", older than this Mac's" : ""}: live figures start after it updates`;
+}
+
+/** A CLI message without its bracketed error code ("… [node-offline]"): the code goes to the tooltip. */
+function plainMessage(m: string): { text: string; code: string | null } {
+  const x = /\s*\[([a-z0-9-]+)\]\s*$/.exec(m);
+  return x ? { text: m.slice(0, x.index), code: x[1]! } : { text: m, code: null };
+}
+
 // ------------------------------------------------------------------------------------------------ This Mac
 export function MacCard({ mac }: { mac: Mac }) {
   const now = useNow();
@@ -61,7 +73,7 @@ export function MacCard({ mac }: { mac: Mac }) {
           <>
             <CpuRow cpu={mac.cpu_pct} series={mac.series.cpu_pct} now={now} stale={stale} label={`This Mac CPU, last 10 minutes; now ${pct(mac.cpu_pct)}`} />
             <div data-fig="mac-mem">
-              <Meter label="MEM" value={mac.mem.used} max={mac.mem.total} stale={stale} text={`${bytesOf(mac.mem.used, mac.mem.total)}`} />
+              <Meter label="MEM" value={mac.mem.used} max={mac.mem.total} warnAt={0.95} stale={stale} text={`${bytesOf(mac.mem.used, mac.mem.total)}`} />
             </div>
             <dl className="flex flex-wrap gap-x-4 gap-y-1 pl-15 text-xs text-text-muted">
               <div className="flex gap-1"><dt>available</dt><dd className={`tabular-nums ${stale ? "text-stale" : "text-text"}`} data-fig="mac-avail">{bytes(mac.mem.available)}</dd></div>
@@ -76,8 +88,7 @@ export function MacCard({ mac }: { mac: Mac }) {
       <Footer age={<AgeLabel t={mac.t} />}>
         {cores ?? "cores unknown"}
         {mac.battery ? (mac.battery.on_battery ? ` · on battery${mac.battery.percent !== null ? ` ${Math.round(mac.battery.percent)} %` : ""}` : " · on mains power") : ""}
-        {mac.mu_version && <> · μ {mac.mu_version}</>}
-        {mac.sampler !== "psutil" && <> · sampler: {mac.sampler}</>}
+        {mac.sampler === "stdlib" && <> · sampler: stdlib (no psutil)</>}
       </Footer>
     </Card>
   );
@@ -116,16 +127,18 @@ function NodeProblem({ n, now }: { n: Node; now: number }) {
           offline{n.offline_since !== null && <> since <span className="tabular-nums">{clock(n.offline_since, now)}</span></>}
           {wait !== null && <span className="text-text-muted"> · next try in <span className="tabular-nums">{shortDuration(wait)}</span></span>}
         </p>
-        {e && <p className="text-xs text-text-muted">{e.message}</p>}
+        {e && <p className="text-xs text-text-muted" title={plainMessage(e.message).code ?? undefined}>{plainMessage(e.message).text}</p>}
         <p className="text-xs text-text-muted">Offline is a normal state: jobs already accepted keep running on the node.</p>
+        <div><CopyCommand cmd={`mu compute status ${n.name}`} what="node status" /></div>
       </div>
     );
   }
   if (n.state === "refused" && !__FAULT_REFUSED_AS_OFFLINE__) {
     return (
       <div className="flex flex-col gap-1.5 text-sm" data-testid="node-refused">
-        {e && <p className="text-text">{e.message}</p>}
+        {e && <p className="text-text" title={plainMessage(e.message).code ?? undefined}>{plainMessage(e.message).text}</p>}
         {e?.next && <p className="text-xs text-text-muted">{e.next}</p>}
+        {e?.next?.includes("invite") && <div><CopyCommand cmd={`mu compute invite ${n.name} --replace`} what="pair again" /></div>}
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium text-failed">never retried automatically</span>
           <RetryButton name={n.name} />
@@ -140,7 +153,7 @@ function NodeProblem({ n, now }: { n: Node; now: number }) {
     const wait = e.retry_at ? Math.max(0, e.retry_at - now) : null;
     return (
       <div className="flex flex-col gap-1 text-sm" data-testid={`node-${n.state}`}>
-        <p className="text-text">{e.message}</p>
+        <p className="text-text" title={plainMessage(e.message).code ?? undefined}>{plainMessage(e.message).text}</p>
         {e.next && <p className="text-xs text-text-muted">{e.next}</p>}
         {wait !== null && <p className="text-xs text-text-muted">next try in <span className="tabular-nums">{shortDuration(wait)}</span></p>}
       </div>
@@ -171,7 +184,7 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
           <>
             <CpuRow cpu={st.cpu_pct} series={n.series.cpu_pct} now={now} stale={statsStale} label={`${n.name} CPU, last 10 minutes; now ${pct(st.cpu_pct)}`} />
             <div data-fig="node-mem">
-              <Meter label="MEM" value={st.mem.used} max={total} stale={statsStale} text={bytesOf(st.mem.used, total)} />
+              <Meter label="MEM" value={st.mem.used} max={total} warnAt={0.95} stale={statsStale} text={bytesOf(st.mem.used, total)} />
             </div>
             <dl className="flex flex-wrap gap-x-4 gap-y-1 pl-15 text-xs text-text-muted">
               <div className="flex gap-1"><dt>available</dt><dd className={`tabular-nums ${statsStale ? "text-stale" : "text-text"}`} data-fig="node-avail">{bytes(st.mem.avail)}</dd></div>
@@ -182,11 +195,11 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
         )}
         {n.state === "online" && !st && n.old_node && (
           <div className="flex flex-col gap-1.5" data-testid="node-old">
-            <p className="flex items-center gap-1.5 text-sm text-text">
-              <CircleArrowUp aria-hidden="true" size={14} className="shrink-0 text-attention" />
-              live statistics after the next node update
+            <p className="flex items-start gap-1.5 text-sm text-text">
+              <CircleArrowUp aria-hidden="true" size={14} className="mt-0.5 shrink-0 text-attention" />
+              <span>{oldNodeLine(n.name, h?.mu_version ?? null, macVersion)}</span>
             </p>
-            <p className="text-xs text-text-muted">{n.old_node_text ?? `update μ on ${n.name} for live statistics`}</p>
+            <div><CopyCommand cmd={`mu compute status ${n.name}`} what="node status" /></div>
             {h && (
               <p className="text-xs text-text-muted">
                 {h.cpu_model && <>{h.cpu_model} · </>}
@@ -197,26 +210,29 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
           </div>
         )}
         {(n.state === "online" || (q && n.state !== "refused")) && q && (
-          <p className="pl-15 text-xs text-text-muted" data-fig="node-queue">
-            <span className="text-text">{plural(q.running ?? 0, "running", "running")}</span> · <span className="text-text">{q.queued ?? 0} queued</span>
-            {h?.mu_version && (
-              <> · μ {h.mu_version}{macVersion && h.mu_version === macVersion ? " (same as this Mac)" : ""}</>
-            )}
-          </p>
+          <div className={`flex flex-col gap-0.5 text-xs text-text-muted ${n.state === "online" && st ? "pl-15" : ""}`} data-fig="node-queue">
+            <p>
+              <span className="text-text">{plural(q.running ?? 0, "running", "running")}</span> · <span className="text-text">{q.queued ?? 0} queued</span>
+            </p>
+            {h?.mu_version && !n.old_node && <p>μ {h.mu_version}{macVersion && h.mu_version === macVersion ? " (same as this Mac)" : ""}</p>}
+          </div>
         )}
         {n.attention.length > 0 && (
           <ul className="flex flex-col gap-1 border-t border-border pt-2" aria-label={`${n.name}: needs attention`}>
             {n.attention.map((a, i) => (
               <li key={i} className="flex items-start gap-1.5 text-xs text-text">
                 <TriangleAlert aria-hidden="true" size={13} className="mt-px shrink-0 text-attention" />
-                <span><span className="font-medium text-attention">attention</span> · {a.text}</span>
+                <span>
+                  <span className="font-medium text-attention">attention</span> · {a.text}
+                  {a.kind === "autoupdate" && !(n.old_node && !st) && <> · see <code className="font-mono">mu compute status {n.name}</code></>}
+                </span>
               </li>
             ))}
           </ul>
         )}
       </div>
-      <Footer age={<AgeLabel t={ageT} staleOverride={n.state !== "online" || (st ? statsStale : n.list_stale) ? true : undefined} />}>
-        {n.state === "online" && wsl ? "WSL VM figures, not Windows'" : n.state === "online" ? "" : "the node's last answer"}
+      <Footer age={ageT === null ? null : <AgeLabel t={ageT} staleOverride={n.state !== "online" || (st ? statsStale : n.list_stale) ? true : undefined} />}>
+        {n.state === "online" && wsl ? "WSL VM figures, not Windows'" : n.state === "online" ? "" : ageT === null ? "no answer yet since the dashboard started" : "the node's last answer"}
       </Footer>
     </Card>
   );

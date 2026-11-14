@@ -18,3 +18,6 @@ declare const __FAULT_NETWORK_MODE_DEFAULT__: boolean;
 declare const __FAULT_REFUSED_AS_OFFLINE__: boolean;
 declare const __FAULT_MAC_SWAP_MEM__: boolean;
 declare const __FAULT_FAINT_SERIES__: boolean;
+declare const __FAULT_COPY_NO_FALLBACK__: boolean;
+declare const __FAULT_VIOLATION_OFFLINE__: boolean;
+declare const __FAULT_PUSH_FRAGMENT__: boolean;

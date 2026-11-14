@@ -53,6 +53,11 @@ html {
   outline-offset: 2px;
 }
 
+/* the orange primary button: an orange ring on orange would not show; its focus ring is the text colour */
+.copy-primary:focus-visible {
+  outline-color: var(--text);
+}
+
 .boot-note {
   margin: 48px auto;
   max-width: 40rem;

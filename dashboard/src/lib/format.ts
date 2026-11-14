@@ -2,13 +2,14 @@
 // function takes a possibly-null number and returns text; "—" stands for "no value".
 export const DASH = "—";
 
+/** "21.8 GB", "920 MB", "12 kB": one decimal for GB and TB (DIGITS), none below a GB. */
 export function bytes(n: number | null | undefined, digits = 1): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return DASH;
   const a = Math.abs(n);
   if (a >= 1e12) return `${(n / 1e12).toFixed(digits)} TB`;
   if (a >= 1e9) return `${(n / 1e9).toFixed(digits)} GB`;
-  if (a >= 1e6) return `${(n / 1e6).toFixed(digits)} MB`;
-  if (a >= 1e3) return `${(n / 1e3).toFixed(digits)} kB`;
+  if (a >= 1e6) return `${Math.round(n / 1e6)} MB`;
+  if (a >= 1e3) return `${Math.round(n / 1e3)} kB`;
   return `${Math.round(n)} B`;
 }
 

@@ -94,6 +94,7 @@ must_fail ignore-battery      "$PY1" battery
 must_fail node-from-config    "$PY1" nodes
 must_fail swap-mem-fields     "$PY1" nodes
 must_fail serve-last-as-live  "$PY1" stale
+must_fail list-age-only       "$PY1" stale
 must_fail rename-field        "$PY1" fixtures
 must_fail stale-build         "$PY1" build
 [ -n "$SLOW" ] && must_fail no-lock "$PY1" lifecycle

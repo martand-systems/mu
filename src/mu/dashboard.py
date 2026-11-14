@@ -28,6 +28,7 @@ Test hooks: MU_LAUNCHCTL, MU_LAUNCH_AGENTS_DIR, MU_OPENER (the program that open
   default-send-error  http.server's own error pages (no CSP)  static-follow-links symlinks in the static folder followed
   fault-guard-off     a real serve takes the unsafe faults     open-passes-faults  `open` hands MU_JOBS_FAULT to its server
   open-trusts-port    `open` trusts whatever answers the port no-trusted-types    the CSP without require-trusted-types-for
+  list-age-only       a row's as_of is the list's time, even while the node's rev says nothing changed
 A real (non-dev) `serve` refuses to start with any fault that weakens its security (UNSAFE_FAULTS); open-url-argv
 works only with MU_OPENER (a test's stub opener).
 """
@@ -721,13 +722,25 @@ class NodeWorker:
                                     "log_size": num(r.get("log_size"), 0)}
         return out
 
+    def list_current_t(self):
+        """(under self.lock) When the job list was last known to be current: the list's own time, or, on a node with
+        features, the time of the latest stats whose rev equals the list's (nothing changed since the list)."""
+        t = self.list_t
+        if t is not None and not fault("list-age-only") and self.features and self.stats_t is not None and \
+                self.stats_rev is not None and self.stats_rev == self.list_rev and self.stats_t > t:
+            return self.stats_t
+        return t
+
+    def list_stale_after(self):
+        return STALE_S if self.features else max(STALE_S, 2 * self.app.old_step + 5)
+
     def card(self, series_s=CARD_SERIES_S):
         now = self.clock.wall()
         with self.lock:
             h, ht, st, t = self.hello, self.hello_t, self.stats, self.stats_t
             series = [[a, b] for a, b in self.series if a >= now - series_s]
             state, err, since = self.state, self.error, self.offline_since
-            feats, more, list_t, njobs = self.features, self.more, self.list_t, len(self.jobs)
+            feats, more, list_t, njobs = self.features, self.more, self.list_current_t(), len(self.jobs)
             reconnecting = self.reconnecting
         old = h is not None and not feats
         hello = None
@@ -800,7 +813,7 @@ class NodeWorker:
                 "offline_since": rnd(since, 1) if state != "online" else None,
                 "hello": hello, "stats": stats, "series": {"cpu_pct": series},
                 "attention": attention, "jobs_listed": njobs, "more": more, "list_t": rnd(list_t, 1),
-                "list_stale": list_t is None or now - list_t > max(STALE_S, 2 * self.app.old_step + 5)}
+                "list_stale": list_t is None or now - list_t > self.list_stale_after()}
 
 
 # ------------------------------------------------------------------------------------------------ logs and metrics
@@ -917,7 +930,7 @@ class App:
             w = self.workers[name]
             with w.lock:
                 items = list(w.jobs.values())
-                list_t = w.list_t
+                list_t = w.list_current_t()
                 live = w.live(now)
             for s in items:
                 out.append(self.row(w, s, list_t, live.get(s["job_id"]), now, names))
@@ -959,7 +972,7 @@ class App:
                 "limits": None if lim is None else {"mem_bytes": num(lim.get("mem_bytes"), 0),
                                                     "time_s": num(lim.get("time_s"), 0),
                                                     "cores": num(lim.get("cores"), 0)},
-                "as_of": rnd(list_t, 1), "stale": list_t is None or now - list_t > max(STALE_S, 2 * self.old_step + 5)}
+                "as_of": rnd(list_t, 1), "stale": list_t is None or now - list_t > w.list_stale_after()}
 
     def find(self, job_id):
         for w in self.workers.values():
@@ -1022,7 +1035,7 @@ class App:
             s = cached[1]
         with w.lock:
             live = w.live(now)
-            list_t = w.list_t
+            list_t = w.list_current_t()
         names = sorted(self.workers)
         row = self.row(w, s, list_t, live.get(job_id), now, names)
         rec = self.index.record(job_id)

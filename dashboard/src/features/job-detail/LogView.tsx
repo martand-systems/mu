@@ -96,7 +96,9 @@ export function LogView({ id, queued, logCmd }: { id: string; queued: boolean; l
         <span className={`text-xs ${status === "following" ? "text-accent-text" : "text-text-muted"}`} data-testid="log-status">{status}</span>
         <span className="font-mono text-xs tabular-nums text-text-muted">{bytes(st.size)}</span>
         <span className="ml-auto flex items-center gap-1.5">
-          <ToggleButton pressed={paused} onChange={setPaused} icon={Pause}>pause</ToggleButton>
+          {status !== "complete" && status !== "waiting" && !queued && (
+            <ToggleButton pressed={paused} onChange={setPaused} icon={Pause}>pause</ToggleButton>
+          )}
           <ToggleButton pressed={wrap} onChange={setWrap} icon={WrapText}>wrap</ToggleButton>
         </span>
       </div>

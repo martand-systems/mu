@@ -2,13 +2,12 @@
 // "node"; segmented buttons, not native <select>s: see ui/Segmented.tsx), three sortable columns whose headers are
 // buttons with aria-sort; a row opens the job (the name is a real link; a click anywhere on the row does the same).
 // Under 768 px the rows become two-line items.
-import { ArrowDown, ArrowUp, ChevronsUpDown, Inbox } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronRight, ChevronsUpDown, Clock3, Inbox } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { JobRow, NodeCard } from "../../api/types";
 import { isStale, useNow } from "../../lib/clock";
 import { bytes, clock, duration, num, shortDuration } from "../../lib/format";
 import { jobHref, openJob } from "../../lib/route";
-import { CopyCommand } from "../../ui/CopyCommand";
 import { EmptyState } from "../../ui/EmptyState";
 import { Segmented } from "../../ui/Segmented";
 import { JobStateBadge } from "../../ui/StateBadge";
@@ -16,6 +15,7 @@ import { JobStateBadge } from "../../ui/StateBadge";
 type SortKey = "name" | "time" | "mem";
 type Sort = { key: SortKey; dir: "ascending" | "descending" } | null;
 
+const LIST_LIMIT = 100;
 const FINISHED = new Set(["succeeded", "failed", "cancelled", "timeout", "oom", "interrupted", "unknown"]);
 
 /** The time column's seconds: the wait of a queued job, the elapsed time of a running one, the wall time of a finished one. */
@@ -50,7 +50,7 @@ function SortHeader({ k, sort, setSort, children, align = "left" }: { k: SortKey
   const dir = on ? sort.dir : null;
   const Icon = dir === "ascending" ? ArrowUp : dir === "descending" ? ArrowDown : ChevronsUpDown;
   return (
-    <th scope="col" aria-sort={dir ?? "none"} className={`px-2 py-1.5 font-medium ${align === "right" ? "text-right" : "text-left"}`}>
+    <th scope="col" aria-sort={dir ?? "none"} className={`${TH} ${align === "right" ? "text-right" : "text-left"}`}>
       <button
         type="button"
         onClick={() => setSort(!on ? { key: k, dir: k === "name" ? "ascending" : "descending" } : dir === "descending" && k !== "name" ? { key: k, dir: "ascending" } : dir === "ascending" && k === "name" ? { key: k, dir: "descending" } : null)}
@@ -63,32 +63,53 @@ function SortHeader({ k, sort, setSort, children, align = "left" }: { k: SortKey
   );
 }
 
+// a header cell: sticky under the 48 px top bar where the table is not in a horizontal scroller (lg and up)
+const TH = "px-2 py-1.5 font-medium lg:sticky lg:top-12 lg:z-10 lg:bg-surface lg:shadow-[inset_0_-1px_0_var(--border)]";
+
+/** A note without the state word it often repeats ("cancelled: cancelled while running" -> "cancelled while running"). */
+export function noteText(state: string, note: string): string {
+  return note.toLowerCase().startsWith(state.toLowerCase()) ? note : `${state}: ${note}`;
+}
+
 function Row({ j, now }: { j: JobRow; now: number }) {
   const secs = jobSeconds(j, now);
   const mem = jobMem(j);
   const cores = jobCores(j);
   const liveStale = j.state === "running" && j.live !== null && (j.live.stale || isStale(j.live.t, now));
-  const rowStale = j.stale || (j.as_of !== null && isStale(j.as_of, now) && !FINISHED.has(j.state));
+  // the server decides when a row is stale (it knows each node's list cadence); the page shows it once per row
+  const rowStale = j.stale && !FINISHED.has(j.state);
+  const stale = rowStale || liveStale;
+  const asOf = rowStale && j.as_of !== null ? j.as_of : liveStale && j.live ? j.live.t : null;
   const name = j.name ?? "(no name)";
   const timeText = j.state === "queued" ? `waits ${shortDuration(secs)}` : duration(secs);
   const fig = liveStale ? "text-stale" : "text-text";
   return (
     <>
       <tr
-        className={`group cursor-pointer border-t border-border hover:bg-surface-raised max-md:grid max-md:grid-cols-[auto_1fr_auto] max-md:items-baseline max-md:gap-x-3 max-md:gap-y-0.5 max-md:px-3 max-md:py-2 ${j.note ? "" : ""}`}
+        className="group cursor-pointer border-t border-border hover:bg-surface-raised max-md:grid max-md:grid-cols-[auto_1fr_auto] max-md:items-baseline max-md:gap-x-3 max-md:gap-y-0.5 max-md:px-3 max-md:py-2"
         onClick={(e) => {
           if ((e.target as HTMLElement).closest("a,button")) return;
           openJob(j.job_id);
         }}
+        title={asOf !== null ? `stale: as of ${clock(asOf, now)}` : undefined}
         data-job={j.job_id}
         data-node={j.node}
         data-state={j.state}
+        data-stale={stale ? "1" : undefined}
       >
         <td className="px-2 py-1.5 max-md:col-start-1 max-md:row-start-1 max-md:p-0">
-          <JobStateBadge state={j.state} position={j.position} />
+          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+            <JobStateBadge state={j.state} position={j.position} />
+            {stale && (
+              <span className="inline-flex items-center gap-0.5 text-xs text-stale" data-age="stale">
+                <Clock3 aria-hidden="true" size={11} />
+                stale
+              </span>
+            )}
+          </span>
         </td>
         <td className="px-2 py-1.5 font-mono text-[13px] text-text-muted tabular-nums max-md:hidden">{j.short}</td>
-        <td className="max-w-[18rem] px-2 py-1.5 max-md:col-span-2 max-md:col-start-2 max-md:row-start-1 max-md:max-w-none max-md:p-0">
+        <td className="truncate px-2 py-1.5 max-md:col-span-2 max-md:col-start-2 max-md:row-start-1 max-md:p-0">
           {__FAULT_DIV_BUTTON__ ? (
             <div className="truncate font-medium text-text" onClick={() => openJob(j.job_id)}>{name}</div>
           ) : (
@@ -102,25 +123,27 @@ function Row({ j, now }: { j: JobRow; now: number }) {
             </a>
           )}
         </td>
-        <td className="max-w-[10rem] truncate px-2 py-1.5 text-text-muted max-md:hidden" title={j.project ?? j.project_id ?? ""}>{j.project ?? j.project_id ?? "—"}</td>
-        <td className="px-2 py-1.5 text-text max-md:col-start-1 max-md:row-start-2 max-md:p-0 max-md:text-xs max-md:text-text-muted" data-col="node">{j.node}</td>
+        <td className="truncate px-2 py-1.5 text-text-muted max-md:hidden" title={j.project ?? j.project_id ?? ""}>{j.project ?? j.project_id ?? "—"}</td>
+        <td className="truncate px-2 py-1.5 text-text max-md:col-start-1 max-md:row-start-2 max-md:p-0 max-md:text-xs max-md:text-text-muted" data-col="node">{j.node}</td>
         <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:col-start-2 max-md:row-start-2 max-md:p-0 max-md:text-left max-md:text-xs ${rowStale ? "text-stale" : "text-text"}`} data-col="time">
           {timeText}
-          {rowStale && j.as_of !== null && <span className="ml-1 font-sans text-xs text-stale">as of {clock(j.as_of, now)}</span>}
         </td>
-        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:col-start-3 max-md:row-start-2 max-md:p-0 max-md:text-xs ${mem.v === null ? "text-text-muted" : fig}`} title={mem.title} data-col="mem">
-          {mem.v === null ? "—" : `${bytes(mem.v)}${mem.mark}`}
+        <td className={`whitespace-nowrap px-2 py-1.5 text-right text-[13px] tabular-nums max-md:col-start-3 max-md:row-start-2 max-md:p-0 max-md:text-xs ${mem.v === null ? "text-text-muted" : fig}`} title={mem.title} data-col="mem">
+          {mem.v === null ? "—" : bytes(mem.v)}
+          <span className="inline-block w-[2ch] text-left text-text-muted" aria-hidden={mem.mark ? undefined : true}>{mem.mark}</span>
         </td>
-        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:hidden ${cores.v === null ? "text-text-muted" : fig}`} data-col="cores">
+        <td className={`whitespace-nowrap px-2 py-1.5 text-right text-[13px] tabular-nums max-md:hidden ${cores.v === null ? "text-text-muted" : fig}`} data-col="cores">
           {cores.v === null ? "—" : `${num(cores.v)}${cores.of !== null ? ` / ${cores.of}` : ""}`}
-          {liveStale && <span className="ml-1 font-sans text-xs text-stale">stale</span>}
+        </td>
+        <td className="py-1.5 pr-2 max-md:hidden" aria-hidden="true">
+          <ChevronRight size={12} className="text-text-faint group-hover:text-text" />
         </td>
       </tr>
       {j.note && (
         <tr className="max-md:block" data-note-for={j.job_id}>
           <td />
-          <td colSpan={7} className="px-2 pb-1.5 text-xs text-text-muted max-md:block max-md:px-3">
-            {j.state}: {j.note}
+          <td colSpan={8} className="px-2 pb-1.5 text-xs text-text-muted max-md:block max-md:px-3">
+            {noteText(j.state, j.note)}
             {j.usage?.source === "runner-sampled" && <> (~ last sample, up to 5 s old)</>}
           </td>
         </tr>
@@ -171,13 +194,21 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
         <span className="ml-auto text-xs text-text-muted tabular-nums" data-testid="job-count">
           {shown.length} {shown.length === 1 ? "job" : "jobs"}
           {hidden > 0 && <> · {hidden} hidden by the filters</>}
+          {anyMore && (
+            <span data-testid="older-jobs">
+              {" "}· newest {LIST_LIMIT} per node · older: <code className="font-mono text-text">mu status</code>
+            </span>
+          )}
         </span>
       </div>
       {shown.length === 0 ? (
         jobs.length === 0 ? (
           <EmptyState icon={Inbox} title="No jobs yet">
-            <p>Submit one from a project folder; it appears here within seconds.</p>
-            <CopyCommand cmd={`mu submit --on ${firstNode ?? "office-pc"} -- python …`} primary label="copy" />
+            <p>Submit one from a project folder, for example:</p>
+            <code className="rounded-sm border border-border bg-surface-raised px-2 py-1 font-mono text-[13px] text-text" data-cmd>
+              mu submit --on {firstNode ?? "office-pc"} -- python run.py
+            </code>
+            <p className="text-xs">It appears here within seconds.</p>
           </EmptyState>
         ) : (
           <EmptyState icon={Inbox} title="No jobs match the filters">
@@ -185,19 +216,31 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
           </EmptyState>
         )
       ) : (
-        <div className="overflow-x-auto max-md:overflow-visible">
-          <table className="w-full border-collapse text-sm max-md:block">
+        <div className="overflow-x-auto max-md:overflow-visible lg:overflow-visible">
+          <table className="w-full border-collapse text-sm max-md:block md:table-fixed">
+            <colgroup className="max-md:hidden">
+              <col className="w-[150px]" />
+              <col className="w-[84px]" />
+              <col />
+              <col className="w-[160px]" />
+              <col className="w-[120px]" />
+              <col className="w-[112px]" />
+              <col className="w-[112px]" />
+              <col className="w-[96px]" />
+              <col className="w-[24px]" />
+            </colgroup>
             <caption className="sr-only">Jobs on the paired nodes; choose a job's name to open its log and details</caption>
             <thead className="text-xs text-text-muted max-md:hidden">
               <tr>
-                <th scope="col" className="px-2 py-1.5 text-left font-medium">State</th>
-                <th scope="col" className="px-2 py-1.5 text-left font-medium">Id</th>
+                <th scope="col" className={`${TH} text-left`}>State</th>
+                <th scope="col" className={`${TH} text-left`}>Id</th>
                 <SortHeader k="name" sort={sort} setSort={setSort}>Name</SortHeader>
-                <th scope="col" className="px-2 py-1.5 text-left font-medium">Project</th>
-                <th scope="col" className="px-2 py-1.5 text-left font-medium">Node</th>
-                <SortHeader k="time" sort={sort} setSort={setSort} align="right">Wait / time</SortHeader>
+                <th scope="col" className={`${TH} text-left`}>Project</th>
+                <th scope="col" className={`${TH} text-left`}>Node</th>
+                <SortHeader k="time" sort={sort} setSort={setSort} align="right">Time</SortHeader>
                 <SortHeader k="mem" sort={sort} setSort={setSort} align="right">Memory</SortHeader>
-                <th scope="col" className="px-2 py-1.5 text-right font-medium">Cores</th>
+                <th scope="col" className={`${TH} text-right`}>Cores</th>
+                <th scope="col" className={TH}><span className="sr-only">open</span></th>
               </tr>
             </thead>
             <tbody className="max-md:block">
@@ -209,11 +252,6 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
         </div>
       )}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border px-3 py-2 text-xs text-text-muted">
-        {anyMore && (
-          <span data-testid="older-jobs">
-            older jobs: <code className="font-mono text-text">mu status</code>
-          </span>
-        )}
         <span>* cgroup peak, includes file cache · ~ last sample, up to 5 s old · memory of a running job: working set (anon + shmem)</span>
       </div>
     </section>

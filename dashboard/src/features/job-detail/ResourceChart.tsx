@@ -35,10 +35,31 @@ function useWidth(ref: RefObject<HTMLDivElement | null>): number {
   return w;
 }
 
-function axes(c: Colours, yFmt: (v: number) => string): uPlot.Axis[] {
-  const font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+/** The time axis' labels: HH:MM, or HH:MM:SS when the run is under 10 minutes; the day on the first tick when the
+ * run crosses midnight. */
+export function timeLabels(vals: number[], span: number): string[] {
+  const secs = span < 600;
+  const day = (t: number) => new Date(t * 1000).toDateString();
+  const crosses = vals.length > 1 && day(vals[0]!) !== day(vals[vals.length - 1]!);
+  return vals.map((v, i) => {
+    const hms = clock(v);
+    const t = secs ? hms : hms.slice(0, 5);
+    if (crosses && i === 0) {
+      const d = new Date(v * 1000);
+      return `${d.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]} ${t}`;
+    }
+    return t;
+  });
+}
+
+function axes(c: Colours, yFmt: (v: number) => string, xLabels: boolean): uPlot.Axis[] {
+  const font = "11px -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif";
   return [
-    { stroke: c.axis, font, grid: { stroke: c.grid, width: 1 }, ticks: { stroke: c.grid, width: 1 }, values: (_u, vals) => vals.map((v) => clock(v).slice(0, 5)) },
+    {
+      stroke: c.axis, font, space: 60, grid: { stroke: c.grid, width: 1 }, ticks: { stroke: c.grid, width: 1, show: xLabels },
+      size: xLabels ? 30 : 4,
+      values: (u, vals) => (xLabels ? timeLabels(vals, (u.scales.x!.max ?? 0) - (u.scales.x!.min ?? 0)) : vals.map(() => "")),
+    },
     { stroke: c.axis, font, size: 56, grid: { stroke: c.grid, width: 1 }, ticks: { stroke: c.grid, width: 1 }, values: (_u, vals) => vals.map(yFmt) },
   ];
 }
@@ -87,11 +108,11 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
   const syncKey = useId();
 
   const coresOpts = useMemo((): Omit<uPlot.Options, "width"> => ({
-    height: 120,
+    height: 150,
     legend: { show: false },
     cursor: { sync: { key: syncKey }, drag: { x: false, y: false }, points: { size: 5 } },
     scales: { x: { time: true }, y: { range: (_u, _lo, hi) => [0, Math.max(limitCores ?? 0, hi, 1) * 1.05] } },
-    axes: axes(colours, (v) => num(v, 0)),
+    axes: axes(colours, (v) => num(v, 0), false),
     series: [
       {},
       { label: "cores", stroke: colours.cores, width: 1.5, spanGaps: false, points: { show: false } },
@@ -100,11 +121,11 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
   }), [colours, limitCores, syncKey]);
 
   const memOpts = useMemo((): Omit<uPlot.Options, "width"> => ({
-    height: 140,
+    height: 190,
     legend: { show: false },
     cursor: { sync: { key: syncKey }, drag: { x: false, y: false }, points: { size: 5 } },
     scales: { x: { time: true }, y: { range: (_u, _lo, hi) => [0, Math.max(limitMem ?? 0, hi, 1) * 1.05] } },
-    axes: axes(colours, (v) => bytes(v, 0)),
+    axes: axes(colours, (v) => bytes(v, 0), true),
     series: [
       {},
       { label: "working memory", stroke: hot ? colours.attention : colours.mem, width: 1.5, spanGaps: false, points: { show: false } },
@@ -128,7 +149,7 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
 
   return (
     <div className="flex flex-col gap-2 px-3 py-3" data-testid="resource-chart" aria-label={summary}>
-      <dl className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-xs tabular-nums">
+      <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums">
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cores)]" /><dt className="font-sans text-text-muted">cores</dt><dd className="text-text">{num(pick(cols.cores))}{limitCores !== null && ` / ${limitCores}`}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className={`inline-block h-0.5 w-3 ${hot ? "bg-attention" : "bg-[var(--series-mem)]"}`} /><dt className="font-sans text-text-muted">working (anon+shm)</dt><dd className="text-text">{bytes(pick(cols.work))}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cache)]" /><dt className="font-sans text-text-muted">cache (reclaimable)</dt><dd className="text-text">{bytes(pick(cols.cache))}</dd></div>
@@ -136,7 +157,9 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
         <div className="flex items-center gap-1.5"><dt className="font-sans text-text-muted">at</dt><dd className="text-text">{clock(cols.t[at] ?? null)}</dd></div>
       </dl>
       <div ref={box} className="flex min-w-0 flex-col gap-1">
+        <p className="text-xs text-text-muted" aria-hidden="true">cores</p>
         <Pane data={coresData} opts={coresOpts} width={width} onCursor={setIdx} label={`cores over the run: ${summary}`} />
+        <p className="mt-2 text-xs text-text-muted" aria-hidden="true">memory</p>
         <Pane data={memData} opts={memOpts} width={width} onCursor={setIdx} label={`memory over the run: ${summary}`} />
       </div>
       <div>

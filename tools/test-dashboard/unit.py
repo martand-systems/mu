@@ -898,6 +898,18 @@ def t_stale():
           run[0]["live"]["stale"] is True, run[0]["live"] if run else rows)
     check("D07: the job rows say as of when", all(r["as_of"] is not None for r in rows))
     p.stop()
+    # a node with features whose rev does not move: its list is current as long as its stats are (the rows are not
+    # "as of" a minute ago while the card says online 2 s ago)
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    p = InProc("many", clock=clock)
+    p.ticks(70, real_sleep=0.01)
+    time.sleep(0.3)
+    rows = [r for r in p.app.rows() if r["state"] == "running"]
+    c = p.app.workers["office-pc"].card()
+    check("a features node with nothing changed: the running rows are current (as_of within 15 s, not stale)",
+          rows and all(not r["stale"] and clock.wall() - r["as_of"] <= 15 for r in rows) and not c["list_stale"],
+          [(clock.wall() - r["as_of"], r["stale"]) for r in rows])
+    p.stop()
 
 
 def t_wake():

@@ -9,7 +9,8 @@ const TONE: Record<BannerTone, { box: string; icon: string }> = {
   failed: { box: "border-failed/40 bg-surface", icon: "text-failed" },
   attention: { box: "border-attention/40 bg-surface", icon: "text-attention" },
   muted: { box: "border-border-strong bg-surface", icon: "text-text-muted" },
-  accent: { box: "border-accent/50 bg-surface", icon: "text-accent-text" },
+  // accent: the one orange is the banner's own button; the box and icon stay neutral
+  accent: { box: "border-border-strong bg-surface", icon: "text-text-muted" },
 };
 
 export function Banner({ tone, icon: Icon, title, children, action, testid }: { tone: BannerTone; icon: LucideIcon; title: ReactNode; children?: ReactNode; action?: ReactNode; testid?: string }) {

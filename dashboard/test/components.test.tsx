@@ -125,11 +125,12 @@ describe("machine cards", () => {
     expect(screen.getByText("never retried automatically")).toBeTruthy();
     expect(screen.getByRole("button", { name: /retry/ })).toBeTruthy();
   });
-  it("old node: live statistics after the next node update", () => {
+  it("old node: one line says it is behind this Mac and when live figures start, with the command", () => {
     const o = fx("api-overview-old-node.json");
     wrap(<NodeCard n={o.nodes[0]!} macVersion="v2026.11.9" />);
-    expect(screen.getByText("live statistics after the next node update")).toBeTruthy();
-    expect(screen.getByText("update μ on office-pc for live statistics")).toBeTruthy();
+    expect(screen.getByText(/^office-pc runs μ v\S+, older than this Mac's: live figures start after it updates$/)).toBeTruthy();
+    expect(screen.getByText("mu compute status office-pc")).toBeTruthy();
+    expect(screen.queryByText(/update μ on office-pc/)).toBeNull();
   });
 });
 

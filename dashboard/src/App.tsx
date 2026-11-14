@@ -36,9 +36,9 @@ function useUpdated(): boolean {
 function LoadingPage() {
   return (
     <div className="flex flex-col gap-4" data-testid="loading">
-      <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr))]">
-        {[0, 1].map((i) => (
-          <div key={i} className="h-40 rounded-md border border-border bg-surface p-3">
+      <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))]">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="h-[186px] rounded-md border border-border bg-surface p-3">
             <Skeleton lines={4} label="loading the machines" />
           </div>
         ))}
@@ -74,7 +74,7 @@ function Dashboard() {
         {mismatch && <ReloadBanner />}
         {showDown && <ServerDownBanner />}
         {!data ? (
-          down || ov.isError ? (
+          mismatch ? null : down || ov.isError ? (
             <p className="text-sm text-text-muted" data-testid="no-data">No data yet.</p>
           ) : (
             <LoadingPage />

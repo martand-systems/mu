@@ -4,6 +4,7 @@ import { CircleAlert, KeyRound, PlugZap, RotateCw } from "lucide-react";
 import { Component, type ReactNode } from "react";
 import { Banner } from "../../ui/Banner";
 import { CopyCommand } from "../../ui/CopyCommand";
+import { useJobRoute } from "../../lib/route";
 import { Brand } from "../top/TopBar";
 
 function Page({ children, testid }: { children: ReactNode; testid: string }) {
@@ -17,6 +18,8 @@ function Page({ children, testid }: { children: ReactNode; testid: string }) {
 
 /** No token, or a token from an earlier server start (401). The page holds no data. */
 export function NoTokenPage() {
+  const job = useJobRoute(); // a `mu submit` link (#job=<id>) keeps its job: open lands on it
+  const cmd = job ? `mu dashboard open ${job}` : "mu dashboard open";
   return (
     <Page testid="no-token">
       <div className="flex flex-col gap-3 rounded-md border border-border bg-surface p-5">
@@ -28,7 +31,7 @@ export function NoTokenPage() {
           The dashboard shows data only to a page opened by <span className="font-mono text-text">mu dashboard open</span>, which
           hands the page a token that changes each time the server starts. Run it in a terminal (or ask Claude to):
         </p>
-        <CopyCommand cmd="mu dashboard open" primary block />
+        <CopyCommand cmd={cmd} primary block what="open" />
         <p className="text-xs text-text-muted">A link printed by <span className="font-mono">mu submit</span> carries no token on purpose: it never appears in a terminal or a log.</p>
       </div>
     </Page>
@@ -47,8 +50,8 @@ export function ErrorPage({ detail }: { detail?: string }) {
         </h2>
         <p className="text-sm text-text-muted">Nothing changed on any node or job. The same information is in the terminal:</p>
         <div className="flex flex-col gap-2">
-          <CopyCommand cmd="mu status" block />
-          <CopyCommand cmd="mu dashboard" block />
+          <CopyCommand cmd="mu status" block what="status" />
+          <CopyCommand cmd="mu dashboard" block what="dashboard status" />
         </div>
         {detail !== undefined && <pre className="whitespace-pre-wrap text-xs text-text-muted">{detail}</pre>}
         <div>
@@ -75,7 +78,7 @@ export class Boundary extends Component<{ children: ReactNode }, { failed: boole
 export function ServerDownBanner() {
   return (
     <Banner tone="failed" icon={PlugZap} title="The dashboard server is not running" testid="server-down"
-      action={<CopyCommand cmd="mu dashboard on" primary />}>
+      action={<CopyCommand cmd="mu dashboard on" primary what="start" />}>
       Every figure below is as of its last answer. Start it again (or ask Claude to); the page reconnects by itself.
     </Banner>
   );

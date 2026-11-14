@@ -1,12 +1,14 @@
 // The job detail (docs/design/dashboard.md §5.1): the header, the log as it grows, the resources over the whole run
 // (or, on an old node, elapsed only), the run record and the `mu` commands to copy. Opened by #job=<id>.
-import { ArrowLeft, CircleArrowUp, CloudOff, FileQuestion, ShieldX } from "lucide-react";
+import { ArrowLeft, CircleArrowUp, Clock3, CloudOff, FileQuestion, ShieldX } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ApiFailed } from "../../api/client";
-import { useJob, useJobMetrics } from "../../api/queries";
+import { useJob, useJobMetrics, useOverview } from "../../api/queries";
 import type { JobDetail as Detail, JobRow, MetricSample } from "../../api/types";
 import { isStale, useNow } from "../../lib/clock";
 import { bytes, clock, duration, fullTime, num, shortDuration } from "../../lib/format";
+import { noteText } from "../jobs/JobTable";
+import { oldNodeLine } from "../machines/MachineCards";
 import { closeJob } from "../../lib/route";
 import { Banner } from "../../ui/Banner";
 import { Card, SectionTitle } from "../../ui/Card";
@@ -19,11 +21,20 @@ import { LogView } from "./LogView";
 import { ResourceChart } from "./ResourceChart";
 
 function BackLink() {
+  // a real link (it can open in a new tab and is announced as a link); a plain click goes back in place
   return (
-    <button type="button" onClick={closeJob} className="inline-flex items-center gap-1 rounded-sm text-sm text-text-muted hover:text-text">
+    <a
+      href="#"
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        closeJob();
+      }}
+      className="inline-flex items-center gap-1 rounded-sm text-sm text-text-muted hover:text-text"
+    >
       <ArrowLeft aria-hidden="true" size={14} />
       Jobs
-    </button>
+    </a>
   );
 }
 
@@ -36,27 +47,95 @@ function Meta({ k, children, mono = false }: { k: string; children: ReactNode; m
   );
 }
 
+const FINISHED = new Set(["succeeded", "failed", "cancelled", "timeout", "oom", "interrupted", "unknown"]);
+
+/** The job's progress at a glance, beside its state: "5m10s of 12h00m", "waiting 2m · #1 in the queue", "41m12s · exit 0". */
+function Progress({ j, now }: { j: Detail["job"]; now: number }) {
+  const limit = j.limits?.time_s ?? null;
+  if (j.state === "running" && j.started_at !== null) {
+    return (
+      <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
+        <span data-testid="elapsed">{duration(now - j.started_at)}</span>
+        {limit !== null && <span className="text-text-muted"> of {shortDuration(limit)}</span>}
+      </span>
+    );
+  }
+  if (j.state === "queued") {
+    return (
+      <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
+        waiting {j.queued_at !== null ? shortDuration(now - j.queued_at) : "—"}
+        {j.position !== null && <span className="text-text-muted"> · #{j.position} in the queue</span>}
+      </span>
+    );
+  }
+  if (j.started_at !== null && j.ended_at !== null) {
+    return (
+      <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
+        <span data-testid="elapsed">{duration(j.ended_at - j.started_at)}</span>
+        {j.exit_code !== null && <span className="text-text-muted"> · exit {j.exit_code}</span>}
+      </span>
+    );
+  }
+  return null;
+}
+
+/** The commands to copy, the next step first and orange: follow a running job's log, fetch a finished job's outputs,
+ * wait for a queued one. */
+function Commands({ d }: { d: Detail }) {
+  const j = d.job;
+  const c = d.commands;
+  const logOnce = c.log.replace(/ -f\b/, "");
+  if (j.state === "running") {
+    return (
+      <div className="flex flex-wrap gap-2" data-testid="commands">
+        <CopyCommand cmd={c.log} primary what="log" />
+        <CopyCommand cmd={c.fetch} what="fetch" />
+        <CopyCommand cmd={c.cancel} what="cancel" />
+        <CopyCommand cmd={c.status} what="status" />
+      </div>
+    );
+  }
+  if (j.state === "queued") {
+    return (
+      <div className="flex flex-wrap gap-2" data-testid="commands">
+        <CopyCommand cmd={`${c.status} --wait --timeout 500`} primary what="wait" />
+        <CopyCommand cmd={c.cancel} what="cancel" />
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-wrap gap-2" data-testid="commands">
+      <CopyCommand cmd={c.fetch} primary={FINISHED.has(j.state)} what="fetch" />
+      <CopyCommand cmd={logOnce} what="log" />
+      <CopyCommand cmd={c.status} what="status" />
+    </div>
+  );
+}
+
 function Header({ d, now }: { d: Detail; now: number }) {
   const j = d.job;
   const r = d.record;
-  const elapsed = j.state === "running" && j.started_at !== null ? now - j.started_at : j.started_at !== null && j.ended_at !== null ? j.ended_at - j.started_at : null;
-  const wait = j.state === "queued" && j.queued_at !== null ? now - j.queued_at : null;
   const limits = j.limits ?? r?.limits ?? null;
+  const frac = j.state === "running" && j.started_at !== null && limits?.time_s ? Math.min(1, Math.max(0, (now - j.started_at) / limits.time_s)) : null;
   return (
     <div className="flex flex-col gap-3" data-testid="job-header">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <BackLink />
-        <h2 className="min-w-0 truncate text-lg font-semibold text-text" title={j.name ?? ""}>{j.name ?? "(no name)"}</h2>
-        <JobStateBadge state={j.state} position={j.position} />
-        {j.cancel_requested && <span className="text-xs text-text-muted">cancel asked</span>}
-        <span className="ml-auto text-sm text-text-muted">
-          {d.node.name} · via relay
-        </span>
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <BackLink />
+          <h2 className="min-w-0 truncate text-lg font-semibold text-text" title={j.name ?? ""}>{j.name ?? "(no name)"}</h2>
+          <JobStateBadge state={j.state} position={j.state === "queued" ? null : j.position} />
+          <Progress j={j} now={now} />
+          <span className="whitespace-nowrap text-sm text-text-muted">· on <span className="text-text">{d.node.name}</span></span>
+          {j.cancel_requested && <span className="text-xs text-text-muted">cancel asked</span>}
+        </div>
+        {frac !== null && (
+          <div className="h-0.5 w-full overflow-hidden rounded-full bg-border" aria-hidden="true" data-testid="time-bar">
+            <div className="h-full bg-text" style={{ width: `${(frac * 100).toFixed(2)}%` }} />
+          </div>
+        )}
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <CopyCommand cmd={j.job_id} label="copy id" />
-      </div>
-      <dl className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-x-6 gap-y-1.5">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 md:grid-cols-[repeat(auto-fill,minmax(200px,1fr))]">
+        <Meta mono k="id">{j.job_id}</Meta>
         {(j.project || j.project_id) && (
           <Meta k="project">
             {j.project ?? j.project_id}
@@ -69,22 +148,14 @@ function Header({ d, now }: { d: Detail; now: number }) {
         {j.queued_at !== null && <Meta k="queued"><span title={fullTime(j.queued_at)}>{clock(j.queued_at, now)}</span></Meta>}
         {j.started_at !== null && <Meta k="started"><span title={fullTime(j.started_at)}>{clock(j.started_at, now)}</span></Meta>}
         {j.ended_at !== null && <Meta k="ended"><span title={fullTime(j.ended_at)}>{clock(j.ended_at, now)}</span></Meta>}
-        {wait !== null && <Meta k="waiting">{shortDuration(wait)}{j.position !== null && ` · place ${j.position} in the queue`}</Meta>}
-        {elapsed !== null && <Meta k={j.state === "running" ? "elapsed" : "wall"}><span data-testid="elapsed">{duration(elapsed)}</span></Meta>}
-        {j.exit_code !== null && <Meta k="exit">{j.exit_code}</Meta>}
         {limits && (
           <Meta k="limits">
             {limits.mem_bytes !== null ? bytes(limits.mem_bytes, 0) : "—"} · {limits.time_s !== null ? shortDuration(limits.time_s) : "—"} · {limits.cores !== null ? `${limits.cores} cores` : "—"}
           </Meta>
         )}
       </dl>
-      {j.note && <p className="text-sm text-text-muted"><span className="text-text">{j.state}:</span> {j.note}</p>}
-      <div className="flex flex-wrap gap-2">
-        <CopyCommand cmd={d.commands.log} primary label="copy" />
-        <CopyCommand cmd={d.commands.fetch} />
-        {(j.state === "running" || j.state === "queued") && <CopyCommand cmd={d.commands.cancel} />}
-        <CopyCommand cmd={d.commands.status} />
-      </div>
+      {j.note && <p className="text-sm text-text-muted">{noteText(j.state, j.note)}</p>}
+      <Commands d={d} />
     </div>
   );
 }
@@ -101,6 +172,8 @@ function Resources({ d }: { d: Detail }) {
   const running = j.state === "running";
   const can = d.node.metrics && !d.node.old_node && j.state !== "queued";
   const m = useJobMetrics(j.job_id, running, can);
+  const ov = useOverview();
+  const card = ov.data?.nodes.find((n) => n.name === d.node.name);
   // live points between metrics reads come from the job row (the node's watch, via the overview's figures)
   const live = useRef<MetricSample[]>([]);
   const [, setTick] = useState(0);
@@ -120,14 +193,12 @@ function Resources({ d }: { d: Detail }) {
   if (d.node.old_node || m.data?.reason === "old-node") {
     return (
       <div className="flex flex-col gap-2 px-3 py-4" data-testid="resources-old-node">
-        <p className="flex items-center gap-1.5 text-sm font-medium text-text">
-          <CircleArrowUp aria-hidden="true" size={14} className="text-attention" />
-          live statistics after the next node update
+        <p className="flex items-start gap-1.5 text-sm text-text">
+          <CircleArrowUp aria-hidden="true" size={14} className="mt-0.5 shrink-0 text-attention" />
+          <span>{oldNodeLine(d.node.name, card?.hello?.mu_version ?? null, ov.data?.mac.mu_version ?? null)}</span>
         </p>
-        <p className="text-sm text-text-muted">
-          {d.node.name} runs an older μ without the sampler, so this job has no resource chart; its state, log and times are
-          shown. Update μ on {d.node.name} for live cores and memory.
-        </p>
+        <p className="text-sm text-text-muted">This job has no resource chart; its state, log and times are shown.</p>
+        <CopyCommand cmd={`mu compute status ${d.node.name}`} what="node status" />
       </div>
     );
   }
@@ -145,7 +216,7 @@ function Resources({ d }: { d: Detail }) {
     <div className="flex flex-col">
       {running && j.live && (
         <div className="flex flex-col gap-2 border-b border-border px-3 py-3" data-testid="live-figures">
-          <Meter label="cores" value={j.live.cpu_cores} max={limC} stale={liveStale} text={`${num(j.live.cpu_cores)}${limC !== null ? ` / ${limC}` : ""}`} />
+          <Meter label="cores" value={j.live.cpu_cores} max={limC} warnAt={Infinity} stale={liveStale} text={`${num(j.live.cpu_cores)}${limC !== null ? ` / ${limC}` : ""}`} />
           <Meter label="mem" value={work} max={lim} stale={liveStale} text={`${bytes(work)} / ${bytes(lim, 0)}`} />
           {liveStale && <p className="text-xs text-stale">stale · as of {clock(j.live.t, now)}: the chart stops until the node answers again</p>}
         </div>
@@ -200,7 +271,7 @@ function Record({ d }: { d: Detail }) {
         </dl>
       )}
       <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2 text-xs text-text-muted">
-        the node: <CopyCommand cmd={d.commands.node} />
+        the node: <CopyCommand cmd={d.commands.node} what="node status" />
       </div>
     </Card>
   );
@@ -248,7 +319,7 @@ export function JobDetailView({ id }: { id: string }) {
               <span className="font-mono text-text">{id}</span>
               {missing ? " is not in any paired node's list. A job just submitted appears within seconds." : ""}
             </p>
-            <CopyCommand cmd={`mu status ${id}`} primary />
+            <CopyCommand cmd={`mu status ${id}`} primary what="status" />
           </EmptyState>
         </Card>
       </div>
@@ -259,13 +330,26 @@ export function JobDetailView({ id }: { id: string }) {
     <div className="flex flex-col gap-4" data-testid="job-detail" data-job={d.job.job_id} data-state={d.job.state}>
       <Header d={d} now={now} />
       <NodeBanner d={d} />
-      <div className="grid gap-4 min-[1200px]:grid-cols-[7fr_5fr]">
-        <LogView id={d.job.job_id} queued={d.job.state === "queued"} logCmd={d.commands.log} />
-        <Card label="resources">
-          <SectionTitle right={<span className="text-xs text-text-muted">whole run</span>}>Resources</SectionTitle>
-          <Resources d={d} />
+      {d.job.state === "queued" ? (
+        <Card label="log and resources">
+          <p className="flex items-center gap-2 px-3 py-6 text-sm text-text-muted" data-testid="queued-note">
+            <Clock3 aria-hidden="true" size={14} className="shrink-0" />
+            <span>
+              Queued{d.job.position !== null ? <>, <span className="text-text">#{d.job.position}</span></> : ""} on {d.node.name}
+              {d.job.queued_at !== null && <>, waiting <span className="tabular-nums text-text">{shortDuration(now - d.job.queued_at)}</span></>}. The log and the
+              chart start when it runs.
+            </span>
+          </p>
         </Card>
-      </div>
+      ) : (
+        <div className="grid gap-4 min-[1200px]:grid-cols-[7fr_5fr]">
+          <LogView id={d.job.job_id} queued={false} logCmd={d.commands.log} />
+          <Card label="resources">
+            <SectionTitle right={<span className="text-xs text-text-muted">whole run</span>}>Resources</SectionTitle>
+            <Resources d={d} />
+          </Card>
+        </div>
+      )}
       <Record d={d} />
     </div>
   );

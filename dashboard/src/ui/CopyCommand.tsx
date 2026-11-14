@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from "react";
 
 type Result = "idle" | "copied" | "select";
 
-export function CopyCommand({ cmd, primary = false, label, block = false }: { cmd: string; primary?: boolean; label?: string; block?: boolean }) {
+export function CopyCommand({ cmd, primary = false, label, block = false, what }: { cmd: string; primary?: boolean; label?: string; block?: boolean; what?: string }) {
   const [res, setRes] = useState<Result>("idle");
   const codeRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -28,6 +28,10 @@ export function CopyCommand({ cmd, primary = false, label, block = false }: { cm
   }
 
   function onClick() {
+    if (__FAULT_COPY_NO_FALLBACK__) {
+      void navigator.clipboard.writeText(cmd).then(() => setRes("copied"), () => undefined);
+      return;
+    }
     if (__FAULT_COPY_AFTER_AWAIT__) {
       void (async () => {
         await new Promise((r) => setTimeout(r, 1500));
@@ -47,7 +51,7 @@ export function CopyCommand({ cmd, primary = false, label, block = false }: { cm
   }
 
   const btn = primary
-    ? "border-transparent bg-brand text-on-brand hover:brightness-95"
+    ? "copy-primary border-transparent bg-brand text-on-brand hover:brightness-95"
     : "border-border-strong bg-surface text-text hover:bg-surface-raised";
   return (
     <span className={`${block ? "flex" : "inline-flex"} min-w-0 max-w-full items-stretch overflow-hidden rounded-md border border-border bg-surface-raised text-sm`}>
@@ -60,10 +64,10 @@ export function CopyCommand({ cmd, primary = false, label, block = false }: { cm
         className={`inline-flex shrink-0 items-center gap-1 border-l px-2 py-1 text-xs font-medium ${btn}`}
         data-copy-cmd={cmd}
         data-copy-result={res}
+        aria-label={`${res === "copied" ? "copied" : res === "select" ? "selected: press ⌘C" : (label ?? "copy")} ${what ? `${what} command` : "command"}`}
       >
         {res === "copied" ? <Check aria-hidden="true" size={13} /> : <Copy aria-hidden="true" size={13} />}
         <span>{res === "copied" ? "copied" : res === "select" ? "selected: press ⌘C" : (label ?? "copy")}</span>
-        <span className="sr-only"> {cmd}</span>
       </button>
     </span>
   );

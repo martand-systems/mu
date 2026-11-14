@@ -9,7 +9,10 @@ export function takeTokenFromFragment(): boolean {
   if (t === null) return false;
   params.delete("t");
   const rest = params.toString();
-  if (!__FAULT_KEEP_FRAGMENT__) {
+  if (__FAULT_PUSH_FRAGMENT__) {
+    // push-fragment (D15's fault): a new history entry, so the one with #t= stays behind it
+    window.history.pushState(null, "", window.location.pathname + window.location.search + (rest ? "#" + rest : ""));
+  } else if (!__FAULT_KEEP_FRAGMENT__) {
     window.history.replaceState(null, "", window.location.pathname + window.location.search + (rest ? "#" + rest : ""));
   }
   if (!TOKEN.test(t)) return false;

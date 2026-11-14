@@ -70,6 +70,15 @@ export function MachineBadge({ state, label }: { state: MachineState; label?: st
   const s: MachineState = __FAULT_REFUSED_AS_OFFLINE__ && state === "refused" ? "offline" : state;
   const l = MACHINE_LOOK[s];
   const Icon = l.icon;
+  if (s === "old-node") {
+    // online (green) and old (amber): the node answers, but it is behind this Mac
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium" data-machine-state={s}>
+        <Icon aria-hidden="true" size={13} strokeWidth={2.25} className={`shrink-0 ${toneClass("online")}`} />
+        <span><span className={toneClass("online")}>online</span> <span className={toneClass("attention")}>· old μ</span></span>
+      </span>
+    );
+  }
   return (
     <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${toneClass(l.tone)}`} data-machine-state={s}>
       <Icon aria-hidden="true" size={13} strokeWidth={2.25} className="shrink-0" />

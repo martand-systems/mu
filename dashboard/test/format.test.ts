@@ -33,3 +33,25 @@ describe("D07 (the stale rule)", () => {
     expect(isStale(null, now)).toBe(true);
   });
 });
+
+describe("review fixes: sizes, the chart's time axis, notes", () => {
+  it("one decimal for GB and above, none below", () => {
+    expect(bytes(920e6)).toBe("920 MB");
+    expect(bytes(665.4e6)).toBe("665 MB");
+    expect(bytes(21.8e9)).toBe("21.8 GB");
+    expect(bytes(12_300)).toBe("12 kB");
+  });
+  it("the time axis shows seconds under 10 minutes and the day when a run crosses midnight", async () => {
+    const { timeLabels } = await import("../src/features/job-detail/ResourceChart");
+    const t0 = new Date(2026, 10, 14, 22, 40, 0).getTime() / 1000;
+    expect(timeLabels([t0, t0 + 15, t0 + 30], 300)).toEqual(["22:40:00", "22:40:15", "22:40:30"]);
+    expect(timeLabels([t0, t0 + 1800], 3600)).toEqual(["22:40", "23:10"]);
+    const late = new Date(2026, 10, 14, 23, 50, 0).getTime() / 1000;
+    expect(timeLabels([late, late + 1200], 3600)[0]).toBe("14 Nov 23:50");
+  });
+  it("a note does not repeat its state word", async () => {
+    const { noteText } = await import("../src/features/jobs/JobTable");
+    expect(noteText("cancelled", "cancelled while running")).toBe("cancelled while running");
+    expect(noteText("failed", "exit 1")).toBe("failed: exit 1");
+  });
+});
