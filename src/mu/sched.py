@@ -242,6 +242,7 @@ def plan(now, cap, running, queue, disk=None):
             state["ids"] = [c for c in state["ids"] if c not in ids]
         state["mem"] -= req["mem_bytes"]
         state["ordinary_running"] = True
+        ends.append((now + START_WAIT_S + req["time_s"] + SLACK_S, n, req["mem_bytes"]))   # its bound once started
         return {"cores": n, "cpus": ids, "mem_bytes": req["mem_bytes"], "time_s": req["time_s"], "class": cls,
                 "env_cores": req.get("env_cores", n)}
 

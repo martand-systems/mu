@@ -374,6 +374,8 @@ def t_sched_runner(base, stubs_text):
         f.write("ci-owner\n")
     from mu import node
     slow = {"s": 0}
+    # the test's node, whatever this machine is: 4 CPUs and 64 GB (node.json sched lowers M to 2 GB)
+    node.capacity = lambda nd=None: sched.capacity(nd if nd is not None else node.node_info(), [0, 1, 2, 3], 64 * G)
 
     def prep(j):
         shutil.rmtree(os.path.join(j["dir"], "work"), ignore_errors=True)
