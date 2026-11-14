@@ -413,6 +413,8 @@ test("D29 states: every scenario, job detail and page state loads without a viol
     await allJobs(page);
     await settled(page);
     if (sc === "refused") await page.getByRole("button", { name: /retry now/ }).click();
+    await page.waitForTimeout(300);
+    expect(violations.list, "CSP or Trusted Types violations (D29)").toEqual([]); // fail at the first scenario that has one
     if (sc === "busy" || sc === "old-node" || sc === "hostile") {
       for (const st of ["running", "queued", "succeeded", "failed", "oom"]) {
         const row = page.locator(`tr[data-state="${st}"]`).first();

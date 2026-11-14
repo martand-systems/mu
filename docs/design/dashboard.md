@@ -862,17 +862,17 @@ see inside a canvas.
 
 | Component | What it shows | Notes |
 |---|---|---|
-| `TopBar` | title, nodes online, age of the last update | the only global status. The tab title carries the state ("▶ 1 running · μ", "✕ 1 failed · μ"); a μ favicon (SVG, in the build) |
+| `TopBar` | title, nodes online ("2 of 2 nodes online"; under 640 px the dot and "2/2"), age of the last update | the only global status. The tab title carries the state ("▶ 1 running · μ", "… 1 queued · μ"); no "✕ failed" title in 1a (a failed job from days ago would mark the tab for ever: it needs "seen" state, phase 3's notifications); a μ favicon (SVG, in the build) |
 | `MachineCard` | name, link (`via relay`), state badge, CPU % with a 10-minute sparkline, a memory meter (used, available, job limit), running and queued counts, μ version, "needs attention" lines, the age | one card per machine; node figures labelled "WSL VM" (§9 Q2) |
 | `StateBadge` | icon + word + colour for every job and machine state | the only place state colours are applied |
-| `Meter` | a value against a limit (cores 17.8 / 20, memory 9.8 / 22 GB) | text value always shown beside the bar |
-| `JobTable` | state, short id, name, project, node, wait or elapsed, peak memory, cores | a plain `<table>` of our own in 1a (TanStack Table comes with phase 2's filters); three sortable columns whose headers are buttons with `aria-sort`; the "from" and "node" filters are segmented `<button aria-pressed>` groups (1a; not native `<select>`s, see §3.2); a row opens the detail with Enter or a click |
-| `JobHeader` | name, state, full id with copy, node, project @ commit, μ version, attempt, key, times (absolute, as text), limits, copy-the-command buttons | — |
-| `LogView` | the log, following, with pause and wrap toggles and its size | monospace; text only. Caps: the page keeps the last 5,000 lines or 2 MB, whichever is smaller, and says "earlier lines: `mu log <id>`"; one line is cut at 10 kB with "… N bytes cut". Pause and wrap are `<button aria-pressed>`; the scroll area is native `overflow: auto` |
-| `ResourceChart` | cores and memory (working, cache) over the whole run, the limit as a dashed line | uPlot; one cursor across both panes; gaps drawn as gaps; values with units in our own legend, not a floating tooltip. Colours from the tokens, redrawn on a theme change. An `aria-label` summary ("memory 9.8 GB now, peak 10.3 GB, limit 22 GB; cores 17.8 of 20") and a "show as table" button that lists the samples (thinned to one a minute) as a real table |
+| `Meter` | a value against a limit (cores 17.8 / 20, memory 9.8 / 22 GB) | text value always shown beside the bar. Amber only when it is worth acting on: a job's memory at 90 % of its limit; a machine's memory at 95 % of its total; **a job's cores never** (full use of its cores is the goal) |
+| `JobTable` | state, short id, name, project, node, time ("waits 2m", elapsed or wall), memory, cores, a row chevron | fixed column widths (`table-layout: fixed`: state 150, id 84, name the rest, project 160, node 120, time 112, memory 112, cores 96, chevron 24 px), so columns never jump; the header sticks under the top bar (1,024 px and wider); "stale" once per row (a clock icon and the word after the state; the figures grey; "as of" in the row's tooltip), the `*` / `*~` marks in a fixed 2-character slot so the units line up; "newest 100 per node · older: `mu status`" beside the count; sizes with one decimal from 1 GB up, none below ("920 MB"); a note does not repeat its state ("cancelled while running"). A plain `<table>` of our own in 1a (TanStack Table comes with phase 2's filters); three sortable columns whose headers are buttons with `aria-sort`; the "from" and "node" filters are segmented `<button aria-pressed>` groups (1a; not native `<select>`s, see §3.2); a row opens the detail with Enter or a click |
+| `JobHeader` | a title row that reads at a glance: `← Jobs  frame-fea-v2  ▶ running  5m10s of 12h00m  · on office-pc` (queued: `waiting 2m · #1 in the queue`; finished: `41m12s · exit 0`), with a 2 px time bar under it while running (elapsed / time limit, in the text colour, not orange); then id, project @ commit, μ version, attempt, key, times (absolute, as text) and limits; then the commands | the next step is the one orange (primary) command: running `mu log <id> -f`; finished `mu fetch <id>` first, then `mu log <id>` without `-f`; queued `mu status <id> --wait --timeout 500`, and cancel. "← Jobs" is a real link. A queued job's log and chart are one short card ("Queued, #1 on office-pc, waiting 2m. The log and the chart start when it runs.") |
+| `LogView` | the log, following, with pause and wrap toggles and its size | pause only while the log can still grow (not "complete" or "waiting"); monospace; text only. Caps: the page keeps the last 5,000 lines or 2 MB, whichever is smaller, and says "earlier lines: `mu log <id>`"; one line is cut at 10 kB with "… N bytes cut". Pause and wrap are `<button aria-pressed>`; the scroll area is native `overflow: auto` |
+| `ResourceChart` | cores and memory (working, cache) over the whole run, the limit as a dashed line | uPlot; two captioned panes ("cores" 150 px, "memory" 190 px), the time labels only under the memory pane (one axis, one cursor), `HH:MM:SS` when the run is under 10 minutes and the day on the first tick when it crosses midnight, at least 60 px between ticks; the legend's figures in the sans with `tabular-nums`; one cursor across both panes; gaps drawn as gaps; values with units in our own legend, not a floating tooltip. Colours from the tokens, redrawn on a theme change. An `aria-label` summary ("memory 9.8 GB now, peak 10.3 GB, limit 22 GB; cores 17.8 of 20") and a "show as table" button that lists the samples (thinned to one a minute) as a real table |
 | `AgeLabel` | "2 s ago", or "stale · as of 10:42:07" | updates every second without being announced to screen readers; the absolute time on hover (Radix Tooltip) and in a `<time datetime>` element |
-| `CopyCommand` | a `mu …` command and a copy button | "copied" for 2 s. `navigator.clipboard.writeText` is called inside the click handler itself, before any `await` (WebKit may refuse it outside the user's gesture); `http://127.0.0.1` counts as a secure context; if the call still fails, the command is selected for ⌘C and the button says so (D47) |
-| `Banner` | refused, offline, reconnecting, old node, reload, server not answering | one at a time per scope (page, card, detail) |
+| `CopyCommand` | a `mu …` command and a copy button | the button's name says what it copies ("copy log command"), not the whole command again; the orange primary button's focus ring is the text colour (orange on orange would not show). "copied" for 2 s. `navigator.clipboard.writeText` is called inside the click handler itself, before any `await` (WebKit may refuse it outside the user's gesture); `http://127.0.0.1` counts as a secure context; if the call still fails, the command is selected for ⌘C and the button says so (D47) |
+| `Banner` | refused, offline, reconnecting, old node, reload, server not answering | one at a time per scope (page, card, detail). The reload banner's only orange is its Reload button (border and icon neutral) |
 | `EmptyState`, `Skeleton` | what to do next; the shape of the content while loading | — |
 
 **States** (each shown in the states gallery and covered by a Playwright scenario):
@@ -880,18 +880,18 @@ see inside a canvas.
 | State | Machine card | Job table | Job detail |
 |---|---|---|---|
 | Loading | skeleton of the card's lines | five skeleton rows; nothing before 300 ms | skeleton header, empty log frame |
-| Empty | — | "No jobs yet" and the command to submit one | — |
+| Empty | the sparkline says "collecting…" until it has 6 points (a dev server starts with 10 minutes of fake history) | "No jobs yet" and an example to submit one, as plain code (an example with "…" in it is not offered for copying) | — |
 | Live | figures with ages under 15 s | live figures for running jobs | log following, chart growing |
 | Stale (> 15 s) | figures grey, "stale · as of …" | running jobs' figures grey | chart stops; no line drawn into the gap |
-| Offline | grey badge "offline since 10:41", retry countdown | that node's rows keep their last state, marked "as of" | as stale, with the banner |
-| Refused (exit 5) | red badge, the CLI's message, "not retried", a retry button | as offline | banner with the message |
-| Old node | "update μ on office-pc for live statistics" | jobs listed, no live figures | no resource chart; elapsed only |
+| Offline | grey badge "offline since 10:41", retry countdown, `mu compute status office-pc` to copy; before any answer "no answer yet since the dashboard started"; the CLI's `[code]` in the tooltip, not the sentence | that node's rows keep their last state, marked stale | as stale, with the banner |
+| Refused (exit 5) | red badge, the CLI's message, "never retried automatically", a retry button, and `mu compute invite office-pc --replace` to copy when the CLI says to pair again | as offline | banner with the message |
+| Old node | badge "online" (green) "· old μ" (amber); one line "office-pc runs μ v2026.11.8, older than this Mac's: live figures start after it updates" and `mu compute status office-pc` to copy | jobs listed, no live figures | the same line; no resource chart; elapsed only |
 | Reconnecting (after a wake) | "reconnecting…" for at most one reconcile | unchanged | unchanged |
-| No token / stale token | the whole page is the no-token page (§4.6), with no data | — | — |
+| No token / stale token | the whole page is the no-token page (§4.6), with no data; a `#job=<id>` link keeps its job and offers `mu dashboard open <id>` | — | — |
 | Updated server, or a lazy chunk 404 | "reload: the dashboard was updated" | — | — |
 | Server not answering (a `fetch` to 127.0.0.1 fails; not a node problem) | page banner "the dashboard server is not running: `mu dashboard on` (or ask Claude)"; every figure turns stale | rows kept, "as of" | as stale |
 | Unexpected error (error boundary) | the whole page: a fixed message, `mu status` and `mu dashboard`, a reload button; **no error text**, which could carry node strings | — | — |
-| No JavaScript, or an older browser | `index.html`'s static text, replaced when the app mounts: "μ dashboard needs JavaScript and Safari 16.4, Chrome 111 or Firefox 128 or newer"; the same in `<noscript>` | — | — |
+| No JavaScript, or an older browser | `index.html`'s static text in `#root`, replaced when the app mounts: "μ dashboard needs JavaScript and Safari 16.4, Chrome 111 or Firefox 128 or newer" (once: no `<noscript>` copy, which showed the text twice) | — | — |
 
 **The owner's review of the look.** The `e2e` job's screenshots of every scenario in light and dark (§4.8) are the
 review copy. 1a is not done until the owner has looked at them once and the changes asked for are made (½ day
@@ -1094,7 +1094,7 @@ is always such a run.
 | D03 | `stats` answers valid JSON, exit 0, with the running job and its cores ≈ the job's; idle → `running: []`; with 2,000 synthetic finished jobs the node-side time stays < 100 ms; with the runner stopped for 20 s → `stale: true` | `stats-scan` (call `scan_jobs`) → over 100 ms; `no-age` → `stale` missing | 1b · Python, node |
 | D04 | Against a node without `features` (previous release), the page lists jobs and says "update μ on office-pc for live statistics" | `assume-features` → error page, no jobs | 1a · Playwright (`old-node`) |
 | D05 | **Jobs by node.** Two fake nodes, one job submitted to each: `/api/jobs` and the rendered table show each job under its own node, and each follows queued → running → succeeded within 15 s of the node's change | `node-from-config` (every job labelled with the first paired node) → wrong node | 1a · Playwright; 1b again with a real node |
-| D06 | **Figures are right.** A fake node returns known `stats`: `/api/nodes/<n>` and the rendered machine card show those numbers (CPU %, used, available, limit, each job's cores and memory) | `swap-mem-fields` (available shown as used) → mismatch | 1a · Playwright; 1b again |
+| D06 | **Figures are right.** A fake node returns known `stats`: `/api/nodes/<n>` and the rendered machine card show those numbers (CPU %, used, available, limit, each job's cores and memory). 1a as built: the page is compared with the fake node's raw `stats` (a dev-only route, `/api/dev/fake-stats/<node>`), not with this server's API, which agrees with the card under a server fault. | `swap-mem-fields` (available shown as used) → mismatch | 1a · Playwright; 1b again |
 | D07 | **Stale is shown.** Cut the fake node's link: within 15 s every node value carries its age, is greyed and says "stale"; the API marks it `stale: true` | `serve-last-as-live` → values still presented as current | 1a · Playwright, Vitest (stale rule); 1b again |
 | D08 | **Mac sampler.** Against a 2-core busy loop for 10 s, the Mac card's CPU equals 2 cores' worth of the machine within ± 25 % | `cpu-first-call` (psutil's first `cpu_percent` with no interval, always 0) → off | 1a · Python (sampler), Playwright (card) |
 | D09 | The sampler costs < 5 ms per pass (median); the runner's loop stays at 1 s ± 0.1; with the dashboard killed for 5 min in a 10-min job, the job's series has no gap over 2 × the interval | `sample-under-lock` → the queue waits; `mac-samples-only` → a 5-min gap | 1b · Python, node |
@@ -1103,7 +1103,7 @@ is always such a run.
 | D12 | The server is reachable on 127.0.0.1, refused on the machine's LAN address and on `::1` | `bind-all` → LAN connect succeeds | 1a · Python |
 | D13 | `Host: evil.example:<port>` → 403 on every route | `no-host-check` → 200 | 1a · Python |
 | D14 | `/api/*` without `X-Mu-Token` → 401, with the token in a cookie only → 401, with a wrong token → 401, with the previous server start's token → 401 and the no-token page, which holds no job or node data | `no-token` → 200; `fixed-token` → old token accepted | 1a · Python (HTTP), Playwright (page) |
-| D15 | The token appears in none of: the argv recorded by a stub opener during `mu dashboard open`, `logs/dashboard.log`, the output of `mu submit`, `mu dashboard --json` and `mu compute status --json`; `dashboard-open.html` is gone after first use; once the page has loaded, neither `location` nor `history` holds `#t=` | `open-url-argv` (open `http://…#t=` directly) → found in the stub's argv; `keep-fragment` (skip `replaceState`) → `#t=` in the address bar | 1a · Python, Playwright (address bar) |
+| D15 | The token appears in none of: the argv recorded by a stub opener during `mu dashboard open`, `logs/dashboard.log`, the output of `mu submit`, `mu dashboard --json` and `mu compute status --json`; `dashboard-open.html` is gone after first use; once the page has loaded, neither `location` nor `history` holds `#t=`. 1a as built: the history half is checked by going back (`push-fragment` → `#t=` found there). | `open-url-argv` (open `http://…#t=` directly) → found in the stub's argv; `keep-fragment` (skip `replaceState`) → `#t=` in the address bar | 1a · Python, Playwright (address bar) |
 | D16 | A job named `<img src=x onerror=…>` that logs HTML, ANSI escapes and a 1 MB line: in Chromium and WebKit no element is created from it, nothing runs, the CSP header is present, the page stays responsive; ESLint rejects a planted `dangerouslySetInnerHTML` | `inner-html` (render the name with `dangerouslySetInnerHTML`, lint rule off) → the handler runs; `lint-off` → the planted line passes lint | 1a · Playwright (Chromium, WebKit), ESLint |
 | D17 | **Allowlist.** Unit test of `NodeReader`: every verb outside the list raises before any ssh call; no other code path in `dashboard.py` constructs a `jobs.Conn` (a source check); end to end, a fake node records only allowed verbs while every route is exercised | `allow-cancel` → `cancel` passes the wrapper | 1a · Python |
 | D18 | Node offline → "offline since", retries back off; exit 5 (host key) → red, zero further node requests in 5 min | `retry-refused` → requests > 0 | 1a · Python, Playwright |
@@ -1114,10 +1114,10 @@ is always such a run.
 | D23 | `mu dashboard on` → the agent is loaded and the URL answers after the agent is killed (launchd restarts it); `off` → nothing listens; with no tab and nothing unfinished for 5 min, zero node requests and the server's CPU time does not grow by more than 0.1 s | `poll-when-idle` → node requests seen | 1a · Python, macOS |
 | D24 | On battery (stubbed) with no tab and a running job: `list` at most every 5 min, and the dashboard's master is gone after `ControlPersist` | `ignore-battery` → `list` every 60 s | 1a · Python |
 | D25 | With a tab open for 10 min during a job, μ's own processes on the node use < 2 % of one core; the job's `cpu_s` is within 3 % of a run without the tab | `poll-stats-1s` (poll `stats` per second instead of `watch`) → over budget | 1b · node |
-| D26 | **Accessibility** (Playwright, Chromium): every control is reachable with Tab and has an accessible name; every state colour has a text label next to it; no `aria-live` region changes on a routine refresh; axe reports no serious or critical violation (contrast included) in light and dark, in every scenario | `div-button` (a clickable `div`) → unreachable; `faint-text` (state text in `text-faint`) → axe contrast violation | 1a · Playwright + axe |
+| D26 | **Accessibility** (Playwright, Chromium): every control is reachable with Tab and has an accessible name; every state colour has a text label next to it; no `aria-live` region changes on a routine refresh; axe reports no serious or critical violation (contrast included) in light and dark, in every scenario. 1a as built: every scenario plus the job details (running, queued, failed), the empty state, server down and the no-token page; "clickable" is found from React's onClick props and pointer cursors, not from the Tab list. | `div-button` (a clickable `div`) → unreachable; `faint-text` (state text in `text-faint`) → axe contrast violation | 1a · Playwright + axe |
 | D27 | Two `mu dashboard serve` at once → one serves, the other exits 0 | `no-lock` → two processes | 1a · Python |
 | D28 | **The committed build is the source's.** CI rebuilds `share/dashboard/` and finds no difference; `BUILD.json`'s source hash matches `dashboard/` (checked in Python, without Node) | `stale-build` (change a component, commit without rebuilding) → both checks fail | 1a · CI `front`, Python |
-| D29 | **No CSP or Trusted Types violation.** In Chromium and WebKit, every Playwright scenario registers a `securitypolicyviolation` listener with `addInitScript` (before any page script) and fails on any event; each scenario opens every overlay it has (tooltips, the filters, the chart's table), because a violation fires when an element mounts, not at page load; the served CSP has no `unsafe-inline`, `unsafe-eval`, nonce or hash, and has `require-trusted-types-for 'script'` | `style-tag` (a component that inserts a `<style>` element) → violation; `radix-scrollarea` (use Radix `ScrollArea` in `LogView`) → violation when the log opens; `inner-html-lib` (a helper that sets `innerHTML`, outside lint's reach) → Trusted Types violation; `csp-unsafe-inline` → header check fails | 1a · Playwright (Chromium, WebKit) |
+| D29 | **No CSP or Trusted Types violation.** In Chromium and WebKit, every Playwright scenario registers a `securitypolicyviolation` listener with `addInitScript` (before any page script) and fails on any event; each scenario opens every overlay it has (tooltips, the filters, the chart's table), because a violation fires when an element mounts, not at page load; the served CSP has no `unsafe-inline`, `unsafe-eval`, nonce or hash, and has `require-trusted-types-for 'script'`. 1a as built: violations are reported to the test runner through a binding on each browser context (every page, every navigation, contexts the test makes); "D29 states" loads every scenario, job detail and page state in both engines; must-fail `violation-offline` (a violation only in the offline card) makes D18 and D29 fail. | `style-tag` (a component that inserts a `<style>` element) → violation; `radix-scrollarea` (use Radix `ScrollArea` in `LogView`) → violation when the log opens; `inner-html-lib` (a helper that sets `innerHTML`, outside lint's reach) → Trusted Types violation; `csp-unsafe-inline` → header check fails | 1a · Playwright (Chromium, WebKit) |
 | D34 | **Licences.** Every package in the lockfile has an allowed licence for its kind (shipped or dev, §4.6.1); `THIRD-PARTY.txt` lists every shipped package | a test lockfile with a GPL-3.0 shipped package → fails; one with no `license` → fails | 1a · CI `supply` |
 | D35 | **Install is locked.** `npm ci --ignore-scripts` succeeds on the committed lockfile; no install script runs (a canary package in a test fixture writes a file if its script runs); the lockfile records both the `linux-x64` and the `darwin-arm64` native packages of Rolldown, Lightning CSS and Tailwind's oxide | `lock-drift` (a version changed in `package.json` only) → `npm ci` fails; `scripts-on` → the canary file appears; `mac-only-lock` (a lockfile written on macOS without the Linux bindings) → the platform check fails | 1a · CI `supply` |
 | D36 | **Bundle budget.** First-load JavaScript ≤ 250 kB gzipped, CSS ≤ 30 kB; no source maps and no `data:` assets in `share/dashboard/` | `import-all-icons` (import the whole icon set) → over budget | 1a · CI `front` |
@@ -1128,13 +1128,79 @@ is always such a run.
 | D41 | **Polling survives "offline".** With TanStack Query's `onlineManager.setOnline(false)`, the overview query keeps fetching on its interval | `network-mode-default` (leave `networkMode` at `'online'`) → fetching stops | 1a · Vitest |
 | D42 | **Theme.** With the browser in dark mode, `<html data-theme="dark">` is set before the app's module script runs (no white first paint); switching the emulated colour scheme redraws the charts in the other theme's colours (pixel colour of a series read from the canvas) | `theme-in-bundle` (set the attribute from the React bundle instead of `theme.js`) → the attribute is missing at first paint; `chart-fixed-colours` → the canvas colour does not change | 1a · Playwright (Chromium, WebKit) |
 | D43 | **Chart and state contrast.** For every chart series and every state colour against its background, in light and dark, computed from `tokens.css`: text and icons ≥ 4.5:1, lines and marks ≥ 3:1 | `faint-series` (cache series at 1.5:1 in dark) → fails | 1a · Vitest |
-| D46 | **Failure states.** Stop the server while the page is open → the "server is not running: `mu dashboard on`" banner, not "node offline"; an exception thrown while rendering the `hostile` job → the error page, which contains none of the job's text; with JavaScript off → the static browser-floor text; a lazy chunk that returns 404 → the reload banner | `boundary-shows-error` (render `error.message`) → the hostile string appears; `server-down-as-offline` → node offline shown instead | 1a · Playwright |
-| D47 | **Copy works in Safari's engine.** In WebKit on `http://127.0.0.1:<port>`, a copy button puts the exact `mu` command on the clipboard (read back in the test), or, if the clipboard is refused, selects it and says so | `copy-after-await` (call `writeText` after an awaited call) → nothing copied and no fallback shown | 1a · Playwright (WebKit) |
+| D46 | **Failure states.** Stop the server while the page is open → the "server is not running: `mu dashboard on`" banner, not "node offline"; an exception thrown while rendering the `hostile` job → the error page, which contains none of the job's text; with JavaScript off → the static browser-floor text; a lazy chunk that returns 404 → the reload banner. 1a as built: no lazy chunks exist (one entry, one vendor chunk), so the "lazy chunk 404" case is not applicable; the API version mismatch is the reload signal and is tested. The server is stopped for real (the launcher's `/stop`). | `boundary-shows-error` (render `error.message`) → the hostile string appears; `server-down-as-offline` → node offline shown instead | 1a · Playwright |
+| D47 | **Copy works in Safari's engine.** In WebKit on `http://127.0.0.1:<port>`, a copy button puts the exact `mu` command on the clipboard (read back in the test), or, if the clipboard is refused, selects it and says so. 1a as built: two tests. "gesture": `writeText` is allowed only while the click is being dispatched (Playwright's WebKit keeps `userActivation` active for seconds), fault `copy-after-await`; "refused": fault `copy-no-fallback`. | `copy-after-await` (call `writeText` after an awaited call) → nothing copied and no fallback shown | 1a · Playwright (WebKit) |
 
 **Done when (phase 1 as a whole, after 1b)** the owner, with nothing started by hand, opens the page during a real job
 on the office PC and sees the job under its node, its live cores and memory against the limit, the whole run's chart, and both machines' load with
 their ages; and when, after an `oom` job, its row shows its peak memory; and when `mu compute status office-pc --json`
 gives Claude the same node figures.
+
+### 7.1.1 Phase 1a as built (branch `dashboard-1a`, 2026-11-15)
+
+**What is in it.** The page (React + TypeScript + Vite, built into the committed `share/dashboard/`), the Mac-side
+server (`mu dashboard`, `open [JOB]`, `on | off`, `serve`, `serve --dev` with nine fake-node scenarios), the
+LaunchAgent, the token, the Host check, the CSP with Trusted Types and the other headers, the API of §4.8, the old-node
+mode against today's node (`hello`, `list`, `status`, `log` only; no node-side change), `mu submit` writing
+`jobs.index` and printing the dashboard line, the sandboxed npm wrapper for the Mac, the tests and `dashboard.yml`.
+
+**Martand's colours as built.** Monochrome (true black and white, a neutral grey ramp) with one orange; the tokens are
+the table in §5.3 and `dashboard/src/styles/tokens.css`: `brand` `#F26B1D` (the μ mark, the primary button's fill
+with `#0A0A0A` text), `accent` `#EB5E0B` / `#F26B1D` (focus ring, the active sort arrow, marks), `accent-text`
+`#B8460F` on white and `#FF8A3D` on black (the word "running", the log's "following"). Orange appears only on: the μ
+mark, the running state, the focus ring, the active sort arrow, the log's "following" label, one primary copy button per
+view and the reload banner's button. Errors are crimson (`#C81E3A` / `#FF5C6C`), success green, attention amber; every
+state colour has an icon and a word; D43 computes the contrast of every pair from `tokens.css`.
+
+**Deviations from this spec, each recorded in place:** segmented filters instead of `<select>` (§3.2, WebKit's
+`<select>` violates the CSP); sparklines as SVG drawn by React, not uPlot; figures in the sans with `tabular-nums`; no
+`#gallery` route (the screenshots are the gallery); a theme toggle in phase 1 (the owner asked for it); the tab title
+without "✕ failed" (§5.3); D46's lazy-chunk case not applicable (no lazy chunks); the dev server's raw fake stats route
+(`/api/dev/…`, dev only) for D06; the Python tests run in `dashboard.yml`, not `job-layer.yml`.
+
+**The review of 2026-11-15** (security, design and test validity, on `ba888b4`) and what was done:
+
+- *Security, fixed with tests that are shown to fail without the fix:* the npm sandbox could be escaped through
+  symlinks planted in folders it can write (the profile is now passed with `-p`; Node lives in
+  `$MU_CACHE/dev-node`, read-only inside; fault-build logs stay in memory; static files are opened with `O_NOFOLLOW`
+  relative to their folder); it could reach any unix socket, including ssh's ControlMaster sockets and ssh-agent (now
+  denied in the home folder, `$MU_HOME`, launchd's sockets and `/tmp/mu-*`); DNS carried data out (mDNSResponder's
+  socket denied outside `install`); writes are narrowed to `dashboard/{node_modules,test-results,playwright-report}`,
+  `share/dashboard` and four cache folders (no `/tmp`, no sources, no Node). `tools/dashboard-npm selftest` checks
+  each rule and `selftest-faults` shows each check failing with its rule removed. A real `serve` refuses the test
+  faults that weaken it; `open` no longer hands `MU_JOBS_FAULT` to the server it starts and checks the server with the
+  token before giving the browser anything; http.server's own error pages (400, 431, 505) are JSON with the headers;
+  the Claude rule covers every `run/dashboard*` file; CI's checkout keeps no credentials.
+- *Design:* all thirteen points taken (the job header, the primary command per state, the queued card, the chart, the
+  table's columns and stale marks, the cards' commands, phone width, the back link, copy names, the focus ring on
+  orange, the terminal's wording), recorded in §5.3. One server bug found through it: on a node with features, rows
+  were marked "as of" the last list although the node's `rev` said nothing had changed (fixed, with a test and its
+  fault `list-age-only`).
+- *Tests:* the violation watcher now covers every page and context of a test; "D29 states" loads every scenario and
+  page state in both engines; D47 enforces Safari's gesture rule; D06 compares with the fake node itself; D15 checks
+  the history; D16's own checks fail with `inner-html` + `no-trusted-types`; D26 covers every scenario and state (it
+  found a `<p>` inside a `<dl>` and a text below contrast); D46 stops the server for real; every must-fail run requires
+  the message of the assertion it targets; skipped Python checks are counted and reported in CI; D28's git check uses
+  `--ignored` and has its must-fails; `.npmrc`'s `ignore-scripts` is tested without the flag.
+
+**CI on the final commit:** RUNS_PENDING
+
+**Untested, stated plainly:** the real LaunchAgent under launchd and its Keychain access (`launchctl` is stubbed); real
+Safari (Playwright's WebKit stands in; its clipboard rule is emulated); real ssh: D20 end to end and D24's master
+expiry; anything against the real office PC, including the old-node mode on today's node; the browser-URL route out of
+the sandbox (`open https://…`), not tried; whether Chrome sync keeps a `#t=` URL; the `bind-all` must-fail on this Mac
+(the application firewall is on; CI runs it).
+
+**§7.0 3.0a status: pending.** The verb-cost measurement needs `probe.py` running on the PC while `burst.py` makes its
+100 calls from the Mac, with someone present for both; the PC's queue was busy, so the job was not submitted. Until it
+is measured, the old-node step stays 15 s (§4.3). To run it: from a project folder,
+`mu submit --mem 512M --time 5m -- python tools/dashboard-3.0a/probe.py`, then, once it runs,
+`<toolchain>/env/bin/python -I -S tools/dashboard-3.0a/burst.py burst office-pc > window.json`, and after it ends
+`mu log JOB > probe.log; python3 tools/dashboard-3.0a/burst.py cost probe.log window.json`. The Keychain-from-launchd
+check of 3.0a is the first `mu dashboard on` on the owner's Mac.
+
+**Release:** merge `dashboard-1a` into `main` and tag; only the Mac needs the release (no node change); after updating,
+`mu dashboard on` once.
 
 ### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 

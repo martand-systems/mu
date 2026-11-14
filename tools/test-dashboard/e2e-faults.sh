@@ -1,6 +1,6 @@
 #!/bin/bash
 # The page tests' must-fail runs (docs/design/dashboard.md §7.1): each Playwright D-test is run again with its fault
-# put in, and must then fail, on its own assertion. A page fault is a throw-away build with MU_DASH_FAULT (the real
+# put in, and must then fail, on its own assertion (the assertion's message must be in the failure output). A page fault is a throw-away build with MU_DASH_FAULT (the real
 # build has none: the faults are build-time constants, false, and their code is removed); a server fault is put into
 # every dev server by the launcher (MU_JOBS_FAULT). Also the Vitest must-fails (D37, D38, D41, D43 and the component
 # parts) with FRONT=1.
@@ -40,20 +40,24 @@ build() {   # build FAULT -> the folder of a fault build
   printf '%s' "$out"
 }
 
-# must_fail KIND FAULT TEST-ID PROJECT: run the test with the fault; it must fail, and the failure must be that test's
+# must_fail TEST-ID PROJECT MESSAGE [page=F] [server=F] [env=NAME=V]: run the test with the faults put in; it must fail,
+# the failure must be that test's, and its output must hold MESSAGE: the message of the assertion the fault is meant to
+# break (each key expect in dtests.spec.ts carries "Dnn: …"), so a fault that only breaks something else does not count.
 must_fail() {
-  local kind="$1" f="$2" id="$3" proj="$4" static="$REPO/share/dashboard" sf="" env="" out rc
-  case "$f$id" in *"$FILTER"*) ;; *) return 0 ;; esac
-  case "$kind" in
-    page) static="$(build "$f")" || { bad "must-fail $id with page fault $f: the fault build failed"; return; } ;;
-    server) sf="$f" ;;
-    env) env="$f" ;;
-  esac
-  out="$(e2e "$static" "$sf" "$env" --project="$proj" -g "$id " --reporter=line --output "$WORK/results-$f" 2>&1)"; rc=$?
-  if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qE "[0-9]+\) \[$proj\] .*› $id " && ! printf '%s\n' "$out" | grep -q "launcher"; then
-    ok "must-fail: $id ($proj) fails with the $kind fault $f"
+  local id="$1" proj="$2" msg="$3" static="$REPO/share/dashboard" sf="" env="" pf="" out rc x
+  shift 3
+  for x in "$@"; do
+    case "$x" in page=*) pf="${x#page=}" ;; server=*) sf="${x#server=}" ;; env=*) env="${x#env=}" ;; esac
+  done
+  case "$pf$sf$env$id" in *"$FILTER"*) ;; *) return 0 ;; esac
+  local what="${pf:+page fault $pf}${sf:+${pf:+ + }server fault $sf}${env:+env $env}"
+  if [ -n "$pf" ]; then static="$(build "$pf")" || { bad "must-fail $id with $what: the fault build failed"; return; }; fi
+  out="$(e2e "$static" "$sf" "$env" --project="$proj" -g "$id " --reporter=line --output "$WORK/results-$pf$sf" 2>&1)"; rc=$?
+  if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -qE "[0-9]+\) \[$proj\] .*› $id " && ! printf '%s\n' "$out" | grep -q "launcher" \
+     && printf '%s\n' "$out" | grep -qF -- "$msg"; then
+    ok "must-fail: $id ($proj) fails on \"$msg\" with the $what"
   else
-    bad "must-fail: $id ($proj) with the $kind fault $f: it did not fail as it must (exit $rc)" "$out"
+    bad "must-fail: $id ($proj) with the $what: it did not fail on \"$msg\" (exit $rc)" "$out"
   fi
 }
 
@@ -85,30 +89,36 @@ if [ "${FRONT:-0}" = 1 ]; then
   else bad "must-fail D38: the faulty server's fixtures could not be written"; fi
 else
   echo "Playwright must-fails"
-  must_fail page   assume-features        D04 chromium
-  must_fail env    MU_DASH_OLD_STEP=60    D39 chromium
-  must_fail server node-from-config       D05 chromium
-  must_fail server swap-mem-fields        D06 chromium
-  must_fail server serve-last-as-live     D07 chromium
-  must_fail server fixed-token            D14 chromium
-  must_fail page   keep-fragment          D15 chromium
-  must_fail page   inner-html             D16 chromium
-  must_fail page   inner-html             D16 webkit
-  must_fail page   refused-as-offline     D18 chromium
-  must_fail page   div-button             D26 chromium
-  must_fail page   faint-text             D26 chromium
-  must_fail page   style-tag              D29 chromium
-  must_fail page   style-tag              D29 webkit
-  must_fail page   radix-scrollarea       D29 chromium
-  must_fail page   inner-html-lib         D29 chromium
-  must_fail page   inner-html-lib         D29 webkit
-  must_fail server csp-unsafe-inline      D29 chromium
-  must_fail page   theme-in-bundle        D42 chromium
-  must_fail page   chart-fixed-colours    D42 chromium
-  must_fail page   chart-fixed-colours    D42 webkit
-  must_fail page   boundary-shows-error   D46 chromium
-  must_fail page   server-down-as-offline D46 chromium
-  must_fail page   copy-after-await       D47 webkit
+  V="CSP or Trusted Types violations (D29)"
+  must_fail D04 chromium "D04: the card says the node is behind this Mac"  page=assume-features
+  must_fail D39 chromium "D39: running within 20 s"                         env=MU_DASH_OLD_STEP=60
+  must_fail D05 chromium "D05: lab-pc's jobs are listed under lab-pc"       server=node-from-config
+  must_fail D06 chromium "D06: the card shows the node's memory"            server=swap-mem-fields
+  must_fail D07 chromium "D07: the card's figures turn stale"               server=serve-last-as-live
+  must_fail D14 chromium "D14: the no-token page"                           server=fixed-token
+  must_fail D15 chromium "D15: no token in the address bar"                 page=keep-fragment
+  must_fail D15 chromium "D15: no token in the history"                     page=push-fragment
+  must_fail D16 chromium "D16: nothing is created from node text and nothing runs" page=inner-html server=no-trusted-types
+  must_fail D16 webkit   "D16: nothing is created from node text and nothing runs" page=inner-html server=no-trusted-types
+  must_fail D18 chromium "D18: refused is red"                              page=refused-as-offline
+  must_fail D18 chromium "$V"                                               page=violation-offline
+  must_fail D26 chromium "D26: clickable elements that are not controls"    page=div-button
+  must_fail D26 chromium "D26: axe"                                         page=faint-text
+  must_fail D29 chromium "$V"                                               page=style-tag
+  must_fail D29 webkit   "$V"                                               page=style-tag
+  must_fail D29 chromium "$V"                                               page=radix-scrollarea
+  must_fail D29 chromium "$V"                                               page=inner-html-lib
+  must_fail D29 webkit   "$V"                                               page=inner-html-lib
+  must_fail D29 webkit   "$V"                                               page=violation-offline
+  must_fail D29 chromium "D29: the CSP"                                     server=csp-unsafe-inline
+  must_fail D42 chromium "D42: data-theme is set before the app's module"   page=theme-in-bundle
+  must_fail D42 webkit   "D42: data-theme is set before the app's module"   page=theme-in-bundle
+  must_fail D42 chromium "D42: the chart redraws in the light theme's colours" page=chart-fixed-colours
+  must_fail D42 webkit   "D42: the chart redraws in the light theme's colours" page=chart-fixed-colours
+  must_fail D46 chromium "D46: the error page holds no job text"            page=boundary-shows-error
+  must_fail D46 chromium "D46: server down is not node offline"             page=server-down-as-offline
+  must_fail D47 webkit   "D47: copied inside the gesture"                   page=copy-after-await
+  must_fail D47 webkit   "D47: a refused clipboard selects the command"     page=copy-no-fallback
 fi
 
 printf '\n%d ok, %d failed\n' "$PASS" "$FAILN"
