@@ -8,8 +8,10 @@
 #            `git diff --exit-code -- share/dashboard` (D28)
 #   supply   npm ci on the lockfile, both platforms' native packages, lock drift, the install-script canary (D35),
 #            npm audit and audit signatures, licences (D34)
-#   e2e      Playwright in Chromium and WebKit against `mu dashboard serve --dev` serving the build, with its must-fail;
-#            screenshots of every scenario in light and dark uploaded for the owner's review
+#   e2e      Playwright in Chromium and WebKit against `mu dashboard serve --dev` serving the build (a fresh dev server
+#            per test, from tools/test-dashboard/e2e-launcher.py); screenshots of every screen and state in light and
+#            dark uploaded for the owner's review (dashboard-e2e: test-results/screens/)
+#   e2e-faults  every page D-test again with its fault (a throw-away fault build, or a server fault): each must fail
 name: dashboard
 on:
   push:
@@ -74,6 +76,8 @@ jobs:
         run: npm run typecheck
       - name: Vitest
         run: npm test
+      - name: "must-fail: each Vitest check with its fault (D37, D38, D41, D43, the card parts of D08 and D18, D15's unit part)"
+        run: FRONT=1 /bin/bash ../tools/test-dashboard/e2e-faults.sh
       - name: Build (share/dashboard/)
         run: npm run build
       - name: Bundle budget (D36)
@@ -134,7 +138,7 @@ jobs:
     name: e2e (Playwright, Chromium and WebKit)
     needs: front
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       DASH_E2E_PORT: "47999"
     steps:
@@ -158,31 +162,12 @@ jobs:
       - name: Playwright's Chromium and WebKit (the versions the pinned Playwright names)
         working-directory: dashboard
         run: npx --no-install playwright install --with-deps chromium webkit
-      - name: Playwright against `mu dashboard serve --dev`
-        run: |
-          export MU_HOME="$RUNNER_TEMP/mu home" DASH_DEV_RUN="$RUNNER_TEMP/mu home/run/dev"
-          "$RUNNER_TEMP/venv/bin/python" -I -S src/mu/cli.py dashboard serve --dev --fake-mac --port "$DASH_E2E_PORT" \
-            --static "$RUNNER_TEMP/build" > "$RUNNER_TEMP/serve.log" 2>&1 &
-          srv=$!
-          for i in $(seq 50); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
-          rc=0; (cd dashboard && npx --no-install playwright test) || rc=$?
-          kill "$srv" 2>/dev/null || true; exit "$rc"
-      - name: "must-fail: with the server's csp-unsafe-inline fault the CSP test fails"
-        run: |
-          export MU_HOME="$RUNNER_TEMP/mu fault" DASH_DEV_RUN="$RUNNER_TEMP/mu fault/run/dev" DASH_E2E_PORT=47998
-          MU_JOBS_FAULT=csp-unsafe-inline "$RUNNER_TEMP/venv/bin/python" -I -S src/mu/cli.py dashboard serve --dev \
-            --fake-mac --port "$DASH_E2E_PORT" --static "$RUNNER_TEMP/build" > "$RUNNER_TEMP/serve-fault.log" 2>&1 &
-          srv=$!
-          for i in $(seq 100); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
-          [ -f "$DASH_DEV_RUN/dashboard.token" ] || { cat "$RUNNER_TEMP/serve-fault.log"; echo "::error::the fault server did not start"; exit 1; }
-          cd dashboard
-          rc=0; npx --no-install playwright test --project chromium -g "loads under the CSP" --reporter=line \
-            --output "$RUNNER_TEMP/fault-results" > "$RUNNER_TEMP/fault.out" 2>&1 || rc=$?
-          kill "$srv" 2>/dev/null || true
-          cat "$RUNNER_TEMP/fault.out"
-          if [ "$rc" = 0 ]; then echo "::error::the CSP test passed against a server that allows unsafe-inline"; exit 1; fi
-          grep -q "unsafe-inline" "$RUNNER_TEMP/fault.out" || { echo "::error::the CSP test failed, but not on the CSP"; exit 1; }
-          echo "ok: the CSP test fails on the CSP with the fault"
+      - name: Playwright against `mu dashboard serve --dev` (a fresh dev server per test, from the e2e launcher)
+        env:
+          STATIC: ${{ runner.temp }}/build
+          PY: ${{ runner.temp }}/venv/bin/python
+          DASH_DEV_RUN: ${{ runner.temp }}/mu home/run/dev
+        run: /bin/bash tools/test-dashboard/e2e-run.sh
       - name: Upload screenshots and the report (the owner's review copy)
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -191,5 +176,31 @@ jobs:
           path: |
             dashboard/test-results/
             dashboard/playwright-report/
-            ${{ runner.temp }}/serve.log
+            ${{ runner.temp }}/mu home/run/dev/e2e/launcher.log
           retention-days: 14
+
+  e2e-faults:
+    name: e2e must-fails (each page test with its fault)
+    needs: front
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+      - name: npm ci --ignore-scripts
+        working-directory: dashboard
+        run: npm ci --ignore-scripts --no-audit
+      - name: Playwright's Chromium and WebKit
+        working-directory: dashboard
+        run: npx --no-install playwright install --with-deps chromium webkit
+      - name: The real build from the front job (for the server faults)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dashboard-build
+          path: share/dashboard
+      - name: Each D-test with its fault must fail (page faults are throw-away builds; server faults via the launcher)
+        env:
+          DASH_DEV_RUN: ${{ runner.temp }}/mu faults/run/dev
+        run: /bin/bash tools/test-dashboard/e2e-faults.sh

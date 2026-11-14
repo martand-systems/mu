@@ -42,7 +42,7 @@ describe("StateBadge", () => {
   it("orange (running) marks only the running state", () => {
     for (const s of Object.keys(JOB_LOOK) as JobState[]) {
       const { container } = render(<JobStateBadge state={s} />);
-      expect(container.innerHTML.includes("text-running")).toBe(s === "running");
+      expect(container.querySelector(".text-running") !== null).toBe(s === "running");
       cleanup();
     }
   });

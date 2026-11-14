@@ -56,17 +56,17 @@ type Fixtures = {
 
 export const test = base.extend<Fixtures>({
   violations: [
-    async ({ page }, use) => {
+    async ({ page }, run) => {
       const get = await watchViolations(page);
-      await use(get);
+      await run(get);
       const v = page.isClosed() ? [] : await get().catch(() => [] as string[]);
       expect(v, "CSP or Trusted Types violations (D29)").toEqual([]);
     },
     { auto: true },
   ],
-  serve: async ({}, use) => {
+  serve: async ({}, run) => {
     const started: Dash[] = [];
-    await use(async (scenario, faults = []) => {
+    await run(async (scenario, faults = []) => {
       const d = await startServer(scenario, faults);
       started.push(d);
       return d;

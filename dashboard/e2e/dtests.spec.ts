@@ -235,7 +235,10 @@ async function axe(page: Page, where: string): Promise<void> {
 async function tabThrough(page: Page): Promise<void> {
   // every visible control is reachable with Tab and has an accessible name
   const controls = await page.locator("a[href], button, select, [tabindex='0']").evaluateAll((els) =>
-    els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e) => e.outerHTML.slice(0, 80)));
+    els.filter((e) => (e as HTMLElement).offsetParent !== null).map((e, i) => {
+      e.setAttribute("data-tab-i", String(i));
+      return `${i} ${e.tagName} ${(e.getAttribute("aria-label") ?? e.textContent ?? "").slice(0, 40)}`;
+    }));
   await page.locator("body").focus();
   const seen = new Set<string>();
   for (let i = 0; i < controls.length + 10; i++) {
@@ -243,15 +246,15 @@ async function tabThrough(page: Page): Promise<void> {
     const f = await page.evaluate(() => {
       const a = document.activeElement as HTMLElement | null;
       if (!a || a === document.body) return null;
-      const name = a.getAttribute("aria-label") || a.textContent?.trim() || (a as HTMLSelectElement).labels?.[0]?.textContent?.trim() || a.getAttribute("title") || "";
-      return { html: a.outerHTML.slice(0, 80), name };
+      const name = a.getAttribute("aria-label") || a.textContent?.trim() || a.getAttribute("title") || "";
+      return { i: a.getAttribute("data-tab-i"), what: `${a.tagName} ${(a.textContent ?? "").slice(0, 40)}`, name };
     });
     if (f) {
-      expect(f.name, `accessible name of ${f.html}`).not.toBe("");
-      seen.add(f.html);
+      expect(f.name, `accessible name of ${f.what}`).not.toBe("");
+      if (f.i !== null) seen.add(f.i);
     }
   }
-  for (const c of controls) expect(seen.has(c), `reachable with Tab: ${c}`).toBe(true);
+  for (const c of controls) expect(seen.has(c.split(" ")[0]!), `reachable with Tab: ${c}`).toBe(true);
   // a clickable element that is not a control is a fault (div-button): every row's name is a link
   const names = await page.locator("tr[data-job] td:nth-child(3)").evaluateAll((tds) => tds.map((td) => td.querySelector("a[href]") !== null));
   expect(names.every(Boolean)).toBe(true);

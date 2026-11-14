@@ -48,7 +48,7 @@ function ThemeToggle() {
   );
 }
 
-export function TopBar({ session, overview, updatedAt }: { session: Session | undefined; overview: Overview | undefined; updatedAt: number | null }) {
+export function TopBar({ session, overview, updatedAt, down = false }: { session: Session | undefined; overview: Overview | undefined; updatedAt: number | null; down?: boolean }) {
   const s = overview?.summary;
   useEffect(() => {
     if (!s) return;
@@ -56,21 +56,27 @@ export function TopBar({ session, overview, updatedAt }: { session: Session | un
   }, [s]);
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-bg/95 backdrop-blur-sm">
-      <div className="mx-auto flex h-12 max-w-[1440px] items-center gap-4 px-4 md:px-6">
+      <div className="mx-auto flex h-12 max-w-[1440px] items-center gap-3 px-4 md:gap-4 md:px-6">
         <h1 className="flex items-center"><Brand /></h1>
         {session?.dev && (
-          <span className="rounded-sm border border-border-strong px-1.5 py-0.5 text-xs text-text-muted" data-testid="dev-badge">
+          <span className="hidden truncate rounded-sm border border-border-strong px-1.5 py-0.5 text-xs text-text-muted md:inline" data-testid="dev-badge">
             development · fake nodes{session.scenario ? ` · ${session.scenario}` : ""}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-4">
-          {s && (
+        <div className="ml-auto flex min-w-0 items-center gap-3 md:gap-4">
+          {down && (
+            <span className="hidden items-center gap-1.5 text-xs font-medium text-failed sm:flex">
+              <span aria-hidden="true" className="inline-block h-1.5 w-1.5 rounded-full bg-failed" />
+              server not answering
+            </span>
+          )}
+          {s && !down && (
             <span className="hidden items-center gap-1.5 text-xs text-text-muted sm:flex" data-testid="nodes-online">
               <span aria-hidden="true" className={`inline-block h-1.5 w-1.5 rounded-full ${s.nodes > 0 && s.online === s.nodes ? "bg-succeeded" : s.online > 0 ? "bg-attention" : "bg-text-muted"}`} />
               <span className="tabular-nums text-text">{s.online} of {s.nodes}</span> {s.nodes === 1 ? "node" : "nodes"} online
             </span>
           )}
-          {updatedAt !== null && <span data-testid="updated"><AgeLabel t={updatedAt} prefix="updated " /></span>}
+          {updatedAt !== null && <span data-testid="updated" className="min-w-0 truncate"><AgeLabel t={updatedAt} prefix="updated " /></span>}
           <ThemeToggle />
         </div>
       </div>

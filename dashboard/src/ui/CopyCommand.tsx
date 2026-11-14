@@ -51,7 +51,7 @@ export function CopyCommand({ cmd, primary = false, label, block = false }: { cm
     : "border-border-strong bg-surface text-text hover:bg-surface-raised";
   return (
     <span className={`${block ? "flex" : "inline-flex"} min-w-0 max-w-full items-stretch overflow-hidden rounded-md border border-border bg-surface-raised text-sm`}>
-      <code ref={codeRef} className="min-w-0 truncate px-2 py-1 font-mono text-[13px] text-text select-all" title={cmd} data-cmd>
+      <code ref={codeRef} className={`min-w-0 truncate px-2 ${block ? "flex-1" : ""} py-1 font-mono text-[13px] text-text select-all`} title={cmd} data-cmd>
         {cmd}
       </code>
       <button

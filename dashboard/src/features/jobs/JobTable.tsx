@@ -75,7 +75,7 @@ function Row({ j, now }: { j: JobRow; now: number }) {
   return (
     <>
       <tr
-        className={`group cursor-pointer border-t border-border hover:bg-surface-raised max-md:grid max-md:grid-cols-[1fr_auto] max-md:gap-x-3 max-md:px-3 max-md:py-2 ${j.note ? "" : ""}`}
+        className={`group cursor-pointer border-t border-border hover:bg-surface-raised max-md:grid max-md:grid-cols-[auto_1fr_auto] max-md:items-baseline max-md:gap-x-3 max-md:gap-y-0.5 max-md:px-3 max-md:py-2 ${j.note ? "" : ""}`}
         onClick={(e) => {
           if ((e.target as HTMLElement).closest("a,button")) return;
           openJob(j.job_id);
@@ -84,11 +84,11 @@ function Row({ j, now }: { j: JobRow; now: number }) {
         data-node={j.node}
         data-state={j.state}
       >
-        <td className="px-2 py-1.5 max-md:p-0">
+        <td className="px-2 py-1.5 max-md:col-start-1 max-md:row-start-1 max-md:p-0">
           <JobStateBadge state={j.state} position={j.position} />
         </td>
         <td className="px-2 py-1.5 font-mono text-[13px] text-text-muted tabular-nums max-md:hidden">{j.short}</td>
-        <td className="max-w-[18rem] px-2 py-1.5 max-md:col-span-2 max-md:row-start-1 max-md:max-w-none max-md:p-0 max-md:pl-24">
+        <td className="max-w-[18rem] px-2 py-1.5 max-md:col-span-2 max-md:col-start-2 max-md:row-start-1 max-md:max-w-none max-md:p-0">
           {__FAULT_DIV_BUTTON__ ? (
             <div className="truncate font-medium text-text" onClick={() => openJob(j.job_id)}>{name}</div>
           ) : (
@@ -103,12 +103,12 @@ function Row({ j, now }: { j: JobRow; now: number }) {
           )}
         </td>
         <td className="max-w-[10rem] truncate px-2 py-1.5 text-text-muted max-md:hidden" title={j.project ?? j.project_id ?? ""}>{j.project ?? j.project_id ?? "—"}</td>
-        <td className="px-2 py-1.5 text-text max-md:p-0 max-md:text-xs max-md:text-text-muted" data-col="node">{j.node}</td>
-        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:p-0 max-md:text-left ${rowStale ? "text-stale" : "text-text"}`} data-col="time">
+        <td className="px-2 py-1.5 text-text max-md:col-start-1 max-md:row-start-2 max-md:p-0 max-md:text-xs max-md:text-text-muted" data-col="node">{j.node}</td>
+        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:col-start-2 max-md:row-start-2 max-md:p-0 max-md:text-left max-md:text-xs ${rowStale ? "text-stale" : "text-text"}`} data-col="time">
           {timeText}
           {rowStale && j.as_of !== null && <span className="ml-1 font-sans text-xs text-stale">as of {clock(j.as_of, now)}</span>}
         </td>
-        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:p-0 ${mem.v === null ? "text-text-muted" : fig}`} title={mem.title} data-col="mem">
+        <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:col-start-3 max-md:row-start-2 max-md:p-0 max-md:text-xs ${mem.v === null ? "text-text-muted" : fig}`} title={mem.title} data-col="mem">
           {mem.v === null ? "—" : `${bytes(mem.v)}${mem.mark}`}
         </td>
         <td className={`px-2 py-1.5 text-right text-[13px] tabular-nums max-md:hidden ${cores.v === null ? "text-text-muted" : fig}`} data-col="cores">

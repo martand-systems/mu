@@ -69,7 +69,7 @@ function Dashboard() {
   const showDown = down && !__FAULT_SERVER_DOWN_AS_OFFLINE__;
   return (
     <>
-      <TopBar session={session.data} overview={data} updatedAt={ov.dataUpdatedAt ? (data?.now ?? null) : null} />
+      <TopBar session={session.data} overview={data} updatedAt={ov.dataUpdatedAt ? (data?.now ?? null) : null} down={showDown} />
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-4 py-4 md:px-6 md:py-5">
         {mismatch && <ReloadBanner />}
         {showDown && <ServerDownBanner />}

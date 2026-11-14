@@ -1,7 +1,7 @@
 {
  "schema": 1,
- "source_sha256": "fa5d48176ec090e004f872c3083178e2c9a2f3e16523f50daa8d256be6aab68d",
- "files": 15,
+ "source_sha256": "17edd86ea230bab2972419f1396d800f6c37ff1d53c66847a40898456a50ad9b",
+ "files": 43,
  "lockfile_sha256": "1ec119a1a594871b5770ab5d328298baa68c4b9e3cb11a6563ff069c873ed72b",
  "node": "v24.22.2"
 }
