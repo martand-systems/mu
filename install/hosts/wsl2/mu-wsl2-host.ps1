@@ -17,7 +17,7 @@
                side of the pairing (the relay credential, the Mac's key, the host key sent back), the status, and
                one line: "paired with <Mac> | ready for jobs: yes". Run it from Terminal (Admin):
                  powershell -NoProfile -ExecutionPolicy Bypass -File (wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node host-script) pair
-               Started from the release folder (a \\wsl.localhost path) it first copies itself to <MuRoot>\stage\<version>
+               Started from the release folder (a \\wsl.localhost path) it first copies itself to <MuRoot>\stage\<version>-<n>
                (administrators and SYSTEM only) and runs that copy. -Relay URL names another relay.
 
   Run it from PowerShell. It asks for administrator rights when an action needs them (status does not):
@@ -122,6 +122,7 @@ $script:PairPyText = $null
 $script:PairRestartVm = $false
 $script:PairRestartDistro = $false
 $script:Changes = New-Object System.Collections.ArrayList
+$script:FromPair = $false   # pair runs install: the relay credential and the restart come from pair, not by hand
 $script:Checks = New-Object System.Collections.ArrayList
 $script:State = $null
 
@@ -1143,6 +1144,7 @@ function Invoke-DistroSetup {
   $letter = Get-HostDriveLetter $base
   if ($letter) { $a += @('--host-drive', $letter) } else { Write-Note "$base has no drive letter: mu's disk check will see only the distro's virtual disk" }
   if ($Branch) { $a += @('--branch', $Branch) }
+  if ($script:FromPair) { $a += '--from-pair' }
   if (-not $NoClone) { $a += '--clone' }
   if ($InstallMu) { $a += '--install-mu' }
   if ($Heartbeat) { $a += @('--heartbeat', $Heartbeat) }
@@ -1325,7 +1327,9 @@ function Invoke-Install {
   $restartVm = $wslconfigChanged
   $restartDistro = ($res.restart -eq '1') -or $newDistro
   $script:PairRestartVm = [bool]$restartVm; $script:PairRestartDistro = [bool]$restartDistro
-  if ($NoRestart -and ($restartVm -or $restartDistro)) {
+  if ($script:FromPair -and ($restartVm -or $restartDistro)) {
+    if (-not $Json) { Write-Host '  info     the restart comes after the code (pair does it)' }
+  } elseif ($NoRestart -and ($restartVm -or $restartDistro)) {
     Write-Note "not restarting (-NoRestart): apply the changes with a clean stop and start: $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') test-stop"
   } elseif ($restartVm) {
     Write-Note 'wsl --shutdown, so that .wslconfig applies: this stops every running WSL distro of this user'
@@ -1689,9 +1693,44 @@ function ConvertTo-CodeBytes([System.Security.SecureString]$Secure) {
   return ,$bytes
 }
 
+# New-StageDir VERSION: a new, empty folder <MuRoot>\stage\<version>-<random>, created together with its ACL
+# (Administrators and SYSTEM only, owned by Administrators), so no other process ever owned it or held a handle to it.
+# <MuRoot> itself gets install's owner check and ACL first; an existing <MuRoot>\stage owned by anyone but SYSTEM or
+# Administrators is refused, and older stage folders are removed (security review of ff2c707, 4)
+function New-StageAcl {
+  $acl = New-Object System.Security.AccessControl.DirectorySecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @($script:SidSystem, $script:SidAdmins)) {
+    $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+  }
+  $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier($script:SidAdmins)))
+  return $acl
+}
+function New-StageDir([string]$Version) {
+  Initialize-MuDirs
+  $root = Join-Path $MuRoot 'stage'
+  if (Test-Path -LiteralPath $root) {
+    $owner = Get-DirOwner $root
+    if (@($script:SidSystem, $script:SidAdmins) -notcontains $owner) {
+      throw "$root belongs to $(Get-SidName $owner), not to Administrators: another process made it and may change what is in it. Delete it, then run this line again"
+    }
+    Set-Acl -LiteralPath $root -AclObject (New-StageAcl)
+    foreach ($old in @(Get-ChildItem -LiteralPath $root -Force)) { Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+  } else { [void][IO.Directory]::CreateDirectory($root, (New-StageAcl)) }
+  $rnd = New-Object byte[] 6
+  $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($rnd); $rng.Dispose()
+  $stage = Join-Path $root ($Version + '-' + (($rnd | ForEach-Object { $_.ToString('x2') }) -join ''))
+  if (Test-Path -LiteralPath $stage) { throw "$stage exists already: run this line again" }
+  [void][IO.Directory]::CreateDirectory($stage, (New-StageAcl))
+  $owner = Get-DirOwner $stage
+  if ($owner -ne $script:SidAdmins) { throw "$stage is owned by $(Get-SidName $owner), not by Administrators" }
+  return $stage
+}
+
 # Invoke-PairStage: started from the release folder (\\wsl.localhost\...): copy this script, the distro script, the gate
-# and the pairing client to <MuRoot>\stage\<version> (Administrators and SYSTEM only: not %TEMP%, which a process of
-# this user could rewrite between the copy and the run) and run that copy here, in this window
+# and the pairing client to a new folder under <MuRoot>\stage (New-StageDir: Administrators and SYSTEM only; not
+# %TEMP%, which a process of this user could rewrite between the copy and the run) and run that copy here
 function Invoke-PairStage {
   $src = $script:SelfPath
   $dir = Split-Path $src -Parent
@@ -1699,17 +1738,7 @@ function Invoke-PairStage {
   if ($jobs.Output.Trim()) {
     throw "jobs have run on this node, so its release folder is not trusted for an administrator: run $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') pair"
   }
-  $stage = Join-Path (Join-Path $MuRoot 'stage') (Get-StageVersion $src)
-  foreach ($d in @($MuRoot, (Join-Path $MuRoot 'stage'), $stage)) {
-    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
-  }
-  $acl = New-Object System.Security.AccessControl.DirectorySecurity
-  $acl.SetAccessRuleProtection($true, $false)
-  foreach ($sid in @($script:SidSystem, $script:SidAdmins)) {
-    $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-  }
-  Set-Acl -LiteralPath $stage -AclObject $acl
+  $stage = New-StageDir (Get-StageVersion $src)
   Copy-Item -Force -LiteralPath $src -Destination $stage
   foreach ($n in @($script:DistroScriptName, $script:GateName)) {
     $sib = Join-Path $dir $n
@@ -1744,13 +1773,14 @@ function Invoke-Pair {
   }
   # 2. the node's setup, without its restart (that comes after the code, below)
   Write-Step 'Setting up the node (install -NoRestart)'
+  $script:FromPair = $true
   $script:NoRestartSaved = $NoRestart
   Set-Variable -Name NoRestart -Scope Script -Value ([switch]$true)
   $rc = [int](@(Invoke-Install))[-1]
   if ($rc -ne 0) { return $rc }
   # 3. the code: hidden, never an argument, never in a pipeline; into the distro on the standard input of wsl.exe. It
   # stays in this process's memory until the finish below (the distro may restart in between), then it is cleared
-  $claim = $null; $code = $null
+  $claim = $null; $code = $null; $already = $null
   for ($try = 1; $try -le 3; $try++) {
     Write-Host ''
     $secure = Read-Host -AsSecureString 'Pairing code (from the Mac)'
@@ -1761,16 +1791,27 @@ function Invoke-Pair {
     if ($claim.ExitCode -eq 0 -and $null -ne $j) {
       $code = $bytes
       if ($j.resumed -and -not $j.port) { Write-Host "  resuming invite $($j.invite)" }
-      else { Write-Host "  code accepted: this PC becomes compute node $($j.node) on relay port $($j.port) for $($j.inviter) (key $($j.inviter_key_fingerprint))" }
+      else {
+        $key = ''; if ($j.inviter_key_fingerprint) { $key = " (key $($j.inviter_key_fingerprint))" }
+        Write-Host "  code accepted: this PC becomes compute node $($j.node) on relay port $($j.port) for $($j.inviter)$key"
+      }
       break
     }
     [Array]::Clear($bytes, 0, $bytes.Length)
     if ($null -eq $j) { throw "the node's pairing client gave no answer (exit $($claim.ExitCode)): $($claim.Error)" }
+    if ($claim.ExitCode -eq 5 -and $j.error -eq 'already-paired') {
+      # the same line run again on a paired PC: harmless, nothing to do (usability review of ff2c707, 6)
+      Write-Host "  this PC is already paired (invite $($j.invite)): nothing to do"
+      $already = [string]$j.invite
+      break
+    }
     Write-Host "  $($j.message)" -ForegroundColor Red
     if ($j.next) { Write-Host "  next: $($j.next)" }
-    if (-not (($claim.ExitCode -eq 2 -and $j.error -eq 'code-typo') -or ($claim.ExitCode -eq 5 -and $j.error -eq 'wrong-code')) -or $try -eq 3) {
-      return $claim.ExitCode
+    $retry = ($claim.ExitCode -eq 2 -and $j.error -eq 'code-typo') -or ($claim.ExitCode -eq 5 -and $j.error -eq 'wrong-code')
+    if ($retry -and $try -eq 3) {
+      Write-Host '  three tries: run the same line again (install then has nothing to change), or check the code on the Mac'
     }
+    if (-not $retry -or $try -eq 3) { return $claim.ExitCode }
   }
   try {
     # 4. the clean restart, when install changed what only a restart applies (interop off, the automount options)
@@ -1779,13 +1820,18 @@ function Invoke-Pair {
       if (Test-Path (Join-Path (Join-Path $MuRoot 'bin') 'mu-wsl-shutdown.exe')) { [void](Stop-WslAsSystem) }
       else { [void](Invoke-Wsl -Arguments @('--terminate', $Distro)) }
       Write-Host "  starting $Distro again through the startup task"
-      if (-not (Start-DistroViaTask)) { throw "$Distro was not started again through the startup task: run this line again" }
+      if (-not (Start-DistroViaTask)) {
+        throw "$Distro was not started again through the startup task: run $(Join-Path (Join-Path $MuRoot 'host') 'mu-wsl2-host.ps1') test-stop, then this line again"
+      }
     }
     # 5. the pairing itself: the credential, the key, the answer, the Mac's confirm (its lines, as they happen)
-    Write-Step 'Pairing'
-    $fin = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'pair', 'finish', '--relay', $Relay) -InputBytes $code
+    $fin = $null
+    if (-not $already) {
+      Write-Step 'Pairing'
+      $fin = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'pair', 'finish', '--relay', $Relay) -InputBytes $code
+    }
   } finally {
-    [Array]::Clear($code, 0, $code.Length)
+    if ($null -ne $code) { [Array]::Clear($code, 0, $code.Length) }
   }
   # 6. the status, and one line
   Write-Step 'Status'
@@ -1793,11 +1839,41 @@ function Invoke-Pair {
   $sj = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'status', '--offline', '--json') -Capture
   $ready = 'no'
   try { $o = ($sj.Output.Trim() -split "`n")[-1] | ConvertFrom-Json; if ($o.ready) { $ready = 'yes' } else { $ready = "no ($($o.not_ready))" } } catch { }
-  $who = $j.inviter
-  if ($fin.ExitCode -eq 0) { Write-Host ''; Write-Host "paired with $who | ready for jobs: $ready" -ForegroundColor Green }
-  else { Write-Host ''; Write-Host "not paired (exit $($fin.ExitCode)) | ready for jobs: $ready" -ForegroundColor Red }
+  if ($already) {
+    Write-Host ''; Write-Host "already paired (invite $already) | ready for jobs: $ready" -ForegroundColor Green
+    return $st
+  }
+  # the node's own record: did it finish this invite? (exit 4 and 5 can come after that point: the pairing stands)
+  $paired = $false
+  $ps = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', $t, 'pair', 'status', '--json', '--relay', $Relay) -Capture
+  try { $po = ($ps.Output.Trim() -split "`n")[-1] | ConvertFrom-Json; $paired = @($po.done) -contains [string]$j.invite } catch { }
+  Write-Host ''
+  foreach ($v in (Get-PairVerdict $fin.ExitCode $paired ([string]$j.inviter) $ready)) { Write-Host $v.Text -ForegroundColor $v.Color }
   if ($fin.ExitCode -ne 0) { return $fin.ExitCode }
   return $st
+}
+
+# Get-PairVerdict EXIT PAIRED WHO READY: pair's last lines, as objects with Text and Color. PAIRED: the node's pair
+# status lists the invite as finished (usability review of ff2c707, 5: "not paired" was printed when it stood)
+function Get-PairVerdict([int]$ExitCode, [bool]$Paired, [string]$Who, [string]$Ready) {
+  $out = New-Object System.Collections.ArrayList
+  if (-not $Who) { $Who = 'the Mac' }
+  $root = 'wsl -d mu-compute -u root -- '
+  if ($ExitCode -eq 0) {
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "paired with $Who | ready for jobs: $Ready"; Color = 'Green' }))
+  } elseif ($Paired -and $ExitCode -eq 4) {
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "paired with $Who, but $Who could not reach this PC through the relay yet | ready for jobs: $Ready"; Color = 'Yellow' }))
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "next: $($root)mu-wsl2-distro tunnel status"; Color = 'Gray' }))
+  } elseif ($Paired) {
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "paired with $Who, but its confirmation did not verify (exit $ExitCode, above): tell the Mac's owner | ready for jobs: $Ready"; Color = 'Yellow' }))
+    [void]$out.Add((New-Object PSObject -Property @{ Text = 'next: on the Mac: mu compute status'; Color = 'Gray' }))
+  } else {
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "not paired (exit $ExitCode) | ready for jobs: $Ready"; Color = 'Red' }))
+  }
+  if ($Ready -ne 'yes') {
+    [void]$out.Add((New-Object PSObject -Property @{ Text = "next: the FAIL lines above say what to fix; then $MuRoot\host\mu-wsl2-host.ps1 status"; Color = 'Gray' }))
+  }
+  return ,$out.ToArray()
 }
 
 # ============================================================================ main

@@ -55,6 +55,16 @@ $Json = $false
 # pair: the stage folder's name, the relay URL check, the code's bytes (one LF; PowerShell 5.1 would pipe CR LF)
 eq 'stage version from a release path' 'v2026.11.9' (Get-StageVersion '\\wsl.localhost\mu-compute\home\mu\.local\share\mu\toolchains\v2026.11.9\recipe\install\hosts\wsl2\mu-wsl2-host.ps1')
 eq 'stage version from elsewhere' 'local' (Get-StageVersion 'C:\Mu\host\mu-wsl2-host.ps1')
+# pair's last line: "paired" whenever the node finished the invite, whatever the exit code (usability review of ff2c707, 5)
+$MuRoot = 'C:\Mu'
+$v = Get-PairVerdict 0 $true 'avi-mac' 'yes'
+eq 'pair verdict: exit 0, ready' 'paired with avi-mac | ready for jobs: yes' (($v | ForEach-Object { $_.Text }) -join ' / ')
+$v = Get-PairVerdict 4 $true 'avi-mac' 'yes'
+eq 'pair verdict: exit 4 after the finish: paired, the Mac could not reach it yet; next tunnel status' 'paired with avi-mac, but avi-mac could not reach this PC through the relay yet | ready for jobs: yes / next: wsl -d mu-compute -u root -- mu-wsl2-distro tunnel status' (($v | ForEach-Object { $_.Text }) -join ' / ')
+$v = Get-PairVerdict 5 $true 'avi-mac' 'yes'
+eq 'pair verdict: exit 5 after the finish (confirm-integrity): paired, tell the owner' 'Yellow paired with avi-mac, but its confirmation did not verify' ($v[0].Color + ' ' + ($v[0].Text -replace ' \(exit.*$', ''))
+$v = Get-PairVerdict 4 $false 'avi-mac' 'no (tunnel)'
+eq 'pair verdict: exit 4 before the finish: not paired; the FAIL lines and status next' 'not paired (exit 4) | ready for jobs: no (tunnel) / next: the FAIL lines above say what to fix; then C:\Mu\host\mu-wsl2-host.ps1 status' (($v | ForEach-Object { $_.Text }) -join ' / ')
 eq 'relay URL: https accepted' $true (Test-RelayUrl 'https://relay.martand.systems')
 eq 'relay URL: http refused' $false (Test-RelayUrl 'http://relay.martand.systems')
 eq 'relay URL: a path refused' $false (Test-RelayUrl 'https://relay.martand.systems/x')

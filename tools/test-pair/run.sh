@@ -86,6 +86,7 @@ for py in $FPYS; do
   must_fail remove-any-port "$py" review
   must_fail static-comes-back "$py" review
   must_fail no-dialog-check "$py" review
+  must_fail forget-done "$py" review
   # the root gate of the test hooks has no fault (a fault would pass through it): a copy of src/ without the gate
   rm -rf "$ROOT/ungated"; mkdir -p "$ROOT/ungated"; cp -R "$REPO/src/mu" "$ROOT/ungated/mu"
   "$py" -I -S -c 'import sys; p = sys.argv[1]; s = open(p).read(); t = s.replace("    if not as_root():\n        return True\n", "    return True\n", 1)

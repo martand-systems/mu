@@ -744,6 +744,9 @@ def review(E):
     rc, out, err = E.mu(["compute", "invite", "--wait", iid, "--json", "--timeout", "30"])
     E.finish_pc(pc)
     ok("  --wait completes the pairing with the keys alone", rc == 0 and jl(out).get("state") == "finished", out + err)
+    rc, out, err = E.pc("status", "", state="pc-k")
+    ok("usability 5: the PC's pair status --json lists the invite it finished (pair's last line at the PC reads it)",
+       rc == 0 and iid in (jl(out).get("done") or []), out + err)
 
     # usability 2c: --wait again after the folder is gone (a run killed after finish): exit 0, finished
     rc, out, err = E.mu(["compute", "invite", "--wait", iid, "--json", "--timeout", "5"])
