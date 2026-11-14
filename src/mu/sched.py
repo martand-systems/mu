@@ -198,7 +198,7 @@ def plan(now, cap, running, queue, disk=None):
     -> {starts: [{id, grant, S}], fail: [(id, TooBig)], waiting: {id: waiting_for}, head, S, S_why,
         starts_by: {id: S or None}, position: {id: n (among jobs that can start)}, place: {id: n (in the walk)},
         free: {cores, cpus, mem_bytes}, allocated: {...}, express: n}"""
-    C, M, ids_all = cap["cores"], cap["mem_bytes"], list(cap["cpus"])
+    M, ids_all = cap["mem_bytes"], list(cap["cpus"])
     occupied, used_mem, ex_n, ex_mem, grantless, ends = set(), 0, 0, 0, [], []
     for r in running:
         g = r.get("grant")

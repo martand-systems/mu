@@ -8,7 +8,6 @@ Every arranging command takes --on NODE, --json and --others (arrange another pr
 asked). The node decides who may do what (the job's workstation or an owner key) and the --others guard, under its
 queue lock. Standard library only."""
 import os
-import sys
 import time
 
 from mu import proto

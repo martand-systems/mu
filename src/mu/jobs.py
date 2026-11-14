@@ -1400,7 +1400,6 @@ def check_sizes(a, ans, node_name, limits):
     """Before the snapshot (scheduler.md §4.3, §11, §20.12): a request larger than a node with the scheduler is refused
     here (too-big, exit 2: nothing is sent); an older node gets --quick as --cores 1 --mem 512M --time 10m, and
     --priority/--hold, which it would ignore, are refused (node-too-old, exit 6). -> a note for the answer, or None."""
-    from mu import qctl
     if "sched" in (ans.get("features") or []):
         cap = ans.get("capacity") or {}
         big = []
