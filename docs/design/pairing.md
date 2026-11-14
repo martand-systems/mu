@@ -10,7 +10,7 @@ Sections: [1 Summary](#1-summary) · [2 Decisions](#2-decisions-and-what-was-rej
 [7 Container and Dokploy](#7-container-compose-dokploy) · [8 Mac](#8-the-workstation-side) ·
 [9 PC](#9-the-pc-side) · [10 Second workstation](#10-a-second-workstation-stage-p2) · [11 Migration](#11-migration) ·
 [12 Threat model](#12-threat-model) · [13 Tests](#13-tests) · [14 Not tested, open questions](#14-not-tested-and-open-questions) ·
-[15 Read in sources](#15-read-in-sources) · [16 Files and order of work](#16-files-and-order-of-work)
+[15 Read in sources](#15-read-in-sources) · [16 Files and order of work](#16-files-and-the-order-of-work)
 
 ## 1. Summary
 
@@ -381,7 +381,8 @@ base64 characters and `=`; `node_name` and `inviter_name` match `[a-z0-9][a-z0-9
 `inviter_key` is one ed25519 key; `now ≤ expires + 600` (WSL's clock may lag after a sleep); and R's JSON fields
 `name` and `port` (R's own view) equal the offer's. Any failure: `abort` with reason `integrity`, exit 5, nothing set up.
 
-I, on the answer: the MAC, `offer_digest` equal to its own, `node_name` equal, `host_key` one ed25519 key. Any failure:
+I, on the answer: the MAC, `offer_digest` equal to its own, `node_name` equal, `host_key` one ed25519 key, the invite
+not `contested`, and its own clock not past `created + 3600` (the bound of §4.3 is enforced by I, not by R). Any failure:
 `abort` (R removes the client and restores what it replaced), exit 5, nothing kept.
 
 C, on the confirm: the MAC and both digests. A confirm that fails is reported (`the confirmation did not verify`, exit 5)
@@ -409,7 +410,8 @@ Side effects: on `answered`, R creates (or replaces) the dynamic client and adds
 client (§6.5); on `aborted` or `expired` from `answered`, R removes that client and restores the one it replaced; on
 `finished`, R drops the replaced entry and, if it replaced or removed anything, restarts chisel (§6.7). A claim counts
 as wrong when its token's hash differs from `claim_hash`; 5 wrong claims lock the invite in any non-terminal state
-before `answered`.
+before `answered`. A right claim from another address than the first right claim sets the flag `contested` (§12.1);
+the state goes on, and the inviter refuses to finish a contested invite.
 
 ## 6. The relay service, `mu-relayd`
 
@@ -427,8 +429,10 @@ before `answered`.
 `mu-relayd`:
 
 1. reads the token and the key from its environment and unsets them;
-2. loads the store from `/var/lib/mu-relay` (§6.6), refuses to start if the directory is not writable by uid 65532
-   (exit 64: `the state volume is not writable by 65532: see docs/design/pairing.md §7.2`);
+2. loads the store from `/var/lib/mu-relay` (§6.6). A directory it cannot write (no volume, or one owned by root) is
+   treated like a damaged store: the static clients keep working and the pairing and admin endpoints answer 503
+   `store-unwritable` (`the state volume is not writable by 65532: see docs/design/pairing.md §7.2`), so a volume
+   mistake never takes the tunnels down;
 3. reads `static.tsv`, merges (§6.5), writes `/run/relay/users.json`;
 4. listens on `127.0.0.1:8081` (`ReadHeaderTimeout 5 s`, `ReadTimeout 10 s`, `WriteTimeout 40 s`, `IdleTimeout 60 s`,
    `MaxHeaderBytes 8 KiB`);
@@ -443,10 +447,10 @@ All under `/mu/v1/`, JSON in and out (`Content-Type: application/json`, body at 
 
 | Method, path | Auth | Body → answer |
 |---|---|---|
-| `GET /health` | none | `OK\n` when the store is loaded and chisel runs; 503 otherwise. (chisel sends `/health` here once `--backend` is set, §15; the healthcheck and S4 keep working unchanged) |
+| `GET /health` | none | `OK\n` while chisel runs (also with a damaged store, §6.6); 503 otherwise. (chisel sends `/health` here once `--backend` is set, §15; the healthcheck and S4 keep working unchanged) |
 | `GET /mu/v1/` | none | `{"ok":true,"service":"mu-relay","protocol":1,"pairing":true}` |
 | `POST /mu/v1/invites` | admin | `{id, kind, name, port \| ports, inviter, claim_hash, offer, offer_mac, ttl_s, replace}` → `{id, state, expires}`. Checks: §6.3 |
-| `GET /mu/v1/invites/{id}?wait=S&since=STATE` | admin | long poll (S ≤ 25) until the state differs from `since` → `{state, events[], claimed_from, answer, answer_mac, deadline}` |
+| `GET /mu/v1/invites/{id}?wait=S&since=STATE` | admin | long poll (S ≤ 25) until the state differs from `since` → `{state, contested, events[], claims: [{at, from}], answer, answer_mac, deadline}` |
 | `POST /mu/v1/invites/{id}/finish` | admin | `{confirm, confirm_mac}` → `{state: "finished", evicted: bool}`. Only from `answered` |
 | `POST /mu/v1/invites/{id}/abort` | admin or session | `{reason}` → `{state: "aborted"}` |
 | `POST /mu/v1/invites/{id}/claim` | claim token | `{claim}` → `{session, kind, name, port \| ports, inviter, offer, offer_mac, deadline}` |
@@ -829,7 +833,8 @@ was replaced (for rollback). Not the code. Removed when the invite ends.
 
 `claim`:
 
-1. Parse the code (§4.1): `code-typo` exit 2.
+1. Parse the code (§4.1): `code-typo` exit 2. If `current.json` holds this id in phase `answered`, there is nothing to
+   claim: print `resuming invite ID` and exit 0, leaving the rest to `finish` (a resumed run, §9.5).
 2. `POST /invites/{id}/claim` with `K_claim` over HTTPS (Python's default context: the system's CA store, WebPKI host
    name check). Errors: §3.4.
 3. Verify the offer (§5.3); on failure `POST abort {reason: "integrity"}`, exit 5.
@@ -1049,7 +1054,7 @@ paths are tested in every run and all existing rows (A, X, I, R) keep running. N
 | P3 | a deleted client's open reverse tunnel ends within 5 s, a new connection is refused, the other clients are back within 20 s | `noevict` |
 | P4 | the X rows' negative checks against **dynamic** clients: a workstation reaches no unlisted port, a compute client binds no other port | `wideacl` |
 | P5 | `docker compose up -d --force-recreate` (as a Dokploy deploy) keeps dynamic clients and a half-done invite | `novolume` (the volume line removed) |
-| P6 | a fresh volume is writable by 65532; with the image's directory owned by root the service refuses with its message | `rootvolume` |
+| P6 | a fresh volume is writable by 65532 and an invite can be made; with the image's directory owned by root, `/mu/v1/` answers 503 `store-unwritable` and the static clients' tunnels still work | `rootvolume` |
 | P7 | the service sees the client container's address; an `X-Forwarded-For` the client sends is not used | — (covered by the unit fault `xff-first`) |
 | P8 | the 33rd concurrent long poll from one address gets 429 from Traefik's middleware | — |
 | P9 | legacy mode: the silent relay's arguments and auth file are byte-identical to today's (no `--backend`, no `mu-relayd` process) | — |
