@@ -417,10 +417,16 @@ def t_lifecycle():
         check("the token is 32 random bytes (64 hex)", len(tok) == 64 and int(tok, 16) >= 0)
         check("D15: the token is not in the server's argv", tok not in ps_command(p.pid) and ps_command(p.pid))
         # D27: a second serve exits 0 and serves nothing
-        q = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "serve", "--dev", "--fake-mac", "--json"],
-                           env=dict(os.environ, MU_HOME=home), capture_output=True, text=True, timeout=20)
-        check("D27: a second `serve` exits 0 while one serves", q.returncode == 0 and "already" in q.stdout,
-              q.stdout + q.stderr)
+        q = subprocess.Popen([sys.executable, "-I", "-S", CLI, "dashboard", "serve", "--dev", "--fake-mac", "--json",
+                              "--port", str(free_port())], env=dict(os.environ, MU_HOME=home),
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            out, err = q.communicate(timeout=15)
+            check("D27: a second `serve` exits 0 while one serves", q.returncode == 0 and "already" in out, out + err)
+        except subprocess.TimeoutExpired:
+            q.terminate()
+            q.communicate()
+            check("D27: a second `serve` exits 0 while one serves", False, "the second server is serving too")
         info2 = json.load(open(os.path.join(rd, "dashboard.json")))
         check("D27: ... and the first one keeps serving", info2.get("pid") == p.pid and
               req(port, "/api/session", headers={"X-Mu-Token": tok})[0] == 200)
@@ -909,8 +915,9 @@ def t_sampler():
         else:
             skip("D08: the Mac sampler", "no psutil in this Python (the toolchain's Python has it)")
         return
-    check("D08: psutil comes from this Python's own site-packages, imported by path", ps.__file__.startswith(
-        os.path.realpath(sys.prefix)) or ps.__file__.startswith(sys.prefix), ps.__file__)
+    envs = [sys.prefix, os.path.realpath(sys.prefix), os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))]
+    check("D08: psutil comes from this Python's own environment, imported by path",
+          any(ps.__file__.startswith(e + os.sep) for e in envs), ps.__file__)
     m = dashboard.MacSampler(dashfake.Clock(), psutil_mod=ps)
     n = os.cpu_count() or 1
 

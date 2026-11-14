@@ -283,8 +283,11 @@ def load_psutil():
     site, so no .pth file runs. None when it is not there."""
     try:
         import sysconfig
-        for k in ("purelib", "platlib"):
-            p = sysconfig.get_paths().get(k)
+        paths = [sysconfig.get_paths().get(k) for k in ("purelib", "platlib")]
+        venv = os.path.dirname(os.path.dirname(os.path.abspath(sys.executable)))
+        if os.path.isfile(os.path.join(venv, "pyvenv.cfg")):   # a venv (CI): -S leaves sys.prefix at the base
+            paths.insert(0, os.path.join(venv, "lib", "python%d.%d" % sys.version_info[:2], "site-packages"))
+        for p in paths:
             if p and os.path.isdir(p) and p not in sys.path:
                 sys.path.append(p)
         import psutil
