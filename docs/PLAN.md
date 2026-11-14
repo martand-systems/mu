@@ -8,9 +8,10 @@
 
 **Where things stand (2026-11-14):** the four spikes have run and there are no more (§16). The toolchain is installed
 on the laptop and the office PC (auto-update on), the office PC runs as an always-on WSL2 node, and the relay is
-deployed. The first job layer is built and released in v2026.11.7 (§6.4a, `docs/design/job-layer.md`); the laptop
-runs it. No job has run on the office PC yet: its node side is set up in one visit (`docs/design/first-job-checklist.md`). The phase
-table and the path to the first remote job are in §13. Where this plan describes something not built or not measured
+deployed. The first job layer is built and released in v2026.11.7 (§6.4a, `docs/design/job-layer.md`), and pairing by
+one code in v2026.11.8 (`docs/design/pairing.md`). On 2026-11-14 the office PC was paired with the laptop and ran the
+first remote job, which matched the laptop's result (`docs/verification/2026-11-14-first-remote-job.md`). The phase
+table and the path to the first remote job are in §13; the installation guides are in `docs/install/`. Where this plan describes something not built or not measured
 yet, it says so; measurements are in `docs/verification/`.
 
 **Changes in v6 (2026-11-14):** brought in line with what the spikes measured and what is built. Office PC hardware
@@ -796,7 +797,9 @@ services:
 | Relay code | **Done:** `relay/`, merged to `main` on 2026-11-13 after two reviews (16 findings, all fixed). CI run 43467864565 passed behind Traefik 3.6.7, 3.6.25 and 3.7.16 |
 | Dokploy setup | **Done:** deployed by the owner in the Dokploy UI on 2026-11-14 (project `mu`, compose service `relay`, branch `main`, the domain with Let's Encrypt) |
 | Check on the real server | **Passed, with both ends on the laptop** (2026-11-14): `/health` answers 200 with a Let's Encrypt certificate, both clients connect with the pinned fingerprint, 50 MB crossed unchanged, the three negative checks refused, 5 minutes idle with no disconnect |
-| Still to prove on the real server | The office PC's end in WSL2; a second network (both ends shared the laptop's); idle beyond 5 minutes; a relay redeploy and a Traefik restart; credential rotation; which Traefik version the server runs |
+| Pairing service | **On** since 2026-11-14 (redeployed with `RELAY_ADMIN_TOKEN`); the office PC paired through it |
+| The office PC's end in WSL2 | **Works** (2026-11-14): the tunnel from the distro through the office network carried the first remote jobs |
+| Still to prove on the real server | A second network, recorded as such; idle beyond 5 minutes; a relay redeploy and a Traefik restart with a session open; credential rotation; Dokploy keeping the volume across deploys; which Traefik version the server runs |
 
 **Fallback.** The first plan kept frp over WebSocket and a high port with its own certificate in reserve, in case
 Traefik couldn't serve the subdomain. Traefik serves it, so neither is needed for that. They would only come back
@@ -991,21 +994,28 @@ G-code). That is a JATAYU data issue, reported to the project, not a toolchain d
 
 ## 13. Phases and acceptance criteria
 
-**Path to the first remote job** (the shortest list of what is left before a job runs on `office-pc`):
+**Path to the first remote job** (the shortest list of what was left before a job ran on `office-pc`; **done
+2026-11-14** except the restart tests, `docs/verification/2026-11-14-first-remote-job.md`):
 
 1. **Finish the job layer's first stage (P4).** Done 2026-11-14: built, reviewed (33 findings fixed) and tested in
    CI, where the GitHub runner stands in for the distro (job-layer run 43547849592, linux-install run 43549192012).
 2. **Merge it and release it.** Done: v2026.11.7. The laptop runs it; the office PC takes it by auto-update (or
    `mu update` at the visit).
-3. **One visit to the office PC:**
-   - run the host script once more: it adds `sshd` with its gate, the tunnel service and `/srv/mu` (P5, P6);
-   - give the PC its relay credential, and authorise the laptop's public key; compare the fingerprints;
-   - test whether a job can reach Windows through interop, and turn interop and the `/mnt/c` mount off (§11);
+3. **One visit to the office PC:** done 2026-11-14 with v2026.11.8, where pairing by one code replaced the manual
+   steps (`docs/design/first-job-checklist.md` §3):
+   - run the host script once more: it adds `sshd` with its gate, the tunnel service and `/srv/mu` (P5, P6). Done
+     (the `pair` line runs it);
+   - give the PC its relay credential, and authorise the laptop's public key; compare the fingerprints. Done by the
+     one code, which authenticates both keys;
+   - test whether a job can reach Windows through interop, and turn interop and the `/mnt/c` mount off (§11). Done
+     by the same line (the record before the change is `C:\Mu\logs\windows-reach-before.txt` on the PC);
    - run the restart tests that are still open from S3: a baseline with the `mu-wsl-shutdown` service stopped, then
-     restarts with it (`install/hosts/wsl2/README.md`).
-4. **From the laptop:** `mu compute add office-pc …`, then `mu compute status office-pc`. This is also the check S4
-   still lacks: the PC's end of the tunnel in WSL2, and a second network.
+     restarts with it (`install/hosts/wsl2/README.md`). **Not done yet.**
+4. **From the laptop:** `mu compute status office-pc`. Done: up, 0.87 s with a reused connection. This was also the
+   check S4 lacked: the PC's end of the tunnel in WSL2 (done); a second network (not recorded as such).
 5. **The first real job:** `fea-cantilever` on `office-pc` through `mu submit`, compared with the local reference.
+   Done: succeeded in 4.5 s, tip deflections within 0.005 % of the laptop's; `oom`, `timeout` and `cancel` each
+   worked on the PC.
 
 After that: the job layer's second stage (restart recovery proven on the PC, `auto` fallback, the cross-host check on
 the JATAYU model), then P7.
@@ -1016,9 +1026,9 @@ the JATAYU model), then P7.
 | **P1 macOS full install** | `mu` repo, locks, `apps.toml`, wrappers, CLI (`run`, `test`, `doctor`, `context`), the rebuilt benchmarks, the installer, install to `~/Library/Mu` | A fresh install on the laptop passes all benchmarks offline. `mu` is on `PATH` from any folder | **Done** (S1, installer v2 record; v2026.11.6 runs on the laptop). `mu context` is not built; it moves to P2 |
 | **P2 Claude Code plugin and project format** | Plugin (skills, commands, hooks), `mu new`, `mu.toml`, org submodule, run records, `mu check` | Claude Code in a fresh `mu new` project designs and analyses a test part end to end using only mu commands, with run records produced | **Partly.** Built: the `mu.toml` pin, `mu pin`, `mu link`, the `cad` skill, `claude/CLAUDE-toolchain.md`. Not built: the plugin manifest, the other skills, commands, hooks, `mu new`, `mu context`, `mu check`. Run records start with the job layer. The acceptance test has not been run |
 | **P3 Linux compute recipe** | linux-64 locks and the Linux path of the installer, tested in fresh Ubuntu containers; `mu release` checklist; first tag | A fresh linux-64 build passes the benchmarks and matches the macOS results | **Done** (S2): one installer for macOS and Linux, 6/6 in CI on both Ubuntu images and on the office PC. The `mu release` checklist is not built (§9) |
-| **P4 Job layer** (was "Agent and job protocol") | First stage of §6.4a: `compute add/list/status/remove`, `submit/status/log/fetch/cancel`, upload as a git snapshot, the runner and its queue, run records. Second stage: `auto` fallback, restart recovery on the PC | Works end to end in CI against a node on the GitHub runner, through the relay and Traefik pair from S4 | **Built** (stage 1), released in v2026.11.7. Proven in CI only; the first job on the PC is pending (checklist) |
-| **P5 Windows compute node** (was "installer") | The WSL2 host scripts: distro, startup task, `.wslconfig`, clean stop before shutdown; then the job layer's pieces on the node | One run on the office PC (plus one reboot) leaves a node that passes the benchmarks and survives a reboot with nobody logged in | **Mostly done.** The host scripts are on `main` and installed on the PC: every status check passes, benchmarks 6/6, 2 h 01 min after a reboot with nobody signed in (S3). Pending: the restart tests and the first Windows Update restart; `sshd`, the gate, the tunnel service and the authorised key (one run of the host script, with P4). Remote management commands are not built |
-| **P6 Relay (Stage A)** | `relay/Dockerfile` (chisel) and `relay/compose.yaml`, built by Dokploy, Dokploy project `mu` with the `relay` service and domain on 195.201.236.190 (`relay.martand.systems`, HTTPS); chisel client on the node and in the mu CLI; pairing | The laptop runs jobs on `office-pc` **from home**. With the PC off, jobs fall back to `local` without errors | **Relay deployed** (2026-11-14) and checked from the laptop (§7.5). Pending with P4: the tunnel clients and pairing. The LAN-direct path is deferred (§6.3). The acceptance test has not been run |
+| **P4 Job layer** (was "Agent and job protocol") | First stage of §6.4a: `compute add/list/status/remove`, `submit/status/log/fetch/cancel`, upload as a git snapshot, the runner and its queue, run records. Second stage: `auto` fallback, restart recovery on the PC | Works end to end in CI against a node on the GitHub runner, through the relay and Traefik pair from S4 | **Stage 1 done**: released in v2026.11.7 (pairing by one code in v2026.11.8), proven in CI and **run on the office PC** (2026-11-14: the first job matched the laptop's result; `oom`, `timeout`, `cancel` each worked). Stage 2 not built |
+| **P5 Windows compute node** (was "installer") | The WSL2 host scripts: distro, startup task, `.wslconfig`, clean stop before shutdown; then the job layer's pieces on the node | One run on the office PC (plus one reboot) leaves a node that passes the benchmarks and survives a reboot with nobody logged in | **Mostly done.** The host scripts are on `main` and installed on the PC, with the job layer's node side (sshd, gate, tunnel, runner) since 2026-11-14; benchmarks 6/6, 2 h 01 min after a reboot with nobody signed in (S3). Pending: the restart tests and the first Windows Update restart; a run of the scripts on a new PC from nothing (guide: `docs/install/windows-compute-node.md`). Remote management commands are not built |
+| **P6 Relay (Stage A)** | `relay/Dockerfile` (chisel) and `relay/compose.yaml`, built by Dokploy, Dokploy project `mu` with the `relay` service and domain on 195.201.236.190 (`relay.martand.systems`, HTTPS); chisel client on the node and in the mu CLI; pairing | The laptop runs jobs on `office-pc` **from home**. With the PC off, jobs fall back to `local` without errors | **Relay deployed** (2026-11-14), pairing service on, the office PC paired with the laptop and reached through it (§7.5). Not built: the fallback to `local` (job layer stage 2) and pairing a second workstation. The LAN-direct path is deferred (§6.3). The acceptance test (from home, with the fallback) has not been run |
 | **P7 Org profile and JATAYU migration** | `mu-org-profile`, `jatayu` repo, steps M1–M6 | JATAYU frame results reproduce the baseline on both nodes within tolerance. The old folder is archived | **Partly** (§12). The `jatayu` repo exists and pins v2026.11.4; the results reproduce on `local` (M5). On `office-pc`: not done. `mu-org-profile` and M6: not verified here |
 | **P8 Hardening** | Relay Stage B and the native agent if needed, `pvserver` remote viewing, signed `.pkg` and Windows installer, uninstallers | Remote viewing works from home | **Not started.** Two of its first items are already done in S2: OpenVSP and FreeCAD CAM run headless on linux-64, and all six benchmarks pass on both machines |
 
@@ -1121,13 +1131,14 @@ top of §13.
 | S1 Fresh macOS build from the recipe | Today's hand-built setup can be reproduced from a recipe | **Passed.** Fresh clean-environment installs pass `mu doctor` and 6/6 benchmarks, and reproduce the hand-built toolchain on the JATAYU frame analysis (M5) | `2026-11-13-S1-M5.md`, `2026-11-13-installer-v2.md` |
 | S2 linux-64 provisioning on Ubuntu 24.04 | Every tool has a working headless Linux route | **Passed.** Every tool, same versions as macOS; deterministic results identical, FEA within 0.02%. Nothing is `local`-only | `2026-11-13-S2-linux.md` |
 | S3 WSL2 on the office PC | The always-on compute node is feasible | **Passed.** The distro ran 2 h 01 min after a reboot with nobody signed in; no Windows service wrapper is needed. Found: a Windows restart stops Linux hard. The host scripts add a clean stop; `test-stop` passes on the PC. **Open:** the restart tests and the first Windows Update restart | `2026-11-13-S3-wsl.md` |
-| S4 chisel through Dokploy's Traefik on `relay.martand.systems` | The relay design works with this Traefik | **Passes; the PC end is the remaining check.** Passed in CI behind replicas of three Traefik versions, then deployed, and passed against the real server with both ends on the laptop (2026-11-14). **Open:** the PC's end in WSL2, a second network, idle beyond 5 minutes, a redeploy and a Traefik restart, credential rotation | `2026-11-13-S4-relay.md` |
+| S4 chisel through Dokploy's Traefik on `relay.martand.systems` | The relay design works with this Traefik | **Passes, including the PC's end.** Passed in CI behind replicas of three Traefik versions, then deployed, and passed against the real server with both ends on the laptop, then with the PC's end in WSL2 carrying the first remote jobs (2026-11-14). **Open:** a second network recorded as such, idle beyond 5 minutes, a redeploy and a Traefik restart, credential rotation | `2026-11-13-S4-relay.md` |
 
 The open items of S3 and S4 are not new spikes. They are checks that need the office PC. Most are done on the next
 visit, together with the job layer's set-up (§13); the first Windows Update restart is checked when it happens.
 
-**Where implementation stands (2026-11-14):** P0, P1 and P3 are done. P5 is mostly done and the relay of P6 is
-deployed. P4 is in progress. P2 is partly built, and P7 has its `local` half. The status column in §13 has the detail.
+**Where implementation stands (2026-11-14):** P0, P1 and P3 are done. P4's first stage is done and has run on the
+office PC. P5 is mostly done (the restart tests are pending) and the relay of P6 is deployed with pairing. P2 is
+partly built, and P7 has its `local` half. The status column in §13 has the detail.
 
 **Known issues** queued for the next release are listed in `README.md`.
 
