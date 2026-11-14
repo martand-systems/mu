@@ -106,6 +106,9 @@ export default defineConfig(({ command }) => ({
     modulePreload: { polyfill: false },
     target: ["safari16.4", "chrome111", "firefox128"],
     reportCompressedSize: false,
+    // the vendor code (React, TanStack, Radix, uPlot, lucide) in its own chunk: a change to the app alone changes one
+    // small file in the repository (§4.8)
+    rolldownOptions: { output: { codeSplitting: { groups: [{ name: "vendor", test: /node_modules/ }] } } },
   },
   test: {
     environment: "jsdom",

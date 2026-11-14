@@ -1,0 +1,24 @@
+# docs/design/dashboard.md §4.6.1: weekly grouped pull requests, a 14-day cooldown on new releases. A Dependabot PR
+# changes package.json and the lockfile only, so D28 fails on it by design; a person reads the lockfile diff and the
+# changelogs, then commits CI's rebuilt bundle (the `dashboard-build` artifact) to the PR. Nothing updates itself.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 2
+    groups:
+      dashboard:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ["*"]

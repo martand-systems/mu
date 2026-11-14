@@ -24,6 +24,7 @@ test("Trusted Types are enforced: an HTML sink throws", async ({ page, browserNa
     const hasTT = typeof (window as unknown as { trustedTypes?: unknown }).trustedTypes !== "undefined";
     try {
       const d = document.createElement("div");
+      // eslint-disable-next-line no-restricted-syntax, no-restricted-properties -- the test of Trusted Types itself
       d.innerHTML = "<img src=x>";
       return { hasTT, threw: false };
     } catch {

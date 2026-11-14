@@ -39,7 +39,7 @@ TARBALL="node-v$VER-darwin-$ARCH.tar.xz"
 SUM="$(awk -v f="$TARBALL" '$2 == f { print $1 }' "$DASH/node.sha256")"
 [ -n "$SUM" ] || die "dashboard/node.sha256 has no SHA-256 for $TARBALL"
 DEV="$MU_CACHE/dev"; NODE="$DEV/node-v$VER-darwin-$ARCH"
-mkdir -p "$DEV/home" "$DEV/npm-cache" "$DEV/tmp" "$DEV/ms-playwright"; chmod 700 "$DEV"
+mkdir -p "$DEV/home" "$DEV/npm-cache" "$DEV/tmp" "$DEV/ms-playwright" "$REPO/share/dashboard"; chmod 700 "$DEV"
 
 ensure_node() {
   [ -x "$NODE/bin/node" ] && return 0
@@ -102,7 +102,8 @@ case "$cmd" in
   npm)       sandboxed 0 npm "$@" ;;
   e2e)
     port="${DASH_E2E_PORT:-47999}"
-    py="$MU_HOME/toolchains/$(cat "$MU_HOME/default" 2>/dev/null)/env/bin/python"; [ -x "$py" ] || py="$(command -v python3)"
+    d="$(cat "$MU_HOME/default" 2>/dev/null || true)"; py="$MU_HOME/toolchains/$d/env/bin/python"
+    [ -n "$d" ] && [ -x "$py" ] || py="$(command -v python3)"
     "$py" -I -S "$REPO/src/mu/cli.py" dashboard serve --dev --fake-mac --port "$port" --static "$REPO/share/dashboard" \
       --scenario "${DASH_SCENARIO:-busy}" >/dev/null 2>&1 &
     srv=$!; trap 'kill "$srv" 2>/dev/null || true' EXIT

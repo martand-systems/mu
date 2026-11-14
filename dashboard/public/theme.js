@@ -9,7 +9,7 @@
     try {
       var v = window.localStorage.getItem("mu.theme");
       return v === "light" || v === "dark" ? v : null;
-    } catch (e) {
+    } catch {
       return null;
     }
   }

@@ -1,0 +1,191 @@
+# The μ dashboard (docs/design/dashboard.md §4.6.1, §7.1). No secrets, contents: read, no pull_request_target, actions
+# pinned by commit: npm code runs here with nothing worth stealing. Nothing here contacts a node, the relay or the PC.
+#
+#   python   the server's tests (tools/test-dashboard/run.sh: D12-D15, D17-D24, D27, D28's Python half, D38, D39, each
+#            check also run with its fault), Linux and macOS, with psutil from the toolchain's hash-pinned env.pip.txt
+#   front    lint (with the planted-sink must-fail, D16), types, Vitest, the build, the bundle budget (D36, with its
+#            must-fail), the build artifact (`dashboard-build`: the bundle that is committed), BUILD.json (D28) and
+#            `git diff --exit-code -- share/dashboard` (D28)
+#   supply   npm ci on the lockfile, both platforms' native packages, lock drift, the install-script canary (D35),
+#            npm audit and audit signatures, licences (D34)
+#   e2e      Playwright in Chromium and WebKit against `mu dashboard serve --dev` serving the build, with its must-fail;
+#            screenshots of every scenario in light and dark uploaded for the owner's review
+name: dashboard
+on:
+  push:
+    branches: ["main", "dashboard-1a", "dashboard-*"]
+  pull_request: {}
+  schedule:
+    - cron: "23 5 * * 1"     # weekly on main: new advisories appear without a code change
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: dashboard-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  NPM_CONFIG_UPDATE_NOTIFIER: "false"
+  NPM_CONFIG_FUND: "false"
+jobs:
+  python:
+    name: server tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, pins: toolchain/linux-64/env.pip.txt }
+          - { os: macos-15, pins: toolchain/osx-arm64/env.pip.txt }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: A Python with psutil 7.2.2 from the toolchain's pinned env.pip.txt (--require-hashes)
+        run: |
+          grep '^psutil==' "${{ matrix.pins }}" > "$RUNNER_TEMP/psutil.txt"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/psutil.txt"
+          "$RUNNER_TEMP/venv/bin/python" -c 'import psutil, sys; print(sys.version.split()[0], "psutil", psutil.__version__)'
+      - name: tools/test-dashboard/run.sh
+        env:
+          MU_TEST_NEED_PSUTIL: "1"
+        run: MU_TEST_PYTHONS="$RUNNER_TEMP/venv/bin/python $(command -v python3)" /bin/bash tools/test-dashboard/run.sh
+
+  front:
+    name: front (lint, types, Vitest, build, D28)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+      - name: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
+      - name: ESLint (HTML sinks banned)
+        run: npm run lint
+      - name: "must-fail D16: a planted dangerouslySetInnerHTML fails lint"
+        run: |
+          if npx --no-install eslint --no-ignore lint-fixtures/planted.tsx; then echo "::error::the planted HTML sink passed lint"; exit 1; fi
+          echo "ok: the planted sink fails lint"
+      - name: tsc --noEmit
+        run: npm run typecheck
+      - name: Vitest
+        run: npm test
+      - name: Build (share/dashboard/)
+        run: npm run build
+      - name: Bundle budget (D36)
+        run: python3 -I ../tools/dashboard-budget.py --report "$RUNNER_TEMP/size-report.json"
+      - name: "must-fail D36: a 300 kB first-load script is over budget"
+        run: |
+          d="$RUNNER_TEMP/over"; mkdir -p "$d/assets"; head -c 300000 /dev/urandom | base64 > "$d/assets/big.js"
+          printf '<script type="module" src="/assets/big.js"></script>' > "$d/index.html"
+          if python3 -I ../tools/dashboard-budget.py "$d" > /dev/null; then echo "::error::the budget passed 300 kB"; exit 1; fi
+          echo "ok: over budget fails"
+      - name: Upload the build (the bundle that is committed; gh run download RUN -n dashboard-build -D share/dashboard)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-build
+          path: share/dashboard/
+          retention-days: 30
+      - name: Upload the size report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-size
+          path: ${{ runner.temp }}/size-report.json
+          retention-days: 30
+      - name: BUILD.json matches the source (D28, the Python half that needs no Node)
+        run: python3 -I ../tools/dashboard-build-info.py check ..
+      - name: The committed share/dashboard/ is this build (D28)
+        run: |
+          git -C .. status --porcelain -- share/dashboard
+          git -C .. diff --exit-code --stat -- share/dashboard
+          test -z "$(git -C .. status --porcelain -- share/dashboard)" || {
+            echo "::error::share/dashboard/ differs from the build of dashboard/: commit the dashboard-build artifact (gh run download)"; exit 1; }
+
+  supply:
+    name: supply (lockfile, canary, audit, licences)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+      - name: npm ci --ignore-scripts (fails on lockfile drift)
+        working-directory: dashboard
+        run: npm ci --ignore-scripts --no-audit
+      - name: npm audit --audit-level=high
+        working-directory: dashboard
+        run: npm audit --audit-level=high
+      - name: npm audit signatures
+        working-directory: dashboard
+        run: npm audit signatures
+      - name: Lockfile platforms, lock drift, install-script canary, licences (D34, D35, each with its must-fail)
+        run: /bin/bash tools/test-dashboard/supply.sh
+      - name: THIRD-PARTY.txt names every shipped package (D34)
+        run: |
+          if [ -f share/dashboard/THIRD-PARTY.txt ]; then python3 -I tools/dashboard-licences.py --third-party share/dashboard/THIRD-PARTY.txt
+          else echo "no committed build yet: checked by the front job's build"; fi
+
+  e2e:
+    name: e2e (Playwright, Chromium and WebKit)
+    needs: front
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DASH_E2E_PORT: "47999"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: dashboard/.nvmrc
+      - name: npm ci --ignore-scripts
+        working-directory: dashboard
+        run: npm ci --ignore-scripts --no-audit
+      - name: The build from the front job (identical to the committed one once D28 passes)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dashboard-build
+          path: ${{ runner.temp }}/build
+      - name: Python with psutil 7.2.2 (hash-pinned)
+        run: |
+          grep '^psutil==' toolchain/linux-64/env.pip.txt > "$RUNNER_TEMP/psutil.txt"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/psutil.txt"
+      - name: Playwright's Chromium and WebKit (the versions the pinned Playwright names)
+        working-directory: dashboard
+        run: npx --no-install playwright install --with-deps chromium webkit
+      - name: Playwright against `mu dashboard serve --dev`
+        run: |
+          export MU_HOME="$RUNNER_TEMP/mu home" DASH_DEV_RUN="$RUNNER_TEMP/mu home/run/dev"
+          "$RUNNER_TEMP/venv/bin/python" -I -S src/mu/cli.py dashboard serve --dev --fake-mac --port "$DASH_E2E_PORT" \
+            --static "$RUNNER_TEMP/build" > "$RUNNER_TEMP/serve.log" 2>&1 &
+          srv=$!
+          for i in $(seq 50); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
+          rc=0; (cd dashboard && npx --no-install playwright test) || rc=$?
+          kill "$srv"; exit "$rc"
+      - name: "must-fail: with the server's csp-unsafe-inline fault the CSP test fails"
+        run: |
+          export MU_HOME="$RUNNER_TEMP/mu fault" DASH_DEV_RUN="$RUNNER_TEMP/mu fault/run/dev"
+          MU_JOBS_FAULT=csp-unsafe-inline "$RUNNER_TEMP/venv/bin/python" -I -S src/mu/cli.py dashboard serve --dev \
+            --fake-mac --port "$DASH_E2E_PORT" --static "$RUNNER_TEMP/build" > /dev/null 2>&1 &
+          srv=$!
+          for i in $(seq 50); do [ -f "$DASH_DEV_RUN/dashboard.token" ] && break; sleep 0.2; done
+          cd dashboard
+          if npx --no-install playwright test --project chromium -g "loads under the CSP" --reporter=line --output "$RUNNER_TEMP/fault-results"; then
+            echo "::error::the CSP test passed against a server that allows unsafe-inline"; kill "$srv"; exit 1
+          fi
+          kill "$srv"; echo "ok: the CSP test fails with the fault"
+      - name: Upload screenshots and the report (the owner's review copy)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-e2e
+          path: |
+            dashboard/test-results/
+            dashboard/playwright-report/
+            ${{ runner.temp }}/serve.log
+          retention-days: 14

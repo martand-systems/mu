@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const css = readFileSync(join(import.meta.dirname, "..", "src", "styles", "tokens.css"), "utf8");
+const css = readFileSync(join(import.meta.dirname, "..", "src", "styles", "tokens.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 function block(selector: string): Record<string, string> {
   const i = css.indexOf(selector);

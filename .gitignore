@@ -4,3 +4,6 @@ __pycache__/
 /build/
 /dist/
 /.scratch/
+/dashboard/node_modules/
+/dashboard/test-results/
+/dashboard/playwright-report/
