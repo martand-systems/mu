@@ -399,7 +399,7 @@ test("D46 failure states: server down is not 'node offline'; the error page hold
   const text = await page.locator("body").innerText();
   expect(text).not.toContain("onerror");
   expect(text).not.toContain(hostileName);
-  await expect(page.getByText("mu status", { exact: true })).toBeVisible();
+  await expect(page.locator("code", { hasText: /^mu status$/ })).toBeVisible();
   // a different release: reload
   const p2 = await page.context().newPage();
   await p2.route("**/api/overview", async (r) => {
@@ -451,7 +451,7 @@ test("D47 copy works in Safari's engine: the exact command reaches the clipboard
     document.body.appendChild(ta);
     ta.focus();
   });
-  await page.keyboard.press("Meta+V");
+  await page.keyboard.press("ControlOrMeta+V");
   await expect(page.locator("#paste-probe")).toHaveValue(cmd);
   // a refused clipboard: the command is selected for ⌘C and the button says so
   await page.evaluate(() => {
