@@ -328,6 +328,10 @@ for B in $BASHES; do
 (exit 2)" "main authorize avi-mac"
   e "usage: --host-drive takes one letter" "--host-drive takes one drive letter, e.g. C
 (exit 2)" "main status --host-drive CD"
+  e "usage: pair needs one of claim, finish, run, abort, status" "usage: mu-wsl2-distro pair claim|finish|run|abort|status [--relay URL] [--json] (the code on stdin)
+(exit 2)" "main pair bogus"
+  e "pair: refuses without root, before reading any code" "mu-wsl2-distro: run as root: wsl -d <distro> -u root -- mu-wsl2-distro pair
+(exit 1)" "set +e; id() { echo 1000; }; MU_KEYS_DIR= main pair claim --relay https://relay.martand.systems < /dev/null"
 done
 
 # ---- the Windows script, if PowerShell is installed here (pwsh 7: the parse also runs a PowerShell 5.1 syntax check)
