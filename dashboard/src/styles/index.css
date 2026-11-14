@@ -1,0 +1,70 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* dark: bound to the data-theme attribute that theme.js sets before first paint (§5.3), not to the media query */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-brand: var(--brand);
+  --color-on-brand: var(--on-brand);
+  --color-accent: var(--accent);
+  --color-accent-text: var(--accent-text);
+  --color-accent-muted: var(--accent-muted);
+  --color-running: var(--state-running);
+  --color-queued: var(--state-queued);
+  --color-succeeded: var(--state-succeeded);
+  --color-failed: var(--state-failed);
+  --color-oom: var(--state-oom);
+  --color-timeout: var(--state-timeout);
+  --color-cancelled: var(--state-cancelled);
+  --color-stale: var(--state-stale);
+  --color-offline: var(--state-offline);
+  --color-refused: var(--state-refused);
+  --color-attention: var(--state-attention);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.boot-note {
+  margin: 48px auto;
+  max-width: 40rem;
+  padding: 0 24px;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

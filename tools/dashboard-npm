@@ -1,0 +1,130 @@
+#!/bin/bash
+# The only supported way to run npm or npx for dashboard/ on a Mac (docs/design/dashboard.md §4.6.1).
+#
+# npm packages run code with the rights of whoever builds: install scripts (always off here: --ignore-scripts), and
+# then Vite, Rolldown, Tailwind, ESLint, TypeScript, Vitest and Playwright themselves, as soon as build, test, lint
+# or dev runs. On the owner's Mac those rights would include the Keychain (the relay password), the node ssh keys and
+# git push rights. So every npm command here runs:
+#   - with Node from the official tarball, checked against the SHA-256 in dashboard/node.sha256, unpacked into
+#     $MU_CACHE/dev/ (never on the global PATH; no Homebrew, nvm or install script);
+#   - with a scrubbed environment (env -i: PATH, a HOME under $MU_CACHE/dev/home, npm's cache under $MU_CACHE/dev/);
+#     no SSH_AUTH_SOCK, MU_*, GIT_* or tokens;
+#   - under sandbox-exec: no reading anything in the home folder except this repository, $MU_CACHE/dev and
+#     $MU_HOME/run/dev (the dev server's token); ~/.ssh, ~/Library/Keychains, $MU_HOME and git's and gh's credentials
+#     denied outright; the Security server's mach services and /usr/bin/security denied; writes only to dashboard/,
+#     share/dashboard/, $MU_CACHE/dev/ and the temp folders; the network only for `install`, `lock` and `browsers`,
+#     else 127.0.0.1 only.
+#
+#   tools/dashboard-npm install          npm ci --ignore-scripts            (network)
+#   tools/dashboard-npm lock             npm install --package-lock-only --ignore-scripts, after editing package.json:
+#                                        records every platform's optional native packages (D35)  (network)
+#   tools/dashboard-npm browsers         Playwright's Chromium and WebKit for the pinned Playwright  (network)
+#   tools/dashboard-npm run SCRIPT       npm run SCRIPT: build, typecheck, lint, test, dev  (127.0.0.1 only)
+#   tools/dashboard-npm e2e [ARGS]       starts `mu dashboard serve --dev` OUTSIDE the sandbox (it is μ's own code), then
+#                                        npm run e2e inside it; stops the server after
+#   tools/dashboard-npm npm ARGS...      any other npm command (127.0.0.1 only)
+#   tools/dashboard-npm selftest         shows that the sandbox denies what it must
+#   tools/dashboard-npm node-path        the Node it uses
+# CI does not use this wrapper: it runs npm directly in a job with no secrets (.github/workflows/dashboard.yml).
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd -P)"; REPO="$(cd "$HERE/.." && pwd -P)"; DASH="$REPO/dashboard"
+die() { printf 'dashboard-npm: %s\n' "$1" >&2; exit "${2:-1}"; }
+[ "$(uname -s)" = Darwin ] || die "this wrapper is for macOS (sandbox-exec); elsewhere run npm in a disposable VM or let CI build" 2
+[ -x /usr/bin/sandbox-exec ] || die "no /usr/bin/sandbox-exec: do not run npm on this Mac (§4.6.1: a separate macOS user, or CI)"
+MU_HOME="${MU_HOME:-$HOME/Library/Mu}"; MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}"
+case "$(uname -m)" in arm64) ARCH=arm64 ;; x86_64) ARCH=x64 ;; *) die "unsupported CPU $(uname -m)" ;; esac
+VER="$(tr -d ' \n\r' < "$DASH/.nvmrc")"; VER="${VER#v}"
+case "$VER" in *[!0-9.]*|"") die "dashboard/.nvmrc does not hold a Node version" ;; esac
+TARBALL="node-v$VER-darwin-$ARCH.tar.xz"
+SUM="$(awk -v f="$TARBALL" '$2 == f { print $1 }' "$DASH/node.sha256")"
+[ -n "$SUM" ] || die "dashboard/node.sha256 has no SHA-256 for $TARBALL"
+DEV="$MU_CACHE/dev"; NODE="$DEV/node-v$VER-darwin-$ARCH"
+mkdir -p "$DEV/home" "$DEV/npm-cache" "$DEV/tmp" "$DEV/ms-playwright"; chmod 700 "$DEV"
+
+ensure_node() {
+  [ -x "$NODE/bin/node" ] && return 0
+  printf 'dashboard-npm: fetching Node %s (%s) from nodejs.org, checked against %s…\n' "$VER" "$TARBALL" "${SUM:0:12}" >&2
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$DEV/$TARBALL.part" "https://nodejs.org/dist/v$VER/$TARBALL"
+  got="$(shasum -a 256 "$DEV/$TARBALL.part" | awk '{ print $1 }')"
+  [ "$got" = "$SUM" ] || { rm -f "$DEV/$TARBALL.part"; die "SHA-256 mismatch for $TARBALL: got $got, pinned $SUM"; }
+  rm -rf "$NODE.part"; mkdir -p "$NODE.part"
+  tar -xJf "$DEV/$TARBALL.part" -C "$NODE.part" --strip-components 1
+  mv "$NODE.part" "$NODE"; rm -f "$DEV/$TARBALL.part"
+}
+
+q() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }   # a path inside an SBPL string
+profile() {   # profile NET(0|1) -> the sandbox profile's text
+  local h; h="$(cd "$HOME" && pwd -P)"
+  cat <<P
+(version 1)
+(allow default)
+(deny file-read-data (subpath "$(q "$h")"))
+(allow file-read-data (subpath "$(q "$REPO")") (subpath "$(q "$DEV")") (subpath "$(q "$MU_HOME/run/dev")"))
+(deny file-read* (subpath "$(q "$h/.ssh")") (subpath "$(q "$h/Library/Keychains")") (subpath "/Library/Keychains")
+  (subpath "$(q "$h/.config/gh")") (subpath "$(q "$h/.config/git")") (literal "$(q "$h/.git-credentials")")
+  (subpath "$(q "$h/.claude")") (subpath "$(q "$MU_HOME/compute")") (subpath "$(q "$MU_HOME/relay")")
+  (subpath "$(q "$MU_HOME/invites")") (subpath "$(q "$REPO/.git")"))
+(deny file-write*)
+(allow file-write* (subpath "$(q "$DASH")") (subpath "$(q "$REPO/share/dashboard")") (subpath "$(q "$DEV")")
+  (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero")
+  (regex #"^/dev/tty") (regex #"^/dev/fd/") (literal "/dev/dtracehelper"))
+(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.security.agent") (global-name "com.apple.secd") (global-name "com.apple.security.keychain-circle-notification"))
+(deny process-exec (literal "/usr/bin/security") (literal "/usr/bin/ssh") (literal "/usr/bin/git") (literal "/usr/bin/ssh-add"))
+P
+  if [ "$1" = 0 ]; then
+    cat <<'P'
+(deny network-outbound)
+(allow network-outbound (remote ip "localhost:*") (remote unix-socket))
+P
+  fi
+}
+
+sandboxed() {   # sandboxed NET CMD...: run CMD in dashboard/ with the scrubbed environment, under the profile
+  local net="$1" sb; shift
+  ensure_node
+  sb="$DEV/sandbox-$$.sb"; profile "$net" > "$sb"
+  local rc=0
+  ( cd "$DASH" && exec env -i PATH="$NODE/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$DEV/home" TMPDIR="$DEV/tmp/" \
+      LANG=en_US.UTF-8 npm_config_cache="$DEV/npm-cache" npm_config_update_notifier=false npm_config_fund=false \
+      npm_config_audit=false PLAYWRIGHT_BROWSERS_PATH="$DEV/ms-playwright" DASH_DEV_RUN="$MU_HOME/run/dev" \
+      ${DASH_E2E_PORT:+DASH_E2E_PORT="$DASH_E2E_PORT"} ${CI:+CI="$CI"} \
+      /usr/bin/sandbox-exec -f "$sb" "$@" ) || rc=$?
+  rm -f "$sb"; return "$rc"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  install)   sandboxed 1 npm ci --ignore-scripts "$@" ;;
+  lock)      sandboxed 1 npm install --package-lock-only --ignore-scripts --no-audit "$@" ;;
+  browsers)  sandboxed 1 npx --no-install playwright install chromium webkit "$@" ;;
+  run)       [ $# -ge 1 ] || die "usage: tools/dashboard-npm run SCRIPT" 2; sandboxed 0 npm run "$@" ;;
+  npm)       sandboxed 0 npm "$@" ;;
+  e2e)
+    port="${DASH_E2E_PORT:-47999}"
+    py="$MU_HOME/toolchains/$(cat "$MU_HOME/default" 2>/dev/null)/env/bin/python"; [ -x "$py" ] || py="$(command -v python3)"
+    "$py" -I -S "$REPO/src/mu/cli.py" dashboard serve --dev --fake-mac --port "$port" --static "$REPO/share/dashboard" \
+      --scenario "${DASH_SCENARIO:-busy}" >/dev/null 2>&1 &
+    srv=$!; trap 'kill "$srv" 2>/dev/null || true' EXIT
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -f "$MU_HOME/run/dev/dashboard.token" ] && break; sleep 0.25; done
+    DASH_E2E_PORT="$port" sandboxed 0 npm run e2e -- "$@" ;;
+  selftest)
+    ensure_node; fails=0
+    t() { if sandboxed 0 /bin/sh -c "$2" >/dev/null 2>&1; then printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); else printf '  ok    %s\n' "$1"; fi; }
+    t "~/.ssh cannot be listed or read" "ls '$HOME/.ssh' || cat '$HOME'/.ssh/* "
+    t "the login keychain file cannot be read" "cat '$HOME/Library/Keychains/login.keychain-db' > /dev/null"
+    t "/usr/bin/security cannot run" "/usr/bin/security find-generic-password -s systems.martand.mu.relay"
+    t "\$MU_HOME's node configs cannot be read" "ls '$MU_HOME/compute'"
+    t "files elsewhere in the home folder cannot be read" "cat '$HOME/.zshrc' '$HOME/.bash_profile' '$HOME/.profile'"
+    t "no writes outside dashboard/, share/dashboard/, the cache and temp" "touch '$HOME/dashboard-npm-canary'"
+    t "no network beyond 127.0.0.1 outside install" "curl -fsS -m 5 https://registry.npmjs.org/ > /dev/null"
+    t "SSH_AUTH_SOCK and MU_* are not passed" "env | grep -E '^(SSH_AUTH_SOCK|MU_HOME|MU_CACHE|GIT_|GH_|GITHUB_TOKEN)='"
+    if sandboxed 0 node -e "require('fs').writeFileSync('node_modules/.dashboard-npm-selftest', 'ok')" 2>/dev/null \
+       || sandboxed 0 node -e "require('fs').writeFileSync('.dashboard-npm-selftest', 'ok')"; then
+      printf '  ok    Node runs and can write in dashboard/\n'; rm -f "$DASH/node_modules/.dashboard-npm-selftest" "$DASH/.dashboard-npm-selftest"
+    else printf '  FAIL  Node cannot write in dashboard/\n'; fails=$((fails + 1)); fi
+    [ "$fails" = 0 ] || exit 1 ;;
+  node-path) ensure_node; printf '%s\n' "$NODE/bin/node" ;;
+  ""|-h|--help|help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$cmd' (tools/dashboard-npm --help)" 2 ;;
+esac
