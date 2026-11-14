@@ -14,6 +14,11 @@ Exact inputs for building the μ toolchain on a device (see `docs/PLAN.md` §5.3
 | `pins.toml` | Git dependencies pinned by commit |
 | `patches/`, `pip-stubs/` | The one-OCP-per-env fixes (see `legacy/SETUP_REPORT.md`) |
 
-Status (2026-11-14): fresh builds from these files pass `mu doctor` and the benchmarks on macOS arm64 (S1) and on
-linux-64 (S2, and on the office PC in S3). Records: `docs/verification/`. The installer that reads them is
-`install/install.sh`.
+Status (2026-11-14, v2026.11.8): fresh builds from these files pass `mu doctor` and the benchmarks on macOS arm64
+(S1) and on linux-64 (S2, and on the office PC in S3). On the office PC v2026.11.8 installed in 20 s with every layer
+reused, `mu doctor` 23/23 and the benchmarks 6/6. Records: `docs/verification/`. The installer that reads them is
+`install/install.sh`; how to run it: `docs/install/`.
+
+`apt.txt` is installed by root (`sudo ./install.sh --system`). When a release adds a package to it, a machine whose μ
+user has no sudo (the WSL compute node's `mu`) needs that step once by an administrator before the release installs:
+see the known issues in the top-level `README.md`.
