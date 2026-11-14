@@ -3,7 +3,7 @@
 // the test, and a server fault (MU_JOBS_FAULT) can be put in for the must-fail runs.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test as base, expect, type Page } from "@playwright/test";
+import { test as base, expect, type BrowserContext, type Page } from "@playwright/test";
 
 export type Dash = { id: number; port: number; token: string; url: string };
 
@@ -36,31 +36,49 @@ export async function stopServer(d: Dash): Promise<void> {
   await ask(`/stop?id=${d.id}`);
 }
 
-// D29: every page registers a listener for CSP and Trusted Types violations before any script runs, and every test
-// fails on any violation (checked after the test by the fixture below).
-export async function watchViolations(page: Page): Promise<() => Promise<string[]>> {
-  await page.addInitScript(() => {
-    const w = window as unknown as { __violations: string[] };
-    w.__violations = [];
+// D29: every page of every context a test uses reports CSP and Trusted Types violations to the test runner (a binding
+// on the context, so the record survives navigations and covers new pages); the fixture fails the test on any.
+export type Violations = {
+  list: string[];
+  /** Watch a context the test made itself (browser.newContext). */
+  watch: (ctx: BrowserContext) => Promise<void>;
+  /** Forget what was recorded so far (a test that sets off a violation on purpose). */
+  clear: () => Promise<void>;
+};
+
+async function watchContext(ctx: BrowserContext, sink: string[]): Promise<void> {
+  await ctx.exposeBinding("__muViolation", (_src, v: string) => {
+    sink.push(v);
+  });
+  await ctx.addInitScript(() => {
     document.addEventListener("securitypolicyviolation", (e) => {
-      w.__violations.push(`${e.violatedDirective} ${e.blockedURI} ${e.sample}`);
+      const f = (window as unknown as { __muViolation?: (v: string) => void }).__muViolation;
+      f?.(`${e.violatedDirective} ${e.blockedURI} ${e.sample} (${document.location.pathname}${document.location.hash.replace(/t=[0-9a-f]+/, "t=…")})`);
     });
   });
-  return () => page.evaluate(() => (window as unknown as { __violations?: string[] }).__violations ?? []);
 }
+
+const settle = () => new Promise((r) => setTimeout(r, 300));
 
 type Fixtures = {
   serve: (scenario: string, faults?: string[]) => Promise<Dash>;
-  violations: () => Promise<string[]>;
+  violations: Violations;
 };
 
 export const test = base.extend<Fixtures>({
   violations: [
-    async ({ page }, run) => {
-      const get = await watchViolations(page);
-      await run(get);
-      const v = page.isClosed() ? [] : await get().catch(() => [] as string[]);
-      expect(v, "CSP or Trusted Types violations (D29)").toEqual([]);
+    async ({ context }, run) => {
+      const list: string[] = [];
+      const seen = new Set<BrowserContext>();
+      const watch = async (ctx: BrowserContext) => {
+        if (seen.has(ctx)) return;
+        seen.add(ctx);
+        await watchContext(ctx, list);
+      };
+      await watch(context);
+      await run({ list, watch, clear: async () => { await settle(); list.length = 0; } });
+      await settle();
+      expect(list, "CSP or Trusted Types violations (D29)").toEqual([]);
     },
     { auto: true },
   ],

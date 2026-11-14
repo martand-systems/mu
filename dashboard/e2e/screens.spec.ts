@@ -90,7 +90,7 @@ test("screens: job details", async ({ page, serve }) => {
   await shot(page, "job-not-found");
 });
 
-test("screens: page states", async ({ page, serve, browser }) => {
+test("screens: page states", async ({ page, serve, browser, violations }) => {
   test.setTimeout(180000);
   const d = await serve("busy");
   // loading: the overview held back
@@ -143,6 +143,7 @@ test("screens: page states", async ({ page, serve, browser }) => {
   await shot(page, "error", false);
   // no token
   const fresh = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await violations.watch(fresh);
   const p2 = await fresh.newPage();
   await p2.goto(`${d.url}/`);
   await expect(p2.getByTestId("no-token")).toBeVisible();
@@ -150,6 +151,7 @@ test("screens: page states", async ({ page, serve, browser }) => {
   await fresh.close();
   // no JavaScript
   const nojs = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 1440, height: 900 } });
+  await violations.watch(nojs);
   const p3 = await nojs.newPage();
   await p3.goto(`${d.url}/`);
   await p3.screenshot({ path: "test-results/screens/no-javascript-light.png" }); // no script: no theme either

@@ -230,17 +230,19 @@ function Resources({ d }: { d: Detail }) {
 function Usage({ j }: { j: JobRow }) {
   const u = j.usage!;
   return (
-    <dl className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-x-6 gap-y-1.5 border-t border-border px-3 py-3" data-testid="usage">
+    <div className="flex flex-col gap-1.5 border-t border-border px-3 py-3" data-testid="usage">
+    <dl className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-x-6 gap-y-1.5">
       <Meta k="CPU time">{duration(u.cpu_s)}</Meta>
       <Meta k="cores used">{num(u.cores_avg)}</Meta>
       <Meta k="peak working">{bytes(u.mem_work_peak_bytes)}</Meta>
       <Meta k="peak (cgroup)">{bytes(u.mem_peak_bytes)}*{u.source === "runner-sampled" ? "~" : ""}</Meta>
       {u.mem_events.oom_kill !== null && u.mem_events.oom_kill > 0 && <Meta k="OOM kills">{u.mem_events.oom_kill}</Meta>}
       <Meta k="processes, peak">{u.pids_peak ?? "—"}</Meta>
-      <p className="col-span-full text-xs text-text-muted">
-        * includes file cache{u.source === "runner-sampled" ? " · ~ last sample, up to 5 s old" : ""}
-      </p>
     </dl>
+    <p className="text-xs text-text-muted">
+      * includes file cache{u.source === "runner-sampled" ? " · ~ last sample, up to 5 s old" : ""}
+    </p>
+    </div>
   );
 }
 

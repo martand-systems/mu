@@ -10,7 +10,7 @@ export function Sparkline({ series, now, span = 600, max = 100, stale = false, l
   const d = sparkPath(pts, now - span, now, W, H, max);
   if (series.length < 6) {
     // a line from one or two points reads as broken: say what is happening instead
-    return <span className="min-w-0 flex-1 text-xs text-text-faint" data-testid="spark-collecting">collecting…</span>;
+    return <span className="min-w-0 flex-1 text-xs text-text-muted" data-testid="spark-collecting">collecting…</span>;
   }
   return (
     <svg viewBox={`0 0 ${W} ${H}`} height={H} role="img" aria-label={label} className="h-7 min-w-0 flex-1 overflow-visible" preserveAspectRatio="none">

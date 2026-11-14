@@ -13,7 +13,7 @@ test("the page loads under the CSP with no violation and drops the token from th
   expect(page.url()).not.toContain("t=");
 });
 
-test("Trusted Types are enforced: an HTML sink throws", async ({ page, serve, browserName }) => {
+test("Trusted Types are enforced: an HTML sink throws", async ({ page, serve, browserName, violations }) => {
   const d = await serve("idle");
   await openDash(page, d);
   const r = await page.evaluate(() => {
@@ -30,5 +30,5 @@ test("Trusted Types are enforced: an HTML sink throws", async ({ page, serve, br
   expect(r.hasTT, `${browserName} has Trusted Types`).toBe(true);
   expect(r.threw).toBe(true);
   // the deliberate sink above raised a violation event; it is this test's own, not the page's
-  await page.evaluate(() => ((window as unknown as { __violations: string[] }).__violations = []));
+  await violations.clear();
 });

@@ -42,7 +42,7 @@ describe("review fixes: sizes, the chart's time axis, notes", () => {
     expect(bytes(12_300)).toBe("12 kB");
   });
   it("the time axis shows seconds under 10 minutes and the day when a run crosses midnight", async () => {
-    const { timeLabels } = await import("../src/features/job-detail/ResourceChart");
+    const { timeLabels } = await import("../src/lib/format");
     const t0 = new Date(2026, 10, 14, 22, 40, 0).getTime() / 1000;
     expect(timeLabels([t0, t0 + 15, t0 + 30], 300)).toEqual(["22:40:00", "22:40:15", "22:40:30"]);
     expect(timeLabels([t0, t0 + 1800], 3600)).toEqual(["22:40", "23:10"]);

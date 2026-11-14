@@ -8,7 +8,7 @@ import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "rea
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import type { MetricSample } from "../../api/types";
-import { bytes, clock, num } from "../../lib/format";
+import { bytes, clock, num, timeLabels } from "../../lib/format";
 import { resourceColumns, thin, type ResourceColumns } from "../../lib/series";
 import { token, useEffectiveTheme } from "../../lib/theme";
 import { ToggleButton } from "../../ui/Toggle";
@@ -33,23 +33,6 @@ function useWidth(ref: RefObject<HTMLDivElement | null>): number {
     return () => ro.disconnect();
   }, [ref]);
   return w;
-}
-
-/** The time axis' labels: HH:MM, or HH:MM:SS when the run is under 10 minutes; the day on the first tick when the
- * run crosses midnight. */
-export function timeLabels(vals: number[], span: number): string[] {
-  const secs = span < 600;
-  const day = (t: number) => new Date(t * 1000).toDateString();
-  const crosses = vals.length > 1 && day(vals[0]!) !== day(vals[vals.length - 1]!);
-  return vals.map((v, i) => {
-    const hms = clock(v);
-    const t = secs ? hms : hms.slice(0, 5);
-    if (crosses && i === 0) {
-      const d = new Date(v * 1000);
-      return `${d.getDate()} ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()]} ${t}`;
-    }
-    return t;
-  });
 }
 
 function axes(c: Colours, yFmt: (v: number) => string, xLabels: boolean): uPlot.Axis[] {
