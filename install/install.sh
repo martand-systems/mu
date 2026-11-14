@@ -33,7 +33,7 @@ set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
 FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
                               # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
-DISPATCHER_REV=9              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=10              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
@@ -67,6 +67,12 @@ done
 APT_LIST="$RECIPE/toolchain/$PLAT/apt.txt"
 apt_missing() { [ -f "$APT_LIST" ] || return 0; local p; for p in $(grep -v '^#' "$APT_LIST" | sed 's/#.*//'); do
   dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || printf '%s ' "$p"; done; return 0; }
+can_sudo() {   # root, sudo without a password, or a terminal and a group that Ubuntu's sudoers lets in (not: mu on the node)
+  [ "$(id -u)" = 0 ] && return 0
+  command -v sudo >/dev/null 2>&1 || return 1
+  sudo -n true 2>/dev/null && return 0
+  [ -t 0 ] && id -nG 2>/dev/null | tr ' ' '\n' | grep -qxE 'sudo|admin|wheel'
+}
 apt_install() {   # installs the missing packages (as root, or through sudo)
   local miss; miss="$(apt_missing)"; [ -n "$miss" ] || return 0
   local SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
@@ -194,9 +200,9 @@ else
   command -v dpkg-query >/dev/null 2>&1 || fail "this Linux installer needs Ubuntu/Debian (dpkg); found $OSNAME"
   miss="$(apt_missing)"
   if [ -n "$miss" ]; then
-    if [ "$(id -u)" = 0 ] || sudo -n true 2>/dev/null || [ -t 0 ]; then
+    if can_sudo; then
       note "Ubuntu packages: $miss"; spinner_stop; apt_install >&5 2>&5 || fail "could not install the Ubuntu packages: $miss"; spinner_start
-    else fail "missing Ubuntu packages: $miss. Install them once with:  sudo ./install.sh --system"; fi
+    else fail "missing Ubuntu packages: $miss, and $(id -un) cannot use sudo. As root (on a WSL node: wsl -d mu-compute -u root -- apt-get install -y $miss), or as an administrator: sudo apt-get install -y $miss; then run this again"; fi
   fi
 fi
 # global lock: one install at a time. A lock is stale if its pid is gone or is no longer an installer.
@@ -701,8 +707,14 @@ printf '\n  %sμ %s is ready%s in %s s %s· %s of new disk · log %s%s\n' "$B$G"
 # (while it says on, this sets the scheduler up again, e.g. after systemd or linger became available)
 if [ "$AUTOUPDATE" = 1 ] && [ "$MODIFY_PATH" = 1 ] && [ "${MU_NO_AUTOUPDATE:-}" != 1 ] && [ "${CI:-}" != true ] \
    && ! grep -Eqs '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*off' "$MU_HOME/autoupdate.conf"; then
-  au_rc=0; "$MU_HOME/bin/mu" autoupdate on --quiet > "$WORK/autoupdate.txt" 2>&5 || au_rc=$?
-  au_line="$(head -1 "$WORK/autoupdate.txt")"; [ -n "$au_line" ] || au_line="auto-update could not be turned on (see the log): mu autoupdate on"
+  au_rc=0; "$MU_HOME/bin/mu" autoupdate on --quiet > "$WORK/autoupdate.txt" 2> "$WORK/autoupdate.err" || au_rc=$?
+  cat "$WORK/autoupdate.err" >&5 2>/dev/null || true
+  au_line="$(head -1 "$WORK/autoupdate.txt")"
+  if [ "$au_rc" != 0 ]; then   # say why (systemctl's own words), not only that it failed
+    au_err="$( (grep -v '^[[:space:]]*$' "$WORK/autoupdate.err" || true) | tail -n 1 | tr -cd '[:print:]' | cut -c1-200)"
+    au_line="auto-update could not be turned on${au_err:+ ($au_err)}: run mu autoupdate on (the log has the rest)"
+  fi
+  [ -n "$au_line" ] || au_line="auto-update could not be turned on (see the log): mu autoupdate on"
   if [ "$au_rc" = 0 ]; then printf '  %s\n' "$au_line" >&3; else printf '  %s!%s %s\n' "$Y" "$N" "$au_line" >&3; fi
 fi
 printf '\n  Next:  %smu%s                    status and common commands\n' "$B" "$N" >&3

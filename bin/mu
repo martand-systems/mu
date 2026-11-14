@@ -3,7 +3,7 @@
 # Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
 # The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node) always run on the default toolchain.
-MU_DISPATCHER_REV=9   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=10   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -39,7 +39,8 @@ install_running() {
 kb_of() { local t=0 k d; for d in "$@"; do [ -e "$d" ] && { k=$(du -sk "$d" 2>/dev/null | cut -f1); t=$((t + ${k:-0})); }; done; echo "$t"; }
 report_removed() {   # report_removed KB
   awk -v k="$1" 'BEGIN{ if (k >= 1048576) printf "removed %.1f GB", k/1048576; else printf "removed %d MB", k/1024 }'
-  printf ' (macOS may hold it in Time Machine local snapshots for up to a day before the free space shows)\n'
+  if [ "$(uname -s)" = Darwin ]; then printf ' (macOS may hold it in Time Machine local snapshots for up to a day before the free space shows)\n'
+  else printf '\n'; fi
 }
 
 # resolve the toolchain for this folder -> V, VSRC (what chose it), MU_PROJECT
