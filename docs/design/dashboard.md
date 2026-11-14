@@ -699,6 +699,12 @@ through a release and its auto-update, which is failing today and is the gate in
 
 ## 9. Questions for the owner
 
+> **Defaults set 2026-11-14** (the owner may override): see [docs/ROADMAP.md](../ROADMAP.md) §2.3. In short: always
+> on; the PC's figures are the WSL2 VM's, labelled, with no Windows-side task (the office PC is not to be
+> disturbed); read-only; local `mu run` recording opt-in; comparisons on benchmarks and real project jobs (the JATAYU
+> `perf/` log as a source); notifications opt-in; no reverse tunnel ever; node retention 90 days and monthly
+> audit-log rotation. The dashboard is built before the shell work, and defines the status data the shell reads.
+
 1. **Always on?** Recommended: `mu dashboard on` by default on workstations with a paired node: a LaunchAgent, so the
    URL always answers; it uses no CPU and makes no node calls when nothing is being watched. Alternative: no
    always-on process; the dashboard runs only after `mu dashboard open`. CI is always off.

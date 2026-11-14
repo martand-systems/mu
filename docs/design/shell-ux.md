@@ -674,6 +674,12 @@ clients; Dokploy API rotations; keypair admin auth; `mu run --job`/`attach`/`[jo
 
 ## 10. Questions for the owner
 
+> **Answered 2026-11-14.** The owner's answers, and the lead's calls where the owner left it to judgment, are in
+> [docs/ROADMAP.md](../ROADMAP.md) §2.1–2.2. In short: no new machine soon (phase 3 deferred); Claude types the jobs;
+> the office PC is not to be disturbed (no uninstall/reinstall tests there; Windows-only checks become a short
+> non-destructive checklist); Claude Code settings go in each project via `mu link`; no clipboard secrets; no root
+> package updater; `mu fix` asks before restarting the distro; automatic fetch opt-in. Order: after the dashboard.
+
 1. **Q1, when does the next machine arrive?** A second PC, a second Mac, or a second engineer: if none in the next
    two months, phase 3 waits; if one is coming, phase 3 is scheduled to finish before it.
 2. **Q2, the first script on a fresh PC (phase 3):** (a) a small public bootstrap repo with stage 1 and the host
