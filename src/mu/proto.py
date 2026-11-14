@@ -19,8 +19,12 @@ EXIT_CODES_LINE = ("exit codes: 0 ok, 2 usage or project, 3 the node lacks the p
 
 # exit codes of node verbs (§7.2): sysexits values, never 1, 2 or ssh's 255
 NODE_USAGE, NODE_PROTOCOL, NODE_NO_SUCH, NODE_UNAVAILABLE, NODE_INTERNAL, NODE_TOOLCHAIN = 64, 65, 66, 69, 70, 78
+NODE_NOPERM = 77    # EX_NOPERM: this key may not arrange that job (scheduler.md §20.9)
 NODE_TO_CLIENT = {NODE_USAGE: EXIT_ERROR, NODE_PROTOCOL: EXIT_REFUSED, NODE_NO_SUCH: EXIT_NO_SUCH,
-                  NODE_UNAVAILABLE: EXIT_NODE_CANNOT, NODE_INTERNAL: EXIT_ERROR, NODE_TOOLCHAIN: EXIT_VERSION}
+                  NODE_UNAVAILABLE: EXIT_NODE_CANNOT, NODE_INTERNAL: EXIT_ERROR, NODE_TOOLCHAIN: EXIT_VERSION,
+                  NODE_NOPERM: EXIT_REFUSED}
+# node refusals with exit 64 that mean "this request, as it is, cannot be done": the client exits 2 for them
+USAGE_ERRORS = ("too-big", "quick-with-flags", "other-project", "not-queued", "reference-not-queued", "already-finished")
 
 NODE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")        # the relay's rule for client names
 RESERVED_NODES = ("local", "auto")
@@ -30,7 +34,7 @@ REPO_NAME = re.compile(r"^[a-z0-9_][a-z0-9._-]{0,79}$")      # what the gate let
 KEY_NAME = re.compile(r"^[a-z0-9-]{1,32}$")
 VERSION = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$")
 FINISHED = ("succeeded", "failed", "cancelled", "timeout", "oom", "interrupted")
-STATES = ("queued", "running") + FINISHED
+STATES = ("queued", "held", "running") + FINISHED
 
 
 class MuError(Exception):

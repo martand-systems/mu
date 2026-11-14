@@ -1,7 +1,8 @@
 """μ job layer, compute-node side (docs/design/job-layer.md §6.4, §7-§12). Runs as the user `mu`.
 
   mu node serve --key=<name> <verb> [key=value ...]   what the gate (mu-node-gate, sshd's ForceCommand) runs
-  mu node run                                        the runner: mu-node.service, one job at a time, FIFO
+  mu node run                                        the runner: mu-node.service; several jobs at once, admitted by
+                                                     cores and memory (docs/design/scheduler.md, src/mu/sched.py)
   mu node run-job <id>                               the shim: main process of the unit mu-job-<id>.service
   mu node enable [--name N] [--min-free-gb G]        write and start ~/.config/systemd/user/mu-node.service
   mu node disable                                    stop and remove it (jobs are kept)
@@ -40,6 +41,30 @@ MU_WSL_HOST_DRIVE (the host-drive record), MU_NODE_FAULT or the root-owned /etc/
   no-log-cap           the runner lets a job's log grow without a limit
   no-unit-check-torn   a job whose state.json is unreadable counts as queued, whatever its unit and events say (5)
   delete-damaged       recovery deletes a job folder whose job.json is unreadable (instead of moving it aside)
+The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sched.py):
+  stamp-before-checkout   a job's grant and start time are written before its checkout (no re-check after it)
+  grant-after-systemd-run the grant is written after systemd-run (the allocation misses a starting job)
+  die-after-grant         the runner exits once right after writing a grant, before systemd-run (Q16's crash)
+  grant-in-memory-only    the allocation counts only jobs this runner process started (adopted grants forgotten)
+  free-on-cancel-request  a running job's grant is freed when its cancel is asked, not when its unit has ended
+  mem-max-is-capacity     a job's MemoryMax is the node's job memory, not its grant
+  no-express-quota        express units get no CPUQuota
+  no-affinity             the shim does not pin the job to its CPUs
+  widen-check-main-thread-only  the sampler checks only each process's main thread for a widened CPU mask
+  no-thread-env           the thread variables (OMP_NUM_THREADS, ...) and TMPDIR are not set
+  no-usage                no usage in results (and hello lacks the feature)
+  no-waiting-for          status and list leave out waiting_for and starts_by
+  no-capacity-check       submit takes a request larger than the node (the client skips its check too)
+  requeue-new-ns          a job re-queued after an interruption goes to the back of its band
+  keep-tmp-on-rerun       a re-run keeps the first attempt's TMPDIR
+  restart-only-idle       the runner takes a new default only when no job is queued or running
+  release-to-back         release puts the job at the back of its band
+  partial-order-write     a move writes only the moved job into queue.json
+  priority-to-front       priority puts the job at the front of its new band
+  holds-in-order-file-only  a hold is kept in queue.json only (not in the job's state.json)
+  rebuild-held-as-queued  a lost state.json of a held job is rebuilt as queued
+  owner-from-node-json    owners are read from node.json (a file jobs can write), not /etc/mu/owners
+  queue-project-filter    `queue` lists only the caller's project
 """
 import fcntl
 import hashlib
@@ -56,7 +81,7 @@ import tarfile
 import time
 import traceback
 
-from mu import durable, proto
+from mu import durable, proto, sched
 from mu.durable import fault
 
 ROOT = os.environ.get("MU_NODE_ROOT") or "/srv/mu"
@@ -73,7 +98,14 @@ exit 0
 """
 ARG_RULES = {"id": proto.JOB_ID, "project": proto.PROJECT_ID, "repo": proto.REPO_NAME, "offset": re.compile(r"^[0-9]{1,15}$"),
              "max": re.compile(r"^[0-9]{1,12}$"), "limit": re.compile(r"^[0-9]{1,5}$"), "follow": re.compile(r"^[01]$"),
-             "protocol": re.compile(r"^[0-9]{1,4}$"), "what": re.compile(r"^result$")}
+             "protocol": re.compile(r"^[0-9]{1,4}$"), "what": re.compile(r"^result$"),
+             # queue control (scheduler.md §20.4): from and others are claims made by code mu owns, like by=
+             "before": proto.JOB_ID, "after": proto.JOB_ID, "to": re.compile(r"^(front|back)$"),
+             "class": re.compile(r"^(urgent|high|normal|low)$"), "from": proto.PROJECT_ID, "others": re.compile(r"^[01]$")}
+FEATURES = ("sched", "usage", "queue-control", "update")
+LOCK_WAIT_S = 120             # a verb waits this long for the queue lock (the runner holds it through checkouts)
+SAMPLE_EVERY = 5              # ticks between two samples of the running jobs (§7.1)
+STARTED_HERE = set()          # fault grant-in-memory-only: the jobs this runner process started
 
 
 class NodeError(Exception):
@@ -124,12 +156,29 @@ def journal(msg):
 
 
 class Lock:
-    """flock on /srv/mu/lock around every change to the queue."""
+    """flock on /srv/mu/lock around every change to the queue. WAIT (seconds): give up after it with `busy` (exit 69,
+    nothing changed), for the arranging verbs while the runner holds the lock through a checkout (§20.8)."""
+
+    def __init__(self, wait=None):
+        self.wait = wait
 
     def __enter__(self):
         self.fd = os.open(p("lock"), os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(self.fd, fcntl.LOCK_EX)
-        return self
+        if self.wait is None:
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            return self
+        end = time.time() + self.wait
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except BlockingIOError:
+                if time.time() > end:
+                    os.close(self.fd)
+                    raise NodeError(proto.NODE_UNAVAILABLE, "busy", "retry in a minute",
+                                    message="the queue lock was not free within %d s (the runner is checking out a "
+                                    "job); nothing was changed" % self.wait)
+                time.sleep(0.2)
 
     def __exit__(self, *exc):
         fcntl.flock(self.fd, fcntl.LOCK_UN)
@@ -165,7 +214,7 @@ def systemctl(*args, timeout=60):
 
 def unit_props(unit):
     r = systemctl("show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "Result",
-                  "-p", "ExecMainStatus", "-p", "ExecMainCode")
+                  "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ActiveEnterTimestampMonotonic", "-p", "ControlGroup")
     props = {}
     for line in r.stdout.splitlines():
         if "=" in line:
@@ -284,6 +333,47 @@ def update_node_info(**kw):
     return n
 
 
+def cpu_ids():
+    """The CPU ids this process may use (the runner's affinity: all of the VM's vCPUs)."""
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except AttributeError:   # macOS (local tests): no affinity calls
+        return list(range(os.cpu_count() or 1))
+
+
+def capacity(node=None):
+    """C, M and the reserves (scheduler.md §3.1), from the kernel and node.json `sched`."""
+    return sched.capacity(node if node is not None else node_info(), cpu_ids(), hw_info()["mem_total_kb"] * 1024)
+
+
+def cpu_limit():
+    """limits.cpu in hello (§5.3): affinity set by the shim, or none where the call does not exist."""
+    return "affinity" if hasattr(os, "sched_setaffinity") and not fault("no-affinity") else "none"
+
+
+def owners():
+    """The owner keys (§20.4): the names in /etc/mu/owners (root, written by the first pairing by invite); with no such
+    file and exactly one key in /etc/mu/authorized_keys/mu, that key; else none (warned about in hello and queue).
+    MU_NODE_OWNERS / MU_NODE_KEYS: other files (tests)."""
+    if fault("owner-from-node-json"):
+        v = node_info().get("owners")
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+    path = os.environ.get("MU_NODE_OWNERS") or "/etc/mu/owners"
+    if os.path.exists(path):
+        return [x.strip() for x in read_text(path).splitlines() if proto.KEY_NAME.match(x.strip())]
+    keys = [ln.split() for ln in read_text(os.environ.get("MU_NODE_KEYS") or "/etc/mu/authorized_keys/mu").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    names = [k[-1] for k in keys if len(k) >= 3]
+    return names if len(names) == 1 and proto.KEY_NAME.match(names[0]) else []
+
+
+def owner_warnings(own):
+    if own:
+        return []
+    return ["no owner key on this node (/etc/mu/owners is missing and the node has more than one key): nobody may "
+            "arrange other workstations' jobs; the file is written at the node's next root step"]
+
+
 def limits_ok(node):
     st = node.get("selftest") or {}
     return bool(st.get("ok")) and st.get("boot_id") == boot_id()
@@ -336,9 +426,125 @@ def scan_jobs():
     return out
 
 
+def waiting_jobs(jobs):
+    """Unfinished jobs that are queued or held (a missing state.json counts as queued, as before)."""
+    return [j for j in jobs if not j["result"] and (not j["state"] or j["state"].get("state") in ("queued", "held"))]
+
+
+def read_order():
+    """/srv/mu/queue.json (§20.8): {schema, rev, order: [ids], updated}; {} when missing or unreadable (the walk is
+    then FIFO within each band)."""
+    return durable.read_record(p("queue.json")) or {}
+
+
+def write_order(ids, **extra):
+    """queue.json replaced whole: every queued and held job, in walk order (§20.3)."""
+    old = read_order()
+    rec = {"schema": 1, "rev": int(old.get("rev") or 0) + 1, "order": list(ids), "updated": proto.iso()}
+    if fault("holds-in-order-file-only"):
+        rec["held"] = list(extra.get("held", old.get("held") or []))
+    durable.write_record(p("queue.json"), rec)
+    return rec
+
+
+def is_held(j, order=None):
+    if fault("holds-in-order-file-only"):
+        return not j["result"] and j["id"] in ((order if order is not None else read_order()).get("held") or [])
+    return not j["result"] and (j["state"] or {}).get("state") == "held"
+
+
+def walk_jobs(jobs, order=None):
+    """The walk (§20.3): queued and held jobs by (band, place in queue.json, accepted_ns). -> [{id, band, held, j}]."""
+    order = read_order() if order is None else order
+    items = []
+    for j in waiting_jobs(jobs):
+        st = j["state"] or {}
+        ns = j["job"].get("accepted_ns", 0)
+        if fault("requeue-new-ns") and st.get("requeued_ns"):
+            ns = st["requeued_ns"]
+        items.append({"id": j["id"], "band": sched.band_of(st, j["job"]), "accepted_ns": ns, "held": is_held(j, order),
+                      "j": j})
+    return sched.walk(items, order.get("order"))
+
+
 def queued_jobs(jobs):
-    q = [j for j in jobs if not j["result"] and (not j["state"] or j["state"].get("state") == "queued")]
-    return sorted(q, key=lambda j: j["job"].get("accepted_ns", 0))
+    """The jobs that can start, in walk order (held ones left out)."""
+    return [it["j"] for it in walk_jobs(jobs) if not it["held"]]
+
+
+def grant_of(j):
+    g = (j["state"] or {}).get("grant")
+    return g if isinstance(g, dict) and isinstance(g.get("cpus"), list) else None
+
+
+def running_info(jobs, here_only=False):
+    """[{id, grant, end, started_epoch}] of the running jobs, for the plan (§3.2): grants come from state.json every
+    pass; a running job without one holds the whole node."""
+    out = []
+    for j in jobs:
+        st = j["state"] or {}
+        if j["result"] or st.get("state") != "running":
+            continue
+        if fault("free-on-cancel-request") and os.path.exists(os.path.join(j["dir"], "cancel")):
+            continue
+        if here_only and j["id"] not in STARTED_HERE:
+            continue
+        g = grant_of(j)
+        out.append({"id": j["id"], "grant": g, "end": sched.end_bound(g) if g else None,
+                    "started_epoch": st.get("started_epoch"), "held": False})
+    return out
+
+
+def queue_items(w, cap):
+    out = []
+    for it in w:
+        if it["held"]:
+            out.append({"id": it["id"], "held": True})
+            continue
+        try:
+            out.append({"id": it["id"], "held": False, "req": sched.resolve(it["j"]["job"], cap)})
+        except sched.TooBig as e:
+            out.append({"id": it["id"], "held": False, "error": e})
+    return out
+
+
+def disk_block(node):
+    """None while jobs may start; else what waiting_for says (§3.6)."""
+    if fault("no-start-disk-check"):
+        return None
+    d = disk_info(node)
+    if d["free_gb"] is not None and d["free_gb"] < d["min_free_gb"]:
+        return {"free_gb": d["free_gb"], "min_free_gb": d["min_free_gb"], "where": d["where"]}
+    return None
+
+
+def view(jobs=None, node=None):
+    """The plan as it stands now, for status, list, queue and hello: read only, no lock."""
+    jobs = scan_jobs() if jobs is None else jobs
+    node = node_info() if node is None else node
+    cap = capacity(node)
+    order = read_order()
+    w = walk_jobs(jobs, order)
+    now = time.monotonic()
+    pl = sched.plan(now, cap, running_info(jobs), queue_items(w, cap), disk_block(node))
+    return {"plan": pl, "cap": cap, "walk": w, "now": now, "wall": time.time(), "jobs": jobs, "order": order}
+
+
+def wall_of(v, mono):
+    """A monotonic bound as wall-clock ISO time at answer time (§7.1), or None."""
+    return proto.iso(v["wall"] + (mono - v["now"])) if isinstance(mono, (int, float)) else None
+
+
+def waiting_text(v, jid):
+    """waiting_for with its times in wall-clock ISO (the plan keeps monotonic seconds)."""
+    w = v["plan"]["waiting"].get(jid)
+    if not w:
+        return None
+    w = json.loads(json.dumps(w))
+    r = w.get("reservation")
+    if r:
+        r["starts_by"] = wall_of(v, r.get("starts_by"))
+    return w
 
 
 def event(d, text):
@@ -351,23 +557,65 @@ def event(d, text):
         pass
 
 
-def status_of(j, jobs=None):
+def status_of(j, v=None):
+    """A job's status (job-layer §7.3), with the scheduler's fields (scheduler.md §7.1): request, grant, class, band,
+    place, position, held, waiting_for, starts_by, ends_by, usage, affinity_widened. V: view() (computed if absent)."""
     job, st, res = j["job"], j["state"] or {}, j["result"]
     state = res.get("state") if res else st.get("state", "queued")
-    pos = None
-    if not res and state == "queued":
-        q = queued_jobs(jobs if jobs is not None else scan_jobs())
-        pos = next((i + 1 for i, x in enumerate(q) if x["id"] == j["id"]), None)
+    v = view() if v is None and not res else v
+    pl = v["plan"] if v else {}
     try:
         log_size = os.path.getsize(os.path.join(j["dir"], "log"))
     except OSError:
         log_size = 0
-    return {"ok": True, "job_id": j["id"], "name": job.get("name"), "project_id": job.get("project_id"),
-            "state": state, "attempt": (res or st).get("attempt", st.get("attempt", 1)), "position": pos,
-            "queued_at": job.get("accepted_at"), "started_at": (res or {}).get("started_at") or st.get("started_at"),
-            "ended_at": (res or {}).get("ended_at"), "exit_code": (res or {}).get("exit_code"), "log_size": log_size,
-            "note": (res or {}).get("note") or st.get("note"), "unit": st.get("unit"),
-            "cancel_requested": os.path.exists(os.path.join(j["dir"], "cancel"))}
+    out = {"ok": True, "job_id": j["id"], "name": job.get("name"), "project_id": job.get("project_id"),
+           "state": state, "attempt": (res or st).get("attempt", st.get("attempt", 1)),
+           "position": pl.get("position", {}).get(j["id"]) if not res and state == "queued" else None,
+           "queued_at": job.get("accepted_at"), "started_at": (res or {}).get("started_at") or st.get("started_at"),
+           "ended_at": (res or {}).get("ended_at"), "exit_code": (res or {}).get("exit_code"), "log_size": log_size,
+           "note": (res or {}).get("note") or st.get("note"), "unit": st.get("unit"),
+           "cancel_requested": os.path.exists(os.path.join(j["dir"], "cancel")),
+           "project": job.get("project"), "key": job.get("key"), "band": sched.band_of(st, job)}
+    if res:
+        if not fault("no-usage"):
+            out["usage"] = res.get("usage")
+        out["grant"] = public_grant(res.get("grant"))
+        return out
+    if v:
+        try:
+            out["request"] = {k: val for k, val in sched.resolve(job, v["cap"]).items() if k != "env_cores"}
+        except sched.TooBig as e:
+            out["request"] = {"error": "too-big", "message": str(e)}
+    if state in ("queued", "held"):
+        out["place"] = pl.get("place", {}).get(j["id"])
+        out["held"] = st.get("held") if state == "held" else False
+        if not fault("no-waiting-for"):
+            out["waiting_for"] = waiting_text(v, j["id"])
+            out["starts_by"] = wall_of(v, pl.get("starts_by", {}).get(j["id"])) if j["id"] == pl.get("head") else None
+            if j["id"] == pl.get("head") and pl.get("starts_by", {}).get(j["id"]) is None:
+                out["starts_by_why"] = START_UNKNOWN.get(pl.get("S_why"), pl.get("S_why"))
+    elif state == "running":
+        g = grant_of(j)
+        out["grant"] = public_grant(g)
+        out["class"] = (g or {}).get("class")
+        out["ends_by"] = wall_of(v, sched.end_bound(g)) if g and v else None
+        if st.get("affinity_widened"):
+            out["affinity_widened"] = st["affinity_widened"]
+    return out
+
+
+START_UNKNOWN = {"grantless": "start time unknown: a job from the previous release holds the node",
+                 "disk": "start time unknown: disk low", "valve": "start time unknown: a job outlived its time limit",
+                 "unknown-end": "start time unknown: a running job's end is not known yet"}
+
+
+def public_grant(g):
+    if not isinstance(g, dict):
+        return None
+    out = {k: g.get(k) for k in ("cores", "mem_bytes", "time_s", "class") if k in g}
+    if isinstance(g.get("cpus"), list):
+        out["cpus"] = sched.fmt_cpus(g["cpus"])
+    return out
 
 
 def load_job(job_id):
@@ -427,11 +675,42 @@ def write_result(j, state, written_by, unit_result=None, note=None, **extra):
            "log": log_info(j["dir"]), "toolchain": manifest(j["job"].get("mu_version", "")), "node": node_summary(),
            "limits": st.get("limits"), "unit": {"name": st.get("unit"), "result": unit_result},
            "written_by": written_by, "note": note, "job": job_summary(j["job"])}
+    if st.get("grant"):
+        res["grant"] = public_grant(st["grant"])
+    usage = extra.pop("usage", None)
+    if usage is None and started and written_by == "runner":
+        usage = sampled_usage(j, res.get("wall_s"))
+    if usage is not None and not fault("no-usage"):
+        res["usage"] = usage
     res.update(extra)
     durable.write_record(os.path.join(j["dir"], "result.json"), res)
     event(j["dir"], "result %s (%s%s)" % (state, written_by, ", " + note if note else ""))
     j["result"] = durable.read_record(os.path.join(j["dir"], "result.json"))
+    shutil.rmtree(os.path.join(j["dir"], "tmp"), ignore_errors=True)   # the job's TMPDIR (§6)
     return res
+
+
+def sampled_usage(j, wall_s):
+    """`usage` of a runner-written result (oom, timeout, interrupted, cancelled): the sampler's last figures, since the
+    unit's cgroup is gone by now (dashboard §4.2). None when nothing was sampled."""
+    u = read_json(os.path.join(j["dir"], "usage.json"))
+    if not u:
+        return None
+    out = {k: u.get(k) for k in ("cpu_s", "user_s", "sys_s", "mem_peak_bytes", "mem_work_peak_bytes", "pids_peak",
+                                 "mem_events")}
+    out["cores_avg"] = round(u["cpu_s"] / wall_s, 2) if wall_s and isinstance(u.get("cpu_s"), (int, float)) else None
+    out["source"] = "runner-sampled"
+    out["sampled_at"] = u.get("t")
+    return out
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def node_summary():
@@ -454,17 +733,37 @@ def verb_hello(key, args):
 
 
 def hello_answer(key, node):
-    jobs = scan_jobs()
+    v = view(node=node)
+    jobs = v["jobs"]
     running = [j for j in jobs if not j["result"] and (j["state"] or {}).get("state") == "running"]
     st = node.get("selftest") or {}
-    return {"ok": True, "protocol": proto.PROTOCOL, "protocol_min": proto.PROTOCOL_MIN, "node": node.get("name"),
-            "key": key, "mu": {"default": default_version(), "installed": installed_versions(),
-                               "infra": os.environ.get("MU_INFRA_VERSION")},
-            "hw": hw_info(), "disk": disk_info(node),
-            "limits": {"memory": limits_ok(node) or fault("skip-limits-check"), "pids": True, "selftest_at": st.get("at"),
-                       "selftest_detail": st.get("detail")},
-            "queue": {"running": len(running), "queued": len(queued_jobs(jobs))}, "last_stop": last_stop(),
-            "runner": runner_state(), "autoupdate": autoupdate_info(), "time": proto.iso()}
+    cap, pl = v["cap"], v["plan"]
+    own = owners()
+    express = sum(1 for j in running if (grant_of(j) or {}).get("class") == "express")
+    out = {"ok": True, "protocol": proto.PROTOCOL, "protocol_min": proto.PROTOCOL_MIN, "node": node.get("name"),
+           "key": key, "mu": {"default": default_version(), "installed": installed_versions(),
+                              "infra": os.environ.get("MU_INFRA_VERSION")},
+           "hw": hw_info(), "disk": disk_info(node),
+           "limits": {"memory": limits_ok(node) or fault("skip-limits-check"), "pids": True, "selftest_at": st.get("at"),
+                      "selftest_detail": st.get("detail"), "cpu": cpu_limit()},
+           "queue": {"running": len(running), "queued": len([x for x in v["walk"] if not x["held"]]),
+                     "held": len([x for x in v["walk"] if x["held"]]), "express": express},
+           "last_stop": last_stop(), "runner": runner_state(), "autoupdate": autoupdate_info(), "time": proto.iso(),
+           # the scheduler (scheduler.md §7.1, §20.12): new fields only, protocol unchanged
+           "features": [f for f in FEATURES if not (f == "usage" and fault("no-usage"))],
+           "capacity": {"cores": cap["cores"], "cpus": sched.fmt_cpus(cap["cpus"]), "mem_bytes": cap["mem_bytes"],
+                        "reserve_system": cap["reserve_system"], "reserve_express": cap["reserve_express"],
+                        "express_max": cap["express_max"]},
+           "allocated": {"cores": pl["allocated"]["cores"], "cpus": sched.fmt_cpus(pl["allocated"]["cpus"]),
+                         "mem_bytes": pl["allocated"]["mem_bytes"]},
+           "free": {"cores": 0, "mem_bytes": 0} if pl.get("S_why") == "grantless" or any(
+               grant_of(j) is None for j in running) else {
+               "cores": len(cap["cpus"]) - pl["allocated"]["cores"],
+               "mem_bytes": max(0, cap["mem_bytes"] - pl["allocated"]["mem_bytes"])},
+           "owners": own, "you_are_owner": key in own, "warnings": owner_warnings(own)}
+    if node.get("order_restored_at"):
+        out["queue"]["order_restored_at"] = node["order_restored_at"]
+    return out
 
 
 _GIT = []
@@ -561,6 +860,16 @@ def check_spec(spec, job_id):
         v = lim.get(k)
         if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v <= 0):
             bad("limits." + k, "must be null or a positive integer")
+    if lim.get("quick") not in (None, False, True):
+        bad("limits.quick", "must be true, false or absent")
+    if lim.get("quick") is True and any(lim.get(k) for k in ("mem_bytes", "time_s", "cores")):
+        raise NodeError(proto.NODE_USAGE, "quick-with-flags", "--quick alone, or --cores/--mem/--time without it",
+                        message="--quick is 1 core, 512 MB, 10 min: it cannot take --cores, --mem or --time")
+    if spec.get("priority") is not None and spec.get("priority") not in sched.BANDS:
+        bad("priority", "must be one of urgent, high, normal, low")
+    for k in ("hold", "others"):
+        if spec.get(k) not in (None, False, True):
+            bad(k, "must be true, false or absent")
     if not isinstance(spec.get("rerun", True), bool):
         bad("rerun", "must be true or false")
     if not isinstance(spec.get("name", ""), str) or len(spec.get("name", "")) > 200:
@@ -620,6 +929,15 @@ def verb_submit(key, args):
     if fault("node-id"):
         job_id = proto.new_job_id()
     node = node_info()
+    cap = capacity(node)
+    try:
+        sizing = sched.resolve(spec, cap)
+    except sched.TooBig as e:
+        if not fault("no-capacity-check"):
+            raise NodeError(proto.NODE_USAGE, "too-big", "the node takes at most --cores %d --mem %dM" % (
+                cap["cores"], cap["mem_bytes"] >> 20), message="the job asks for more than the node has: %s" % e,
+                capacity={"cores": cap["cores"], "mem_bytes": cap["mem_bytes"]})
+        sizing = None
     with Lock():
         d = job_dir(job_id)
         if os.path.isdir(d):
@@ -629,8 +947,25 @@ def verb_submit(key, args):
                 s = status_of(j)
                 register_pin(j["job"].get("project_id", spec["project_id"]), j["job"].get("mu_version", spec["mu_version"]))
                 journal("submit id=%s key=%s duplicate" % (job_id, key))
-                return {"ok": True, "job_id": job_id, "state": s["state"], "position": s["position"], "duplicate": True}
+                return {"ok": True, "job_id": job_id, "state": s["state"], "position": s["position"], "duplicate": True,
+                        "place": s.get("place"), "band": s.get("band")}
             set_aside(job_id, "its job.json is unreadable; submitted again")
+        own = owners()
+        band = spec.get("priority") or "normal"
+        delays = []
+        if band in ("urgent", "high"):   # §20.4: the submit row; decided here, under the lock
+            w = walk_jobs(scan_jobs())
+            delays = [x for x in w if sched.BANDS.index(band) < sched.BANDS.index(x["band"]) <= sched.BANDS.index("normal")]
+            passes = [{"key": x["j"]["job"].get("key"), "project_id": x["j"]["job"].get("project_id")} for x in delays]
+            why = sched.authorise("submit", {"key": key, "project_id": spec["project_id"], "band": "normal"}, key, own,
+                                  spec["project_id"], bool(spec.get("others")), passes, band)
+            if why is None and not spec.get("others") and not fault("no-others-guard"):
+                why = ("other-project", "--priority %s may pass any job: it needs --others" % band)
+            if why:
+                journal("queue: refused submit id=%s priority=%s by=%s from=%s %s (%s)" % (
+                    job_id, band, key, spec["project_id"], why[0], why[1]))
+                raise NodeError(proto.NODE_NOPERM if why[0] == "not-allowed" else proto.NODE_USAGE, why[0], "",
+                                message="submit --priority %s refused: %s" % (band, why[1]))
         if runner_state() != "active" and not fault("start-on-submit") and not fault("job-in-session"):
             raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "on the PC: wsl -d mu-compute -u mu --cd /home/mu -- /home/mu/.local/bin/mu node enable",
                             message="the job runner (mu-node.service) is not running")
@@ -657,20 +992,40 @@ def verb_submit(key, args):
         job = dict(spec, job_id=job_id, accepted_ns=now_ns, accepted_at=proto.iso(now_ns / 1e9), key=key,
                    node=node.get("name"))
         durable.write_record(os.path.join(tmp, "job.json"), job)
-        durable.write_record(os.path.join(tmp, "state.json"), {"state": "queued", "attempt": 1, "updated": proto.iso()})
-        event(tmp, "accepted from %s (attempt 1)" % key)
+        st0 = {"state": "queued", "attempt": 1, "updated": proto.iso()}
+        if spec.get("priority") in sched.BANDS:
+            st0["band"] = spec["priority"]
+        event(tmp, "accepted from %s (attempt 1)%s" % (key, ", band %s" % band if band != "normal" else ""))
+        if spec.get("hold"):   # held before the rename: the job is never visible as queued (§20.8)
+            event(tmp, "held by %s at submit (from=%s)" % (key, spec["project_id"]))
+            if fault("holds-in-order-file-only"):
+                o = read_order()
+                write_order(o.get("order") or [], held=(o.get("held") or []) + [job_id])
+            else:
+                st0.update(state="held", held={"by": key, "at": proto.iso(), "owner": key in own})
+        durable.write_record(os.path.join(tmp, "state.json"), st0)
         register_pin(spec["project_id"], spec["mu_version"])   # before the job exists: auto-update keeps its version
         os.rename(tmp, d)
         durable.sync_dir(p("jobs"))
-        journal("submit id=%s key=%s project=%s accepted" % (job_id, key, spec["project_id"]))
+        journal("submit id=%s key=%s project=%s accepted%s" % (job_id, key, spec["project_id"], "".join(
+            " %s=%s" % (k, v) for k, v in (("priority", spec.get("priority")), ("hold", spec.get("hold") and 1),
+                                           ("others", spec.get("others") and 1)) if v)))
         j = load_job(job_id)
         if fault("start-on-submit"):
-            start_job(j)
-        pos = status_of(j)["position"]
+            start_job(j, {"cores": cap["cores"], "cpus": cap["cpus"], "mem_bytes": cap["mem_bytes"],
+                          "time_s": sched.DEFAULT_TIME_S, "class": "normal", "env_cores": cap["cores"]})
+        s = status_of(j)
     if fault("job-in-session"):
         return run_in_session(load_job(job_id))
-    return {"ok": True, "job_id": job_id, "state": "running" if fault("start-on-submit") else "queued", "position": pos,
-            "duplicate": False}
+    out = {"ok": True, "job_id": job_id, "state": "running" if fault("start-on-submit") else s["state"],
+           "position": s["position"], "duplicate": False, "place": s.get("place"), "band": s.get("band"),
+           "held": s.get("held"), "waiting_for": s.get("waiting_for"), "starts_by": s.get("starts_by")}
+    if sizing:
+        out["sizing"] = {k: v for k, v in sizing.items() if k != "env_cores"}
+    if delays:
+        out["delays"] = [{"job_id": x["id"], "name": x["j"]["job"].get("name"), "project": x["j"]["job"].get("project"),
+                          "key": x["j"]["job"].get("key")} for x in delays]
+    return out
 
 
 def next_accept_ns():
@@ -743,17 +1098,20 @@ def run_in_session(j):
 
 
 def verb_status(key, args):
-    return status_of(load_job(args.get("id", "")))
+    j = load_job(args.get("id", ""))
+    return status_of(j, None if j["result"] else view())
 
 
 def verb_list(key, args):
     proj = args.get("project")
     limit = int(args.get("limit", "20") or 20)
-    jobs = scan_jobs()
+    v = view()
+    jobs = v["jobs"]
     mine = [j for j in jobs if not proj or j["job"].get("project_id") == proj]
-    unfinished = [status_of(j, jobs) for j in mine if not j["result"]]
-    finished = sorted((status_of(j, jobs) for j in mine if j["result"]), key=lambda s: s.get("ended_at") or "")[-limit:] if limit else []
-    return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"])}
+    unfinished = [status_of(j, v) for j in mine if not j["result"]]
+    finished = sorted((status_of(j, v) for j in mine if j["result"]), key=lambda s: s.get("ended_at") or "")[-limit:] if limit else []
+    return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
+            "rev": int(v["order"].get("rev") or 0)}
 
 
 def verb_log(key, args):
@@ -837,8 +1195,8 @@ def verb_cancel(key, args):
     event(d, "cancel asked by %s" % key)
     with Lock():
         j = load_job(j["id"])
-        if not j["result"] and (not j["state"] or j["state"].get("state") == "queued"):
-            write_result(j, "cancelled", "node", note="cancelled while queued")
+        if not j["result"] and (not j["state"] or j["state"].get("state") in ("queued", "held")):
+            write_result(j, "cancelled", "node", note="cancelled while held" if is_held(j) else "cancelled while queued")
             return {"ok": True, "job_id": j["id"], "state": "cancelled"}
     unit = (j["state"] or {}).get("unit")
     if unit and unit != "session":
@@ -851,8 +1209,228 @@ def verb_cancel(key, args):
     return {"ok": True, "job_id": j["id"], "state": "cancelling"}
 
 
+# ------------------------------------------------------------------------------------------------ queue control
+def queue_entry(j, v, frm):
+    s = status_of(j, v)
+    job = j["job"]
+    s.update(project=job.get("project"), key=job.get("key"),
+             submitted={k: (job.get("submitted") or {}).get(k) for k in ("host", "user")},
+             this_project=bool(frm) and job.get("project_id") == frm)
+    for k in ("unit", "log_size", "cancel_requested"):
+        s.pop(k, None)
+    return s
+
+
+def verb_queue(key, args):
+    """The whole node's queue (§20.2, §20.9): running jobs, then held and queued ones in walk order. Read only."""
+    v = view()
+    own = owners()
+    frm = args.get("from")
+    cap, pl = v["cap"], v["plan"]
+    running = sorted((j for j in v["jobs"] if not j["result"] and (j["state"] or {}).get("state") == "running"),
+                     key=lambda j: (j["state"] or {}).get("started_at") or "")
+    jobs = [queue_entry(j, v, frm) for j in running] + [queue_entry(it["j"], v, frm) for it in v["walk"]]
+    if fault("queue-project-filter") and frm:
+        jobs = [x for x in jobs if x.get("project_id") == frm]
+    grantless = any(grant_of(j) is None for j in running)
+    return {"ok": True, "node": node_info().get("name"), "rev": int(v["order"].get("rev") or 0), "owners": own,
+            "you_are_owner": key in own, "warnings": owner_warnings(own),
+            "capacity": {"cores": cap["cores"], "cpus": sched.fmt_cpus(cap["cpus"]), "mem_bytes": cap["mem_bytes"],
+                         "reserve_express": cap["reserve_express"]},
+            "allocated": {"cores": pl["allocated"]["cores"], "cpus": sched.fmt_cpus(pl["allocated"]["cpus"]),
+                          "mem_bytes": pl["allocated"]["mem_bytes"]},
+            "free": {"cores": 0, "mem_bytes": 0} if grantless else {
+                "cores": cap["cores"] - pl["allocated"]["cores"], "cpus": sched.fmt_cpus(
+                    [c for c in cap["cpus"] if c not in pl["allocated"]["cpus"]]),
+                "mem_bytes": max(0, cap["mem_bytes"] - pl["allocated"]["mem_bytes"])},
+            "express": {"running": pl.get("express", 0), "max": cap["express_max"]},
+            "head": pl.get("head"), "starts_by_why": START_UNKNOWN.get(pl.get("S_why")) if pl.get("head") else None,
+            "jobs": jobs}
+
+
+def arrange_refuse(op, jid, key, frm, others, why, touch=()):
+    journal("queue: refused %s id=%s by=%s%s%s %s (%s)" % (op, jid, key, " from=%s" % frm if frm else "",
+                                                          " others=1" if others else "", why[0], why[1]))
+    rc = proto.NODE_NOPERM if why[0] == "not-allowed" else proto.NODE_USAGE
+    raise NodeError(rc, why[0], "", message="%s %s refused: %s" % (op, jid, why[1]),
+                    would_touch=[x["id"] for x in touch])
+
+
+def verb_arrange(key, args, op):
+    """hold, release, move, priority (§20.2-§20.4), under the queue lock; authorisation by the job's workstation or an
+    owner key, the --others guard by project (from=), an audit line either way."""
+    jid = args.get("id")
+    if not jid:
+        raise NodeError(proto.NODE_USAGE, "bad-argument", "%s id=<job-id>" % op)
+    frm, others = args.get("from"), args.get("others") == "1"
+    how = ref = new_band = None
+    if op == "move":
+        given = [k for k in ("before", "after", "to") if args.get(k)]
+        if len(given) != 1:
+            raise NodeError(proto.NODE_USAGE, "bad-argument", "move id=J and one of before=K, after=K, to=front|back")
+        how = given[0] if given[0] != "to" else args["to"]
+        ref = args.get(given[0]) if given[0] != "to" else None
+        if ref == jid:
+            raise NodeError(proto.NODE_USAGE, "bad-argument", "", message="a job cannot be moved next to itself")
+    if op == "priority":
+        new_band = args.get("class")
+        if not new_band:
+            raise NodeError(proto.NODE_USAGE, "bad-argument", "priority id=J class=urgent|high|normal|low")
+    own = owners()
+    with Lock(wait=LOCK_WAIT_S):
+        v0 = view()
+        j = next((x for x in v0["jobs"] if x["id"] == jid), None)
+        if j is None:
+            raise NodeError(proto.NODE_NO_SUCH, "no-such-job", "mu queue", message="the node has no job %s" % jid)
+        if j["result"]:
+            raise NodeError(proto.NODE_USAGE, "already-finished", "mu status %s" % jid, message="job %s already "
+                            "finished (%s)" % (jid, j["result"].get("state")), state=j["result"].get("state"))
+        w0 = v0["walk"]
+        it = next((x for x in w0 if x["id"] == jid), None)
+        if it is None:
+            raise NodeError(proto.NODE_USAGE, "not-queued", "", message="job %s is %s, not queued or held: it can no "
+                            "longer be arranged (mu cancel %s stops it)" % (jid, (j["state"] or {}).get("state"), jid),
+                            state=(j["state"] or {}).get("state"))
+        st = dict(j["state"] or {"state": "queued", "attempt": 1})
+        job = j["job"]
+        info = {"key": job.get("key"), "project_id": job.get("project_id"), "band": it["band"],
+                "held_by": (st.get("held") or {}).get("by") if it["held"] else None, "band_by": st.get("band_by")}
+        w1, changed = w0, False
+        if op == "hold":
+            changed = not it["held"]
+        elif op == "release":
+            changed = it["held"]
+            if changed and fault("release-to-back"):
+                w1, _ = sched.place_after(w0, jid, "back")
+        elif op == "move":
+            if ref is not None and not any(x["id"] == ref for x in w0):
+                raise NodeError(proto.NODE_USAGE, "reference-not-queued", "mu queue", message="%s is not queued or "
+                                "held: a job can be moved only next to a queued or held job" % ref)
+            w1, new_band = sched.place_after(w0, jid, how, ref)
+            changed = [x["id"] for x in w1] != [x["id"] for x in w0] or new_band != it["band"]
+        elif op == "priority":
+            w1, _ = sched.place_after(w0, jid, "priority", band=new_band)
+            changed = new_band != it["band"] or [x["id"] for x in w1] != [x["id"] for x in w0]
+        passes = sched.passed(w0, w1, jid) if op in ("move", "priority") else []
+        pinfo = [{"key": x["j"]["job"].get("key"), "project_id": x["j"]["job"].get("project_id"), "id": x["id"]}
+                 for x in passes]
+        if changed:
+            why = sched.authorise(op, info, key, own, frm, others, pinfo, new_band if op in ("move", "priority") else None)
+            if why:
+                arrange_refuse(op, jid, key, frm, others, why, passes)
+        was = {"place": v0["plan"]["place"].get(jid), "band": it["band"]}
+        is_owner = key in own
+        if changed:
+            note = "by %s%s%s%s" % (key, " (owner)" if is_owner else "", " from=%s" % frm if frm else "",
+                                    " others=1" if others else "")
+            if op == "hold":
+                event(j["dir"], "held %s" % note)   # first: a lost state.json is rebuilt held from it (§20.8)
+                if fault("holds-in-order-file-only"):
+                    o = read_order()
+                    write_order([x["id"] for x in w0], held=(o.get("held") or []) + [jid])
+                else:
+                    st.update(state="held", held={"by": key, "at": proto.iso(), "owner": is_owner}, updated=proto.iso())
+                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+            elif op == "release":
+                event(j["dir"], "released %s" % note)
+                if fault("holds-in-order-file-only"):
+                    o = read_order()
+                    write_order([x["id"] for x in w1], held=[x for x in (o.get("held") or []) if x != jid])
+                else:
+                    st.update(state="queued", updated=proto.iso())
+                    st.pop("held", None)
+                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+                    if fault("release-to-back"):
+                        write_order([x["id"] for x in w1])
+            else:
+                if new_band != it["band"]:   # the band first, then the order (§20.8 write order)
+                    st.update(band=new_band, band_by=key, updated=proto.iso())
+                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+                write_order([jid] if fault("partial-order-write") else [x["id"] for x in w1])
+                event(j["dir"], "%s %s%s: band %s" % (op, how or new_band, " %s" % ref if ref else "", new_band))
+        v1 = view()
+        sb0, sb1 = v0["plan"]["starts_by"], v1["plan"]["starts_by"]
+        pos0, pos1 = v0["plan"]["position"], v1["plan"]["position"]
+        delays = []
+        for x in w0:
+            if x["id"] == jid or x["held"]:
+                continue
+            worse = (pos1.get(x["id"]) or 0) > (pos0.get(x["id"]) or 0) or (
+                x["id"] in sb0 and (x["id"] not in sb1 or (sb1[x["id"]] is None and sb0[x["id"]] is not None) or (
+                    sb1[x["id"]] is not None and sb0[x["id"]] is not None and sb1[x["id"]] > sb0[x["id"]] + 1)))
+            if changed and worse:
+                delays.append({"job_id": x["id"], "name": x["j"]["job"].get("name"),
+                               "project": x["j"]["job"].get("project"), "key": x["j"]["job"].get("key"),
+                               "starts_by_was": wall_of(v0, sb0.get(x["id"])), "starts_by": wall_of(v1, sb1.get(x["id"]))})
+        jn = next(x for x in v1["jobs"] if x["id"] == jid)
+        s1 = status_of(jn, v1)
+        if changed:
+            journal("queue: %s id=%s%s by=%s%s%s%s place %s->%s band %s%s" % (
+                op, jid, " %s=%s" % (how, ref) if ref else (" to=%s" % how if how else (" class=%s" % new_band if new_band
+                                                                                     else "")),
+                key, " (owner)" if is_owner else "", " from=%s" % frm if frm else "", " others=1" if others else "",
+                was["place"], s1.get("place"), s1.get("band"),
+                " delays=%s" % ",".join(d["job_id"] for d in delays) if delays else ""))
+            for d in delays:
+                event(job_dir(d["job_id"]), "delayed by %s of %s by %s%s" % (op, jid, key, " from=%s" % frm if frm else ""))
+    higher = [x for x in v1["walk"] if not x["held"] and sched.BANDS.index(x["band"]) < sched.BANDS.index(s1.get("band") or "normal")]
+    out = {"ok": True, "exit": 0, "job_id": jid, "op": op, "changed": bool(changed), "state": s1["state"],
+           "band": s1.get("band"), "place": s1.get("place"), "was": was, "higher_bands_ahead": len(higher),
+           "held": s1.get("held"), "starts_by": s1.get("starts_by"), "waiting_for": s1.get("waiting_for"),
+           "by": {"key": key, "owner": key in own, "from": frm, "others": others}, "delays": delays}
+    return out
+
+
+def verb_hold(key, args):
+    return verb_arrange(key, args, "hold")
+
+
+def verb_release(key, args):
+    return verb_arrange(key, args, "release")
+
+
+def verb_move(key, args):
+    return verb_arrange(key, args, "move")
+
+
+def verb_priority(key, args):
+    return verb_arrange(key, args, "priority")
+
+
+UPDATE_UNIT = "mu-update.service"
+
+
+def verb_update(key, args):
+    """`mu compute update NODE` (scheduler.md §9 "Version switch", shell-ux §4.6): `mu autoupdate run --force` in a
+    transient unit of its own, started at once whatever the queue (it takes no job's cores or place); the new release
+    is installed beside the running jobs and becomes the default between two starts. Its log: /srv/mu/maint/."""
+    props = unit_props(UPDATE_UNIT)
+    if props.get("ActiveState") in ("active", "activating"):
+        return {"ok": True, "changed": False, "unit": UPDATE_UNIT, "state": "running", "default": default_version(),
+                "autoupdate": autoupdate_info(), "note": "an update is already running"}
+    os.makedirs(p("maint"), mode=0o700, exist_ok=True)
+    log = p("maint", "update-%s.log" % time.strftime("%Y%m%d-%H%M%S", time.gmtime()))
+    home = mu_home()
+    systemctl("reset-failed", UPDATE_UNIT, timeout=15)
+    cmd = [os.environ.get("MU_SYSTEMD_RUN") or "systemd-run", "--user", "--quiet", "--collect", "--unit=" + UPDATE_UNIT,
+           "--description=μ update (mu compute update, by %s)" % key, "-p", "Type=exec", "-p", "Nice=10",
+           "-p", "StandardOutput=append:%s" % log, "-p", "StandardError=append:%s" % log,
+           "--setenv=MU_HOME=" + home, "--", os.path.join(home, "bin", "mu"), "autoupdate", "run", "--force"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=user_env(), stdin=subprocess.DEVNULL)
+        rc, err = r.returncode, r.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        rc, err = 1, str(e)
+    journal("update by=%s: %s" % (key, "started %s, log %s" % (UPDATE_UNIT, log) if rc == 0 else "failed: %s" % err[:300]))
+    if rc != 0:
+        raise NodeError(proto.NODE_INTERNAL, "update-failed", "", message="could not start the update unit: %s" % err[:300])
+    return {"ok": True, "changed": True, "unit": UPDATE_UNIT, "state": "started", "log": log, "started_at": proto.iso(),
+            "default": default_version(), "autoupdate": autoupdate_info()}
+
+
 VERBS = {"hello": verb_hello, "receive-pack": verb_receive_pack, "submit": verb_submit, "status": verb_status,
-         "list": verb_list, "log": verb_log, "fetch": verb_fetch, "cancel": verb_cancel}
+         "list": verb_list, "log": verb_log, "fetch": verb_fetch, "cancel": verb_cancel, "queue": verb_queue,
+         "hold": verb_hold, "release": verb_release, "move": verb_move, "priority": verb_priority, "update": verb_update}
 
 
 def serve(argv):
@@ -921,22 +1499,47 @@ def prepare_work(j):
         raise RuntimeError("the work folder's tree %s differs from the snapshot's %s" % (t.stdout.decode().strip()[:12], job["tree"][:12]))
 
 
-def mem_default():
-    kb = hw_info()["mem_total_kb"]
-    return max(256 << 20, kb * 1024 - (2 << 30))
+THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMBA_NUM_THREADS", "PYTHON_CPU_COUNT",
+               "CCX_NPROC_EQUATION_SOLVER", "CCX_NPROC_RESULTS")
 
 
-def start_job(j):
+def job_env(j, grant):
+    """The unit's environment from the grant (scheduler.md §6): the job's cores and CPUs, the thread variables of the
+    solvers μ ships, Open MPI's binding left to the inherited mask (§12 item 3 was not probed: its fallback), TMPDIR."""
+    cpus = sched.fmt_cpus(grant["cpus"])
+    env = {"MU_JOB_CORES": str(grant.get("env_cores") or grant["cores"]), "MU_JOB_CPUS": cpus,
+           "MU_JOB_CLASS": grant.get("class") or "normal"}
+    if fault("no-thread-env"):
+        return env
+    n = str(grant["cores"])
+    for k in THREAD_VARS:
+        env[k] = n
+    if grant.get("class") != "express":
+        env["OMPI_MCA_hwloc_base_binding_policy"] = "none"
+    env["TMPDIR"] = os.path.join(j["dir"], "tmp")
+    return env
+
+
+def start_job(j, grant, S=None):
+    """Start one job with GRANT (from the plan): the checkout first, then for a backfilled job the re-check against the
+    head's start S (§3.3), then grant, start time and start_unconfirmed in state.json in one write, then systemd-run
+    (§9: the grant is on disk before the unit can exist). -> True if a unit was asked for."""
     d, job = j["dir"], j["job"]
     st = dict(j["state"] or {"attempt": 1})
     attempt = st.get("attempt", 1)
     unit = "mu-job-%s.service" % j["id"]
-    lim = job.get("limits") or {}
-    limits = {"mem_bytes": lim.get("mem_bytes") or mem_default(), "time_s": lim.get("time_s") or DEFAULT_TIME_S,
-              "cores": lim.get("cores") or hw_info()["cores_physical"]}
-    st.update(state="running", attempt=attempt, unit=unit, started_at=proto.iso(), started_epoch=time.time(),
-              limits=limits, updated=proto.iso())
-    st.pop("note", None) if (st.get("note") or "").startswith("waiting") else None
+    g = {k: grant[k] for k in ("cores", "cpus", "mem_bytes", "time_s", "class", "env_cores") if k in grant}
+    limits = {"mem_bytes": g["mem_bytes"], "time_s": g["time_s"], "cores": g.get("env_cores") or g["cores"]}
+
+    def stamp():
+        g.update(boot_id=boot_id(), start_mono=time.monotonic(), active_mono=None)
+        st.update(state="running", attempt=attempt, unit=unit, started_at=proto.iso(), started_epoch=time.time(),
+                  limits=limits, grant=g, updated=proto.iso())
+        st.pop("note", None) if (st.get("note") or "").startswith("waiting") else None
+    if fault("stamp-before-checkout"):
+        stamp()
+        st["start_unconfirmed"] = True
+        durable.write_record(os.path.join(d, "state.json"), st)
     j["state"] = st
     try:
         prepare_work(j)
@@ -944,47 +1547,81 @@ def start_job(j):
         if not os.path.isdir(wd):
             raise RuntimeError("the working folder %s is not in the snapshot" % (job.get("cwd") or "."))
     except Exception as e:  # noqa
+        if not fault("stamp-before-checkout"):
+            stamp()
         durable.write_record(os.path.join(d, "state.json"), st)
         write_result(j, "failed", "runner", note=str(e)[:500])
-        return
+        return False
+    if g.get("class") == "backfilled" and S is not None and not fault("stamp-before-checkout"):
+        late = time.monotonic() + g["time_s"] + sched.MARGIN_S - S
+        if late > 0:   # the checkout took too long: it would now end after the head's start (§3.3); nothing written
+            event(d, "not started: after its checkout it would end %ds after the head's start; stays queued" % late)
+            return False
+    if not fault("stamp-before-checkout"):
+        stamp()
+    tmpd = os.path.join(d, "tmp")
+    shutil.rmtree(tmpd, ignore_errors=True)
+    os.makedirs(tmpd, mode=0o700, exist_ok=True)
     st["start_unconfirmed"] = True   # until systemd-run says it started the unit
-    durable.write_record(os.path.join(d, "state.json"), st)
-    event(d, "start attempt %d as %s" % (attempt, unit))
+    if fault("grant-after-systemd-run"):
+        st0 = dict(st)
+        st0.pop("grant", None)
+        st0["state"] = "queued"
+        durable.write_record(os.path.join(d, "state.json"), st0)
+    else:
+        durable.write_record(os.path.join(d, "state.json"), st)
+    STARTED_HERE.add(j["id"])
+    event(d, "start attempt %d as %s: granted cores=%d cpus=%s mem=%s time=%s class=%s" % (
+        attempt, unit, g["cores"], sched.fmt_cpus(g["cpus"]), sched.human_gb(g["mem_bytes"]),
+        sched.human_dur(g["time_s"]), g.get("class")))
+    if fault("die-after-grant") and not os.path.exists(p("state", "died-after-grant")):
+        os.makedirs(p("state"), exist_ok=True)
+        durable.write_durable(p("state", "died-after-grant"), "%s\n" % j["id"])
+        journal("runner: test fault die-after-grant: exiting after the grant of %s" % j["id"])
+        os._exit(9)
     systemctl("reset-failed", unit, timeout=15)
     home = mu_home()
     props = ["-p", "Type=exec"]
     if not fault("no-memory-max"):
-        props += ["-p", "MemoryMax=%d" % limits["mem_bytes"], "-p", "MemorySwapMax=0"]
-    props += ["-p", "RuntimeMaxSec=%d" % limits["time_s"], "-p", "TasksMax=4096",
+        mm = capacity()["mem_bytes"] if fault("mem-max-is-capacity") else g["mem_bytes"]
+        props += ["-p", "MemoryMax=%d" % mm, "-p", "MemorySwapMax=0"]
+    if g.get("class") == "express" and not fault("no-express-quota"):
+        props += ["-p", "CPUQuota=100%"]
+    props += ["-p", "RuntimeMaxSec=%d" % g["time_s"], "-p", "TasksMax=4096",
               "-p", "KillMode=%s" % ("process" if fault("killmode-process") else "control-group"),
               "-p", "TimeoutStopSec=5", "-p", "OOMPolicy=kill", "-p", "LimitCORE=0", "-p", "Restart=no",
               "-p", "StandardOutput=append:%s" % os.path.join(d, "log"),
               "-p", "StandardError=append:%s" % os.path.join(d, "log")]
+    env = ["--setenv=%s=%s" % kv for kv in sorted(job_env(j, g).items())]
     cmd = [os.environ.get("MU_SYSTEMD_RUN") or "systemd-run", "--user", "--quiet", "--unit=" + unit,
            "--description=μ job %s" % j["id"]] + props + [
         "--working-directory=" + wd, "--setenv=MU_HOME=" + home, "--setenv=MU_JOB_ID=" + j["id"],
-        "--setenv=MU_JOB_DIR=" + d, "--setenv=MU_JOB_CORES=%d" % limits["cores"],
+        "--setenv=MU_JOB_DIR=" + d] + env + [
         "--", os.path.join(home, "bin", "mu"), "node", "run-job", j["id"]]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=user_env(), stdin=subprocess.DEVNULL)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=sched.START_WAIT_S, env=user_env(),
+                           stdin=subprocess.DEVNULL)
         rc, err = r.returncode, r.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         rc, err = 1, str(e)
     if rc == 0:
         st.pop("start_unconfirmed", None)
         durable.write_record(os.path.join(d, "state.json"), st)
-        journal("job %s started (attempt %d)" % (j["id"], attempt))
-        return
+        journal("job %s started (attempt %d, %s)" % (j["id"], attempt, g.get("class")))
+        return True
     journal("job %s: systemd-run failed: %s" % (j["id"], err.strip()[:300]))
+    if fault("grant-after-systemd-run"):
+        durable.write_record(os.path.join(d, "state.json"), st)
     if fault("trust-run-rc"):
         write_result(j, "failed", "runner", note="systemd-run failed: %s" % err.strip()[:400])
-        return
+        return True
     # a failed or slow systemd-run may still have made the unit (a lost reply, a timeout): ask systemd. Only a unit
     # that does not exist is a start that failed; anything else stays "running" and the next pass classifies it
     if unit_props(unit).get("LoadState") == "not-found":
         start_failed(j, "systemd-run failed: %s" % err.strip()[:300])
     else:
         event(d, "systemd-run failed (%s), but systemd knows the unit: left to the next pass" % err.strip()[:200])
+    return True
 
 
 def start_failed(j, why):
@@ -996,10 +1633,11 @@ def start_failed(j, why):
         return
     st.update(state="queued", start_failures=n, note="start %d of %d failed: %s" % (n, START_TRIES, why),
               updated=proto.iso())
-    for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed"):
+    for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed", "grant", "cgroup"):
         st.pop(k, None)
     durable.write_record(os.path.join(j["dir"], "state.json"), st)
     j["state"] = st
+    shutil.rmtree(os.path.join(j["dir"], "tmp"), ignore_errors=True)
     event(j["dir"], "start failed, queued again: %s" % why)
 
 
@@ -1023,7 +1661,9 @@ def interrupted(j, why):
         write_result(j, "succeeded", "runner", unit_result="success", note="taken as succeeded (test fault)")
         return
     if st.get("attempt", 1) == 1 and j["job"].get("rerun", True):
-        for f in ("work", "index") + (("log",) if fault("log-truncate-on-rerun") else ()):
+        requeue_front(j)   # queue.json first, then state.json (§20.8 write order)
+        for f in ("work", "index") + (() if fault("keep-tmp-on-rerun") else ("tmp",)) + (
+                ("log",) if fault("log-truncate-on-rerun") else ()):
             x = os.path.join(j["dir"], f)
             if os.path.isdir(x):
                 shutil.rmtree(x, ignore_errors=True)
@@ -1034,7 +1674,9 @@ def interrupted(j, why):
         if not fault("log-truncate-on-rerun"):
             append_log(j["dir"], "\n== μ: attempt 1 ended without a result (%s); re-run as attempt 2 ==\n" % why)
         st.update(state="queued", attempt=2, note=note, updated=proto.iso())
-        for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed"):
+        if fault("requeue-new-ns"):
+            st["requeued_ns"] = time.time_ns()
+        for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed", "grant", "cgroup", "affinity_widened"):
             st.pop(k, None)
         durable.write_record(os.path.join(j["dir"], "state.json"), st)
         j["state"] = st
@@ -1042,6 +1684,34 @@ def interrupted(j, why):
         journal("job %s re-queued: %s" % (j["id"], why))
         return
     write_result(j, "interrupted", "runner", note=why)
+
+
+def requeue_front(j):
+    """§20.3: an interrupted job goes to the front of its own band in queue.json, after the jobs re-queued with it that
+    were accepted before it (several keep their old order); not a sort tier, so a later move --front passes it."""
+    if fault("requeue-new-ns"):
+        return
+    try:
+        w = [x for x in walk_jobs(scan_jobs()) if x["id"] != j["id"]]
+        band = sched.band_of(j["state"], j["job"])
+        ns = j["job"].get("accepted_ns", 0)
+        same = [i for i, x in enumerate(w) if x["band"] == band]   # contiguous: the walk is sorted by band
+        if same:
+            at = same[0]
+            for i in same:
+                x = w[i]
+                if i == at and (x["j"]["state"] or {}).get("attempt", 1) > 1 and x["j"]["job"].get("accepted_ns", 0) < ns:
+                    at = i + 1
+                else:
+                    break
+        else:
+            lower = [i for i, x in enumerate(w) if sched.BANDS.index(x["band"]) > sched.BANDS.index(band)]
+            at = lower[0] if lower else len(w)
+        ids = [x["id"] for x in w]
+        ids.insert(at, j["id"])
+        write_order(ids)
+    except Exception:  # noqa: the order file is a view of the walk; FIFO within bands still holds without it
+        journal("job %s: could not write the queue order at its re-queue: %s" % (j["id"], traceback.format_exc()[-300:]))
 
 
 def log_last_mu_line(d):
@@ -1111,7 +1781,16 @@ def rebuild_state(j):
         return
     n = attempts_started(j["dir"])
     if not n:
-        return   # it never started: queued (what the caller does with a missing state)
+        # it never started: queued (what the caller does with a missing state), unless events.log says it is held:
+        # the hold verb writes that line before state.json, so a lost state.json never starts a held job (§20.8)
+        hold = re.findall(r"^\S+ (held|released) by ([a-z0-9-]+)", read_text(os.path.join(j["dir"], "events.log")), re.M)
+        if hold and hold[-1][0] == "held" and not fault("rebuild-held-as-queued"):
+            st = {"state": "held", "attempt": 1, "held": {"by": hold[-1][1], "at": proto.iso(), "owner": hold[-1][1] in owners()},
+                  "updated": proto.iso(), "note": "state.json was unreadable: rebuilt as held from events.log"}
+            durable.write_record(os.path.join(j["dir"], "state.json"), st)
+            j["state"] = st
+            journal("job %s: state.json unreadable, rebuilt as held" % j["id"])
+        return
     unit = "mu-job-%s.service" % j["id"]
     st = {"state": "running", "attempt": n, "unit": unit, "updated": proto.iso(),
           "note": "state.json was unreadable: rebuilt from events.log"}
@@ -1140,6 +1819,8 @@ def check_running(j, first, cap):
     if not unit_ended(props):
         if props.get("LoadState") == "error":
             event(j["dir"], "systemctl show failed (%s): taken as still running" % (props.get("error") or "")[:200])
+        elif props.get("ActiveState") == "active":
+            note_active(j, props)
         if first and fault("no-adopt"):   # a runner that does not adopt: it stops the job and runs it again
             systemctl("stop", st["unit"], timeout=30)
             interrupted(j, "the runner restarted (test fault: not adopted)")
@@ -1162,65 +1843,207 @@ def check_running(j, first, cap):
     return not j["result"] and (j["state"] or {}).get("state") == "running"
 
 
+def note_active(j, props):
+    """The first pass that sees a job's unit active: its activation time (the end bound counts from it, §3.2), its
+    cgroup (for the sampler, never guessed), and start_unconfirmed cleared (an adopted job kept it forever before)."""
+    st = j["state"] or {}
+    g = grant_of(j)
+    try:
+        act = int(props.get("ActiveEnterTimestampMonotonic") or 0) / 1e6
+    except ValueError:
+        act = 0
+    cg = props.get("ControlGroup") or ""
+    want = (g is not None and not g.get("active_mono") and act > 0) or (cg and st.get("cgroup") != cg) or \
+        st.get("start_unconfirmed")
+    if not want:
+        return
+    st = dict(st)
+    if g is not None and not g.get("active_mono") and act > 0 and g.get("boot_id") == boot_id():
+        st["grant"] = dict(g, active_mono=act)
+    if cg:
+        st["cgroup"] = cg
+    st.pop("start_unconfirmed", None)
+    durable.write_record(os.path.join(j["dir"], "state.json"), st)
+    j["state"] = st
+
+
 def step(first=False, stop=None):
-    """One pass of the runner under the lock. -> True while a job is queued or running. A failure with one job is
-    journalled and the pass goes on with the others (review: durability 4). Once STOP[0] is set (SIGTERM), no job
-    is started."""
+    """One pass of the runner under the lock. -> True while a job is queued or running (held jobs alone do not keep the
+    node busy, §20.6). A failure with one job is journalled and the pass goes on with the others (review: durability
+    4). Once STOP[0] is set (SIGTERM), no job is started. What starts is decided by sched.plan() from the grants in
+    the running jobs' state.json, rebuilt every pass (scheduler.md §3.2, §9)."""
     with Lock():
         jobs = scan_jobs()
         node = node_info()
-        cap = log_cap_bytes(node)
-        running, broken = [], set()
+        cap_log = log_cap_bytes(node)
+        running = []
         for j in jobs:
             try:
                 rebuild_state(j)
                 st = j["state"] or {}
                 if j["result"] or st.get("state") != "running":
                     continue
-                if check_running(j, first, cap):
+                if check_running(j, first, cap_log):
                     running.append(j)
             except Exception:  # noqa
                 if fault("runner-pass-aborts"):
                     raise
-                broken.add(j["id"])
                 journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
                 if (j["state"] or {}).get("state") == "running":
-                    running.append(j)   # unknown: never start another job beside it
-        queued = queued_jobs(jobs)
-        for j in list(queued):
+                    running.append(j)   # unknown: it keeps its grant, or holds the whole node without one
+        if os.path.exists(p("queue.json")) and not durable.read_record(p("queue.json")):
+            order_lost(node)
+        order = read_order()
+        w = []
+        for it in walk_jobs(jobs, order):
+            j = it["j"]
             try:
                 if os.path.exists(os.path.join(j["dir"], "cancel")):
-                    write_result(j, "cancelled", "runner", note="cancelled while queued")
-                    queued.remove(j)
-                elif not j["state"]:
+                    write_result(j, "cancelled", "runner", note="cancelled while held" if it["held"] else
+                                 "cancelled while queued")
+                    continue
+                if not j["state"]:
                     durable.write_record(os.path.join(j["dir"], "state.json"), {"state": "queued", "attempt": 1,
                                                                                  "updated": proto.iso()})
+                    j["state"] = {"state": "queued", "attempt": 1}
+                w.append(it)
             except Exception:  # noqa
                 if fault("runner-pass-aborts"):
                     raise
-                broken.add(j["id"])
-                queued.remove(j)
                 journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+        busy = bool(running or any(not it["held"] for it in w))
         if stop and stop[0]:
-            return bool(running or queued)
-        if not running and queued:
-            j = queued[0]
-            disk = disk_info(node)
-            if not fault("no-start-disk-check") and disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]:
-                note = "waiting: %s GB free on %s, jobs need %s" % (disk["free_gb"], disk["where"], disk["min_free_gb"])
-                if (j["state"] or {}).get("note") != note:
-                    st = dict(j["state"] or {"state": "queued", "attempt": 1}, note=note, updated=proto.iso())
-                    durable.write_record(os.path.join(j["dir"], "state.json"), st)
-                    event(j["dir"], note)
-                return True
+            return busy
+        cap = capacity(node)
+        disk = disk_block(node)
+        pl = sched.plan(time.monotonic(), cap, running_info(jobs, here_only=fault("grant-in-memory-only")),
+                        queue_items(w, cap), disk)
+        by_id = {j["id"]: j for j in jobs}
+        if disk:   # the head says why it waits (as before), once
+            head = next((it["j"] for it in w if not it["held"]), None)
+            note = "waiting: %s GB free on %s, jobs need %s" % (disk["free_gb"], disk["where"], disk["min_free_gb"])
+            if head is not None and (head["state"] or {}).get("note") != note:
+                st = dict(head["state"] or {"state": "queued", "attempt": 1}, note=note, updated=proto.iso())
+                durable.write_record(os.path.join(head["dir"], "state.json"), st)
+                event(head["dir"], note)
+        for jid, e in pl["fail"]:
             try:
-                start_job(j)
+                write_result(by_id[jid], "failed", "runner", note="too-big: %s (the node's capacity was lowered after "
+                             "the job was accepted)" % e, error="too-big")
             except Exception:  # noqa
-                if fault("runner-pass-aborts"):
-                    raise
-                journal("runner: starting job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+                journal("runner: job %s: %s" % (jid, traceback.format_exc().replace("\n", " | ")[-800:]))
+        if pl["starts"]:
+            if not take_start_lock():
+                journal_once("start-lock", "runner: an update holds %s: no job starts until the default has moved"
+                             % start_lock_path())
+                return busy
+            try:
+                for x in pl["starts"]:
+                    if stop and stop[0]:
+                        break
+                    try:
+                        if start_job(by_id[x["id"]], x["grant"], x["S"]):
+                            busy = True
+                    except Exception:  # noqa
+                        if fault("runner-pass-aborts"):
+                            raise
+                        journal("runner: starting job %s: %s" % (x["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+            finally:
+                drop_start_lock()
+        if checking(node):
+            check_invariants(cap)
+        return busy
+
+
+_ONCE = set()
+
+
+def journal_once(tag, msg):
+    if tag not in _ONCE:
+        _ONCE.add(tag)
+        journal(msg)
+
+
+def order_lost(node):
+    """queue.json unreadable (§20.8): the walk falls back to (band, accepted_ns), holds and bands are kept (they are in
+    each job's state.json); the file is moved aside so this is journalled once."""
+    try:
+        os.rename(p("queue.json"), p("queue.json.unreadable.%d" % int(time.time())))
+    except OSError:
+        pass
+    journal("queue: order file unreadable: FIFO within each band restored (holds and bands kept)")
+    n = node_info()
+    n["order_restored_at"] = proto.iso()
+    durable.write_record(p("node.json"), n)
+
+
+def checking(node):
+    return os.environ.get("MU_NODE_CHECK") == "1" or (node.get("sched") or {}).get("check") is True
+
+
+def check_invariants(cap):
+    """MU_NODE_CHECK=1 (the tests): the allocation rebuilt from disk after the pass must keep §3.3's invariants; a
+    violation is journalled and appended to /srv/mu/state/invariant-violation, which every e2e row checks."""
+    run = []
+    for j in scan_jobs():
+        st = j["state"] or {}
+        if not j["result"] and st.get("state") == "running":
+            run.append({"id": j["id"], "grant": grant_of(j), "started_epoch": st.get("started_epoch"),
+                        "held": bool(st.get("held"))})
+    bad = sched.invariants(cap, run)
+    if bad:
+        os.makedirs(p("state"), exist_ok=True)
+        with open(p("state", "invariant-violation"), "a", encoding="utf-8") as f:
+            f.write("%s %s\n" % (proto.iso(), "; ".join(bad)))
+        journal("runner: INVARIANT VIOLATION: %s" % "; ".join(bad))
+    return bad
+
+
+def start_lock_path():
+    return os.path.join(mu_home(), "state", "start.lock")
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def take_start_lock():
+    """The lock an update takes to move the default between two starts (scheduler.md §9 "Version switch"; bin/mu
+    au_switch): a folder with the holder's pid. The runner holds it while it starts jobs; a stale one is removed."""
+    d = start_lock_path()
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    for _ in range(3):
+        try:
+            os.mkdir(d)
+            with open(os.path.join(d, "pid"), "w") as f:
+                f.write("%d\n" % os.getpid())
             return True
-        return bool(running or queued)
+        except FileExistsError:
+            pid = read_text(os.path.join(d, "pid")).strip()
+            if pid.isdigit() and int(pid) != os.getpid() and pid_alive(int(pid)):
+                return False
+            try:
+                age = time.time() - os.stat(d).st_mtime
+            except OSError:
+                age = 0
+            if not pid and age < 60:
+                return False   # being taken right now
+            shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            return True   # no MU_HOME state folder (tests): nothing to coordinate with
+    return False
+
+
+def drop_start_lock():
+    d = start_lock_path()
+    if read_text(os.path.join(d, "pid")).strip() == str(os.getpid()):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def recover():
@@ -1242,6 +2065,99 @@ def recover():
                     set_aside(n, "job.json unreadable at the runner's start")
                 except OSError as e:
                     journal("recovery: could not move %s aside: %s" % (n, e))
+
+
+def cg_read(cg, name):
+    return read_text("/sys/fs/cgroup%s/%s" % (cg, name))
+
+
+def cg_kv(text):
+    out = {}
+    for ln in text.splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            out[parts[0]] = int(parts[1])
+    return out
+
+
+def cg_usage(cg, prev=None):
+    """The figures of a job's cgroup (dashboard §4.2): cpu.stat, memory.current/.peak/.stat/.events, pids. PREV: the
+    last sample, whose running maxima carry on."""
+    prev = prev or {}
+    cpu = cg_kv(cg_read(cg, "cpu.stat"))
+    mst = cg_kv(cg_read(cg, "memory.stat"))
+    ev = cg_kv(cg_read(cg, "memory.events"))
+    cur = read_text("/sys/fs/cgroup%s/memory.current" % cg).strip()
+    peak = read_text("/sys/fs/cgroup%s/memory.peak" % cg).strip()
+    pids = read_text("/sys/fs/cgroup%s/pids.current" % cg).strip()
+    cur = int(cur) if cur.isdigit() else None
+    work = (mst.get("anon", 0) + mst.get("shmem", 0)) if mst else None
+
+    def mx(a, b):
+        vals = [x for x in (a, b) if isinstance(x, int)]
+        return max(vals) if vals else None
+    out = {"t": proto.iso(), "cpu_s": round(cpu["usage_usec"] / 1e6, 2) if "usage_usec" in cpu else prev.get("cpu_s"),
+           "user_s": round(cpu["user_usec"] / 1e6, 2) if "user_usec" in cpu else prev.get("user_s"),
+           "sys_s": round(cpu["system_usec"] / 1e6, 2) if "system_usec" in cpu else prev.get("sys_s"),
+           "mem_current": cur,
+           "mem_peak_bytes": mx(int(peak) if peak.isdigit() else None, mx(cur, prev.get("mem_peak_bytes"))),
+           "mem_work_peak_bytes": mx(work, prev.get("mem_work_peak_bytes")),
+           "mem_events": {"max": ev.get("max", 0), "oom_kill": ev.get("oom_kill", 0)} if ev else prev.get("mem_events"),
+           "pids": int(pids) if pids.isdigit() else None,
+           "pids_peak": mx(int(pids) if pids.isdigit() else None, prev.get("pids_peak"))}
+    return out
+
+
+def thread_masks(cg, main_only=False):
+    """(comm, Cpus_allowed_list) of every thread of every process of a cgroup (a thread can have a mask of its own)."""
+    out = []
+    for pid in read_text("/sys/fs/cgroup%s/cgroup.procs" % cg).split():
+        if main_only:
+            tasks = [os.path.join("/proc", pid)]
+        else:
+            try:
+                tasks = [os.path.join("/proc", pid, "task", t) for t in os.listdir(os.path.join("/proc", pid, "task"))]
+            except OSError:
+                continue
+        for t in tasks:
+            txt = read_text(os.path.join(t, "status"))
+            m = re.search(r"^Cpus_allowed_list:\s*(\S+)", txt, re.M)
+            c = re.search(r"^Name:\s*(.*)$", txt, re.M)
+            if m:
+                out.append((c.group(1).strip() if c else "?", m.group(1)))
+    return out
+
+
+def sample():
+    """Every SAMPLE_EVERY ticks, outside the lock (§7.1): each running job's usage.json (a view: rename, no fsync) and
+    the per-thread CPU mask check (§5.2 item 4). Nothing here decides anything."""
+    for j in scan_jobs():
+        st = j["state"] or {}
+        if j["result"] or st.get("state") != "running" or not st.get("cgroup"):
+            continue
+        cg = st["cgroup"]
+        if not os.path.isdir("/sys/fs/cgroup" + cg):
+            continue
+        path = os.path.join(j["dir"], "usage.json")
+        u = cg_usage(cg, read_json(path))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(u, f)
+        os.replace(tmp, path)
+        g = grant_of(j)
+        if not g or g.get("class") == "express" or st.get("affinity_widened"):
+            continue
+        allowed = set(g["cpus"])
+        for comm, lst in thread_masks(cg, main_only=fault("widen-check-main-thread-only")):
+            ids = sched.parse_cpus(lst)
+            if ids is not None and not set(ids) <= allowed:
+                with Lock():   # a short write of a running job's state.json
+                    jj = load_job(j["id"])
+                    if not jj["result"] and (jj["state"] or {}).get("state") == "running":
+                        s2 = dict(jj["state"], affinity_widened={"comm": comm[:64], "cpus": lst})
+                        durable.write_record(os.path.join(j["dir"], "state.json"), s2)
+                event(j["dir"], "affinity widened by %s: %s (granted %s)" % (comm[:64], lst, sched.fmt_cpus(g["cpus"])))
+                break
 
 
 def set_busy(busy):
@@ -1272,6 +2188,7 @@ def run_runner():
         selftest()
     recover()
     first = True
+    n = 0
     while not stop[0]:
         try:
             busy = step(first, stop)
@@ -1280,8 +2197,20 @@ def run_runner():
             busy = True
         first = False
         set_busy(busy)
-        if not busy and default_version() and default_version() != started:
-            journal("runner: the default is now μ %s: restarting with it" % default_version())
+        n += 1
+        if n % SAMPLE_EVERY == 0:
+            try:
+                sample()   # outside the lock (§7.1)
+            except Exception:  # noqa
+                journal_once("sampler", "runner: sampler: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
+        # a new default takes effect between two passes, i.e. when no job is starting (scheduler.md §9, "Version
+        # switch", superseded 2026-11-14): running units are adopted by the new runner, queued jobs keep their places
+        if default_version() and default_version() != started and (not busy or not fault("restart-only-idle")):
+            journal("runner: the default is now μ %s: restarting with it (%s)" % (
+                default_version(), "jobs queued or running are adopted" if busy else "idle"))
+            if busy:   # the marker stays busy (no pid: never taken as stale) until the new runner rewrites it
+                durable.write_durable(os.path.join(mu_home(), "state", "busy"), "restarting\nμ job runner: restarting "
+                                      "with a new default; jobs are queued or running\n", 0o644)
             return 0
         for _ in range(int(max(1, tick * 10))):
             if stop[0]:
@@ -1301,6 +2230,24 @@ def cgroup_oom_kills():
         return int(m.group(1)) if m else 0
     except (IndexError, ValueError):
         return 0
+
+
+def own_usage(j, wall_s):
+    """`usage` of a shim-written result: the shim's own cgroup (the job's unit, still there while the shim runs),
+    with the working-set peak from the sampler's usage.json (no kernel file has a peak of anon + shmem)."""
+    try:
+        cg = read_text("/proc/self/cgroup").strip().splitlines()[-1].split("::", 1)[1]
+    except IndexError:
+        return None
+    if not os.path.isdir("/sys/fs/cgroup" + cg):
+        return None
+    prev = read_json(os.path.join(j["dir"], "usage.json")) or {}
+    u = cg_usage(cg, prev)
+    out = {k: u.get(k) for k in ("cpu_s", "user_s", "sys_s", "mem_peak_bytes", "mem_work_peak_bytes", "pids_peak",
+                                 "mem_events")}
+    out["cores_avg"] = round(u["cpu_s"] / wall_s, 2) if wall_s > 0 and isinstance(u.get("cpu_s"), (int, float)) else None
+    out["source"] = "cgroup"
+    return out
 
 
 def eval_outputs(work, patterns):
@@ -1341,6 +2288,14 @@ def run_job(job_id):
     sys.stdout.flush()
     env = dict(os.environ, MU_VERSION=job["mu_version"])
     env.pop("MU_PROJECT", None)
+    cpus = sched.parse_cpus(os.environ.get("MU_JOB_CPUS", ""))
+    if cpus and os.environ.get("MU_JOB_CLASS") != "express" and not fault("no-affinity"):
+        try:   # the grant's CPUs, inherited by every child (scheduler.md §5.2): cooperative, checked by the sampler
+            os.sched_setaffinity(0, cpus)
+        except (AttributeError, OSError) as e:
+            sys.stdout.write("== μ: could not pin the job to CPUs %s (%s): it runs unpinned\n" % (
+                os.environ.get("MU_JOB_CPUS"), e))
+    t0 = time.time()
     child = subprocess.Popen([os.path.join(home, "bin", "mu"), "run"] + job["argv"], env=env, stdin=subprocess.DEVNULL)
     term = [False]
 
@@ -1374,9 +2329,10 @@ def run_job(job_id):
     else:
         state, ec, sig = "failed", rc, None
     j["state"] = st
+    usage = None if fault("no-usage") else own_usage(j, time.time() - t0)
     try:
         write_result(j, state, "shim", unit_result="success" if state == "succeeded" else None, exit_code=ec, signal=sig,
-                     outputs=outs, outputs_missing=missing)
+                     outputs=outs, outputs_missing=missing, usage=usage)
     except OSError as e:   # the runner's note then says why (it reads the last "== " line)
         sys.stdout.write("== μ: could not write result.json (%s: %s); the job %s\n" % (
             type(e).__name__, e, "succeeded" if state == "succeeded" else "ended " + state))
