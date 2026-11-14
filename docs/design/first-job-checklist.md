@@ -384,9 +384,11 @@ when the Mac is used over ssh, a change of the relay's address (`mu-tunnel-refre
 
 ## What CI already showed
 
-`.github/workflows/job-layer.yml` on branch `job-layer` (green in run 43541460952: 45 PASS, 30 faults each shown to fail) makes the node on a GitHub `ubuntu-24.04` runner with these
+`.github/workflows/job-layer.yml` on branch `job-layer` (green in run 43547849592 on commit e486484, after the three
+reviews: 49 PASS, 33 faults each shown to fail, every expected row and fault checked to have run) makes the node on a
+GitHub `ubuntu-24.04` runner with these
 very scripts (`mu-wsl2-distro.sh install --no-wsl` three times, the credential through `tunnel credential` on stdin
 from the relay replica's `gen-credentials` output), runs the whole job-layer suite through a replica of the relay and
 Traefik against that sshd, gate and tunnel, checks the script's own `status` (each check shown to fail with its fault
-put in), then uninstalls and reinstalls. `--no-wsl` leaves out the Windows parts, which is why 2.4, 2.7 `reach.*`,
+put in, the tunnel's egress filter included), then uninstalls and reinstalls. `--no-wsl` leaves out the Windows parts, which is why 2.4, 2.7 `reach.*`,
 `host-drive`, `disk.sure` and the task check exist only here.

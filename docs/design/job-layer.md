@@ -1523,4 +1523,25 @@ must-fail checks, `local.sh` one, e2e R05 and R32 and H1 one more each).
 
 ### 23.5 CI
 
-The fixes were proven in run CI_RUN_ID (CI_SUMMARY).
+Run 43547849592 on commit e486484, all four jobs green:
+
+- fast tests, Linux: `tools/test-jobs/run.sh` 247 passed (27 must-fail checks among them), `local.sh` 34 (the revoke
+  over a real ControlMaster and its must-fail included), `test-wsl-disk` 29, `test-wsl2-host` 185;
+- fast tests, macOS (bash 3.2): `run.sh` 247, `local.sh` 34, `test-autoupdate` 254, `test-wsl2-host` 185;
+- probe: green;
+- end to end: 49 PASS (47 rows, then Z1 and Z2: every expected row and fault ran), 33 faults each shown to fail,
+  0 missed. R05: mu's ssh connections on the node 1 before the revoke, 0 after, a call after it exit 5; with the
+  faults, 1 after and the call works. R32: TCP to mu-sshd works through the filter, TCP to the runner's own address
+  times out and a UDP send there gets "Operation not permitted"; without the filter all three go through. H1:
+  `ready for jobs` true, and false with the egress filter removed.
+
+The first run (43546105043) found three things the local tests could not: the filter drops a TCP SYN silently, so
+the probes use UDP; the workstation's ssh master outlives the server side for a while, so R05 counts the node's
+side; and two older faults no longer bit (R22's appended bytes are now caught by the size check before the hash
+check, so the tamper keeps the size; the systemd-run check made `no-adopt` harmless, so the fault now stops the
+unit and runs it again). A `test-autoupdate` check on macOS failed once in that run (a lock of the previous,
+killed install still held; unchanged code) and passed in the next. `tools/test-fetch` passed locally (it fails
+under load, as before; not in the workflow).
+
+Not tested, in plain words: the egress filter, the refresh timer and the ready line on WSL's kernel (only the
+runner's); a real change of the relay's address; fsync under a power cut; the fetch of a real job from the PC.
