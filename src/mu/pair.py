@@ -405,6 +405,7 @@ class Claimer:
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
         self.cur_path = os.path.join(self.dir, "current.json")
         self.first_path = os.path.join(self.dir, "first-use.json")
+        self.done_path = os.path.join(self.dir, "done.json")
         self.backup_env = os.path.join(self.dir, "tunnel.env.before-pair")
         self.confirm_wait = float(os.environ.get("MU_PAIR_CONFIRM_WAIT") or 120)
         self.connect_wait = float(os.environ.get("MU_PAIR_CONNECT_WAIT") or 60)
@@ -437,6 +438,16 @@ class Claimer:
             d[iid] = now
         write_private(self.first_path, json.dumps(d, sort_keys=True) + "\n")
         return d[iid]
+
+    def done(self, iid=None):
+        """The invites this PC finished (48 h): running the same line again must not look like another machine using
+        the code, whose contest would undo this PC's own pairing (§12.1)."""
+        now = int(time.time())
+        d = {k: v for k, v in (read_json(self.done_path) or {}).items() if isinstance(v, int) and now - v < 172800}
+        if iid:
+            d[iid] = now
+            write_private(self.done_path, json.dumps(d, sort_keys=True) + "\n")
+        return d
 
     # -- the node's own commands (mu-wsl2-distro), all with --json
     def distro(self, args, stdin=None, timeout=120):
@@ -548,6 +559,9 @@ class Claimer:
             self.say("resuming invite %s" % iid)
             return {"ok": True, "invite": iid, "resumed": True, "node": cur.get("node"), "port": cur.get("port"),
                     "inviter": cur.get("inviter")}
+        if iid in self.done():
+            raise PairError(EXIT_REFUSED, "already-paired", "this PC already paired with invite %s: a code works once"
+                            % iid, "to pair again, make a new invite on the Mac (mu compute invite <node> --replace)")
         first = self.first_use(iid)
         if time.time() - first > 3600:
             raise PairError(EXIT_EXPIRED, "invite-expired", "this PC first used invite %s more than 60 minutes ago: "
@@ -739,6 +753,7 @@ class Claimer:
                 ok = (mac_ok(k["ic"], "confirm", c, CONFIRM, cm) and c.get("offer_digest") == cur.get("offer_digest")
                       and c.get("answer_digest") == cur.get("answer_digest") and c.get("outcome") in OUTCOMES)
                 self.forget()
+                self.done(iid)
                 if not ok:
                     raise PairError(EXIT_REFUSED, "confirm-integrity", "the confirmation did not verify (the relay or "
                                     "the network changed it); the keys on both sides were each verified on their own, "
@@ -765,6 +780,7 @@ class Claimer:
             self.forget()
             raise PairError(EXIT_REFUSED, "not-confirmed", "%s did not confirm: undone" % inviter, "")
         self.forget()
+        self.done(iid)
         self.say("paired with %s (not yet confirmed: %s confirms when it next runs mu compute invite --wait %s)" % (
             inviter, inviter, iid))
         return {"ok": True, "invite": iid, "node": node, "inviter": inviter, "confirmed": False, "tunnel": connected}
