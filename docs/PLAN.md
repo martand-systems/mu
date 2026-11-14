@@ -1142,3 +1142,15 @@ deployed. P4 is in progress. P2 is partly built, and P7 has its `local` half. Th
 - A LAN-direct path to a node in the same office (a Windows port proxy and a firewall rule limited to the local subnet)
 - Self-hosted GitHub Actions runner on the office PC, to re-run validations on pull requests
 - Remote ParaView (`pvserver`) through the relay
+
+**Build or adopt (reviewed 2026-11-14).** Most of μ's plumbing was written for μ. Off-the-shelf tools that could replace
+parts of it, and the owner's decision:
+
+| μ part | Off-the-shelf alternative | Decision |
+|---|---|---|
+| Relay, one-code pairing and tunnel service (chisel, `mu-relayd`, `mu-tunnel`) | **Headscale** (self-hosted Tailscale control server) or **NetBird**, one Docker service on the Dokploy server; machines join with a one-time key; direct LAN path for free. Self-hosting meets every §7.1 constraint; the "no Tailscale" rule was about the hosted service | **Keep the current design** (most of it is built). Switch to Headscale later if the relay or pairing becomes a burden, e.g. for relay Stage B or several nodes and users. The job layer (OpenSSH, §6.4a) would run unchanged over it |
+| Job queue and limits (`mu node`) | pueue; Slurm or Nomad (heavy for one node); a self-hosted GitHub Actions runner | Keep: the μ-specific parts (snapshot, pin, run records, safe fetch) would remain anyway |
+| Installer, versions, auto-update | pixi (conda environments and locks) | Keep for now: FreeCAD, ParaView, OpenFOAM, PrusaSlicer and OpenVSP come as DMGs, tarballs, `.deb`s and Flathub, which pixi does not cover. Revisit if conda-forge carries them |
+| WSL2 host scripts | Ansible | Keep: small and specific |
+
+Rule for new plumbing: compare it with existing open-source tools before building, and record the comparison here.
