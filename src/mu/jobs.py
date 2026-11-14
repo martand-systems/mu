@@ -1120,8 +1120,12 @@ def snapshot(root, job_id):
                 shutil.copyfile(os.path.join(gitdir, "index"), idx)
             except FileNotFoundError:
                 git(root, "read-tree", "HEAD", env=env)
-        spec = ["--", "."] if fault("no-mu-exclude") else ["--", ".", ":(exclude).mu"]
-        git(root, "add", "-A", *spec, env=env)
+        # Add everything, then drop .mu from this temporary index. An exclude pathspec (':(exclude).mu') makes
+        # `git add` exit 1 when .mu/ is gitignored ("The following paths are ignored"), seen with git 2.40 in JATAYU
+        # on 2026-11-14; removing it afterwards works whether .mu is ignored, not ignored, or ignored as '.mu/*'.
+        git(root, "add", "-A", "--", ".", env=env)
+        if not fault("no-mu-exclude"):
+            git(root, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".mu", env=env)
         tree = git(root, "write-tree", env=env)
     finally:
         for f in (idx, idx + ".lock"):

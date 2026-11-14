@@ -921,6 +921,19 @@ def t_snapshot_content():
     check("snapshot content: staged, unstaged, untracked, deleted, mode and symlink in; ignored and .mu/ out" +
           (" (fault no-mu-exclude is on: this must FAIL)" if durable.fault("no-mu-exclude") else ""), not bad, "wrong: %s" % bad)
     shutil.rmtree(d)
+    # .mu/ gitignored (as in JATAYU, 2026-11-14): an exclude pathspec made `git add` exit 1 here. Both ignore forms.
+    for rule in (".mu/", ".mu/*"):
+        d, root = make_project()
+        with open(os.path.join(root, ".gitignore"), "a") as f:
+            f.write("\n%s\n" % rule)
+        try:
+            s = jobs.snapshot(root, proto.new_job_id())
+            names = set(git(root, "ls-tree", "-r", "--name-only", s["snapshot"]).split("\n"))
+            ok, why = "new.txt" in names and not any(n.startswith(".mu/") for n in names), sorted(names)
+        except proto.MuError as e:
+            ok, why = False, str(e)
+        check("snapshot with %r in .gitignore: works, untracked in, .mu/ out" % rule, ok, why)
+        shutil.rmtree(d)
 
 
 def t_snapshot_report():
