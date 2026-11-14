@@ -443,6 +443,8 @@ class Claimer:
         """The invites this PC finished (48 h): running the same line again must not look like another machine using
         the code, whose contest would undo this PC's own pairing (§12.1)."""
         now = int(time.time())
+        if fault("forget-done") and not iid:
+            return {}
         d = {k: v for k, v in (read_json(self.done_path) or {}).items() if isinstance(v, int) and now - v < 172800}
         if iid:
             d[iid] = now

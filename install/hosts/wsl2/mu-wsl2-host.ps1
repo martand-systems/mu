@@ -1602,7 +1602,7 @@ function Invoke-Uninstall {
       Write-Changed "$Distro deleted"
     } else { Write-Host '  not deleted' }
   } else {
-    $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', "if [ -x $($script:DistroScriptTarget) ]; then $($script:DistroScriptTarget) uninstall --user $User && rm -f $($script:DistroScriptTarget) $($script:GateTarget) && { rmdir /usr/local/lib/mu 2>/dev/null || true; }; fi")
+    $r = Invoke-Wsl -Arguments @('-d', $Distro, '-u', 'root', '--exec', '/bin/sh', '-c', "if [ -x $($script:DistroScriptTarget) ]; then $($script:DistroScriptTarget) uninstall --user $User && rm -f $($script:DistroScriptTarget) $($script:GateTarget) $($script:PairPyTarget) && { rmdir /usr/local/lib/mu 2>/dev/null || true; }; fi")
     if ($r.ExitCode -ne 0) { Write-Note "the Linux side did not uninstall cleanly (exit $($r.ExitCode))" }
     Write-Host "  kept: the distro $Distro and its user $User, with their files (uninstall -RemoveDistro deletes it)"
   }

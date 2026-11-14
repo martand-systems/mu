@@ -1358,7 +1358,8 @@ do_uninstall() {
   echo "Kept: linger for $MU_USER (loginctl disable-linger $MU_USER); $STATE_DIR/stops.log; in ~$MU_USER/.ssh the key, the"
   echo "  managed github.com block in config (between the '# >>> mu-wsl2' and '# <<< mu-wsl2' lines) and GitHub's key in"
   echo "  known_hosts (ssh-keygen -R github.com -f ~$MU_USER/.ssh/known_hosts); $SELF_PATH itself and the gate's source"
-  echo "  $GATE_TEMPLATE (mu-wsl2-host.ps1 uninstall deletes both next; by hand: rm $SELF_PATH $GATE_TEMPLATE)."
+  echo "  $GATE_TEMPLATE and the pairing client $PAIR_PY (mu-wsl2-host.ps1 uninstall deletes them next; by hand:"
+  echo "  rm $SELF_PATH $GATE_TEMPLATE $PAIR_PY)."
   echo "Restart the distro to apply (from Windows, cleanly: C:\\Mu\\host\\mu-wsl2-host.ps1 test-stop)."
 }
 
@@ -1387,7 +1388,6 @@ uninstall_jobs() {
            "$DELEGATE_CONF" "$STATE_DIR/host-drive"; do
     if [ -e "$f" ]; then rm -f "$f"; changed "$f removed"; fi
   done
-  if [ -f "$PAIR_PY" ]; then rm -f "$PAIR_PY"; changed "$PAIR_PY removed"; fi
   if [ -d "$PAIR_STATE" ]; then rm -rf "$PAIR_STATE"; changed "$PAIR_STATE removed (pairing state)"; fi
   rmdir "$KEYS_DIR" "$LIB_MU" "$(dirname "$TUNNEL_EGRESS")" 2> /dev/null || true
   if systemd_running; then systemctl daemon-reload; fi

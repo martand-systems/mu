@@ -127,8 +127,15 @@ func TestOfferAndAnswerUnchanged(t *testing.T) {
 	e := newEnv(t, []Entry{staticDefault()[0]})
 	c := e.pairNode("7K3M", 1, "office-pc", 7001)
 	r := e.do("GET", "/mu/v1/invites/7K3M/offer", "Mu-Session "+c.session, nil)
-	if r.Body["offer"].(map[string]any)["inviter_key"] != testKey {
-		t.Fatalf("the offer changed on the way: %v", r.Body["offer"])
+	sent := nodeInvite(newCode("7K3M", 1), "office-pc", 7001)["offer"].(map[string]string)
+	got := r.Body["offer"].(map[string]any)
+	if len(got) != len(sent) {
+		t.Fatalf("the offer changed on the way: %v", got)
+	}
+	for k, v := range sent { // every member, byte for byte (the key, the relay URL and fingerprint included)
+		if got[k] != v {
+			t.Fatalf("the offer changed on the way: %s is %v, was %v", k, got[k], v)
+		}
 	}
 	r = e.do("GET", "/mu/v1/invites/7K3M", admin(), nil)
 	if inviteField(r, "answer").(map[string]any)["host_key"] != testKey {

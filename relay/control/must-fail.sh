@@ -33,6 +33,9 @@ allow-upgrade|TestUpgradeRefused
 log-secrets|TestNoSecretsInLogs
 tamper-offer|TestOfferAndAnswerUnchanged
 tamper-answer|TestOfferAndAnswerUnchanged
+tamper-offer-fp|TestOfferAndAnswerUnchanged
+tamper-offer-url|TestOfferAndAnswerUnchanged
+any-claim|TestWrongCodeSameAsUnknownAndLockout
 evil-text|TestErrorTextIsFixed
 '
 go test -count=1 -tags faults ./... > /dev/null 2>&1 || { echo "FAIL  the faults build fails with no fault set"; N_FAIL=$((N_FAIL + 1)); }

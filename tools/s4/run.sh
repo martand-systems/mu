@@ -8,7 +8,10 @@
 #   tools/s4/run.sh         build, test, print the table; exit 0 only if every row passes (S4_ONLY=pairing: only
 #                           the routing, tunnel, access and pairing groups)
 #   tools/s4/run.sh down    remove everything it made
-#   tools/s4/run.sh relay   only Traefik and the relay, left running (used by tools/test-jobs/e2e.sh)
+#   tools/s4/run.sh relay   only Traefik and the relay, left running (used by tools/test-jobs/e2e.sh). With
+#                           S4_PAIRING_E2E=1 the relay has no static compute client (as after the owner's
+#                           `gen-credentials.sh remove-client office-pc`: the node is paired by invite) and mu-relayd
+#                           is built with -tags faults reading its faults from /var/lib/mu-relay/test-fault (from-file)
 #
 # The main relay runs in pairing mode (RELAY_ADMIN_TOKEN set: mu-relayd in front of chisel's auth file, the API on
 # /mu/v1/ behind chisel's --backend, the state on a named volume); the second relay stays in the legacy mode (chisel
@@ -63,6 +66,7 @@ case "$BREAK" in
   noevict) RELAY_FAULT=no-evict ;; allowempty) RELAY_FAULT=allow-empty ;; *) RELAY_FAULT="" ;;
 esac
 PAIR_FAULT=""; [ "$BREAK" != skipmac ] || PAIR_FAULT=skip-mac
+PAIRING_E2E=0; [ "${1:-}" != relay ] || [ "${S4_PAIRING_E2E:-0}" != 1 ] || { PAIRING_E2E=1; RELAY_FAULT=from-file; }
 case "$IDLE" in ''|*[!0-9]*) echo "run.sh: S4_IDLE must be a number of seconds" >&2; exit 2 ;; esac
 # Under 60 s the hop that cuts after 45 s idle has not cut yet, and its control (I3) would fail for no reason.
 [ "$IDLE" -ge 60 ] || { echo "run.sh: S4_IDLE must be at least 60" >&2; exit 2; }
@@ -256,6 +260,9 @@ setup() {
   # the main relay in pairing mode: the token made the way the owner makes it; the silent one stays legacy
   "$g" --env "$WORK/cred/main.env" admin-token >/dev/null 2>&1 || die "gen-credentials admin-token"
   grep '^RELAY_ADMIN_TOKEN=' "$WORK/cred/main.env" > "$WORK/env/admin.env"
+  if [ "$PAIRING_E2E" = 1 ]; then   # the owner's recommended step before the first invite (pairing.md §3.1)
+    "$g" --env "$WORK/cred/main.env" remove-client office-pc >/dev/null 2>&1 || die "gen-credentials remove-client"
+  fi
   if [ -n "$RELAY_FAULT" ]; then
     printf 'services:\n  mu-relay:\n    build:\n      args:\n        MU_RELAYD_TAGS: faults\n    environment:\n      MU_RELAY_FAULT: %s\n' "$RELAY_FAULT" > "$WORK/break-fault.yaml"
   fi

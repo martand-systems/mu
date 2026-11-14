@@ -84,6 +84,9 @@ func claimMatches(inv *Invite, claimHex string) bool {
 	}
 	b, _ := hex.DecodeString(claimHex)
 	got := sha256hex(b)
+	if fault("any-claim") { // the claimer's tests: a wrong code is let through (the client's own MAC check remains)
+		return true
+	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(inv.ClaimHash)) == 1
 }
 
@@ -731,6 +734,17 @@ func (r *Relay) view(x *Invite, admin bool) map[string]any {
 func (r *Relay) offerFor(x *Invite) map[string]string {
 	if fault("tamper-offer") {
 		return tamper(x.Offer, "inviter_key")
+	}
+	if fault("tamper-offer-fp") { // another relay fingerprint in the offer (the attack on the PC's tunnel pin)
+		return tamper(x.Offer, "relay_fingerprint")
+	}
+	if fault("tamper-offer-url") { // another relay URL in the offer
+		c := map[string]string{}
+		for k, v := range x.Offer {
+			c[k] = v
+		}
+		c["relay_url"] = "https://relay.evil.invalid"
+		return c
 	}
 	return x.Offer
 }

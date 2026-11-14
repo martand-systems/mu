@@ -9,7 +9,8 @@
 #     CHISEL       the chisel 1.12.0 linux-amd64 binary (checked against toolchain/apps.toml) for the stub toolchains;
 #                  the node's own copy is downloaded and checked by the host script
 #     CA_CRT       the S4 replica's test CA (tools/s4/run.sh relay), added to the system's trust store
-#     COMPUTE_ENV  the replica's credentials for office-pc: the output of relay/gen-credentials.sh add-client
+#     COMPUTE_ENV  the replica's credentials for office-pc: the output of relay/gen-credentials.sh add-client; "-": none
+#                  (the node is then paired by one code, tools/test-jobs/e2e.sh S3, docs/design/pairing.md)
 #     OUT          where the three install runs' output and results go (install-N.log, install-N.result)
 # Stub toolchains (like tools/test-autoupdate): mu has v2026.11.5 (unpinned), v2026.11.6 (no job layer) and v2026.11.7
 # (the default: this checkout's src/mu); ws has v2026.11.6 and v2026.11.7 (with libexec/chisel).
@@ -43,8 +44,12 @@ N=1 install_run bash "$REPO/install/hosts/wsl2/mu-wsl2-distro.sh" install --no-w
 # what a restart of the distro does on the PC: systemd reads system.conf.d (DefaultTimeoutStopSec) again
 systemctl daemon-reexec
 
-say "the relay credential, on stdin: the replica's compute.env is gen-credentials' output"
-mu-wsl2-distro tunnel credential --wait 60 < "$CENV" | tee "$OUT/tunnel-credential.log"
+if [ "$CENV" != - ]; then
+  say "the relay credential, on stdin: the replica's compute.env is gen-credentials' output"
+  mu-wsl2-distro tunnel credential --wait 60 < "$CENV" | tee "$OUT/tunnel-credential.log"
+else
+  say "no relay credential here: the node is paired by one code (e2e.sh S3)"; : > "$OUT/tunnel-credential.log"
+fi
 
 say "workstation user ws, stub toolchains"
 id ws > /dev/null 2>&1 || useradd -m -s /bin/bash ws
