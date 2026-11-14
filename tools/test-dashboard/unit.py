@@ -949,9 +949,9 @@ def t_sampler():
     busy = mean_cpu(10) * n / 100.0
     for q in procs:
         q.wait()
-    got = busy - base
-    check("D08: two busy cores read as 2 cores' worth (± 25 %%): %.2f (baseline %.2f, %d logical)" % (got, base, n),
-          1.5 <= got <= 2.5 or (n <= 2 and busy >= 0.75 * n), "busy %.2f base %.2f" % (busy, base))
+    expect = min(float(n), base + 2.0)          # a small, already busy runner saturates: then all its cores
+    check("D08: two busy cores read as 2 cores' worth (± 25 %%): %.2f cores busy, %.2f expected (baseline %.2f, %d "
+          "logical)" % (busy, expect, base, n), abs(busy - expect) <= 0.5, "busy %.2f base %.2f" % (busy, base))
     c = m.card()
     check("D08: the card has CPU, per core, memory used/available/total and its time",
           c["cpu_pct"] is not None and c["per_core"] and c["mem"]["total"] and c["mem"]["available"] is not None and

@@ -802,16 +802,22 @@ class LogBuf:
         self.data, self.start = bytearray(), max(0, int(size_hint or 0) - LOG_KEEP)
         self.lock = threading.Lock()
         self.thread, self.stop, self.done, self.error = None, None, False, None
-        self.last_req = time.monotonic()
+        self.last_req, self.started = time.monotonic(), -1e9
 
     @property
     def end(self):
         return self.start + len(self.data)
 
     def ensure(self):
-        self.last_req = time.monotonic()
+        now = time.monotonic()
+        self.last_req = now
         if self.done or (self.thread is not None and self.thread.is_alive()):
             return
+        if self.error is not None and now - self.started < 15.0:
+            return                    # a failed session is retried after 15 s, not on every poll
+        if self.w.state not in ("online", "connecting"):
+            return
+        self.started = now
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, args=(self.stop,), daemon=True, name="log-" + self.job_id)
         self.thread.start()
@@ -1100,6 +1106,7 @@ class App:
         now_m = self.clock.mono()
         running = s.get("state") == "running"
         if now_m - m["at"] > 30.0 or (not running and m["at"] < 0):
+            m["at"] = now_m                                   # failures wait 30 s too
             got = bytearray()
 
             def on_data(b):
@@ -1108,7 +1115,6 @@ class App:
                     raise MuError(proto.EXIT_ERROR, "too-large", "metrics too large", "")
             try:
                 w.r.stream("metrics", on_data, id=job_id, offset=str(m["offset"]))
-                m["at"] = now_m
             except MuError as e:
                 base.update(available=True, reason="error", error=dashnode.error_info(e), samples=m["samples"],
                             complete=False)
