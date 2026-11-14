@@ -529,6 +529,15 @@ def t_open():
               ("#t=" + tok) in open(page).read())
         st, _ = jget(port, "/api/session?first=1", tok)
         check("D15: the redirect file is gone after the token's first use", st == 200 and not os.path.exists(page))
+        r = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "open", "20261114-101500-k3f9qa"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        check("`open JOB`: the redirect lands on the job (#t=<token>&job=JOB); the output names #job= only",
+              r.returncode == 0 and ("#t=%s&job=20261114-101500-k3f9qa" % tok) in open(page).read() and
+              "#job=20261114-101500-k3f9qa" in r.stdout and tok not in r.stdout, r.stdout + r.stderr)
+        r = subprocess.run([sys.executable, "-I", "-S", CLI, "dashboard", "open", "x';alert(1)"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        check("`open JOB` refuses what is not a job id", r.returncode != 0 and "not a job id" in r.stdout + r.stderr,
+              r.stdout + r.stderr)
         for args in (["dashboard", "--json"], ["dashboard", "status", "--json"], ["dashboard"]):
             o = subprocess.run([sys.executable, "-I", "-S", CLI] + args, env=env, capture_output=True, text=True,
                                timeout=20)

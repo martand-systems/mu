@@ -1478,7 +1478,7 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
         if not a.json:
             print("%s accepted by %s (%s)" % (job_id, node_name, res.get("state")))
             if dash_url:
-                print("  dashboard: %s  (mu dashboard open)" % dash_url)
+                print("  dashboard: %s  (if it asks for a token: mu dashboard open %s)" % (dash_url, job_id))
         return cmd_status(a)
     if a.json:
         proto.emit_json(out)
@@ -1488,7 +1488,7 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
                                    res.get("duplicate") else ""))
         print("  mu status %s --wait --timeout 500 · mu log %s --tail 20 · mu fetch %s" % (job_id, job_id, job_id))
         if dash_url:
-            print("  dashboard: %s  (mu dashboard open)" % dash_url)
+            print("  dashboard: %s  (if it asks for a token: mu dashboard open %s)" % (dash_url, job_id))
     return 0
 
 

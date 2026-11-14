@@ -155,9 +155,12 @@ After `succeeded`: `mu fetch`, validate as for a local run (the validation polic
 
 **The dashboard** (`mu dashboard`, a read-only local page of jobs, nodes and this Mac's load). When a remote job
 starts, mention once the `dashboard:` link that `mu submit` prints (`--json`: `dashboard.url`; it carries no token,
-and appears only while the dashboard runs). Run `mu dashboard open` only when the user asks: it opens their browser.
-Keep using `mu status|log|fetch … --json` for everything you do; never read the dashboard's API (`/api`), its token
-or `$MU_HOME/run/dashboard.*`, and never start `mu dashboard serve` yourself (`mu dashboard on|off` only when asked).
+and appears only while the dashboard runs: when it is absent the dashboard is off; do not turn it on to get one).
+Run `mu dashboard open [<job-id>]` only when the user asks: it opens their browser. If the user says the page asks for
+a token, tell them to run `mu dashboard open`. Keep using `mu status|log|fetch … --json` for everything you do; never
+read the dashboard's API (`/api`), its token or any `$MU_HOME/run/dashboard*` file (the token file and the redirect
+page `run/dashboard-open.html` both hold the token), and never start `mu dashboard serve` yourself
+(`mu dashboard on|off` only when asked).
 
 ## Validation
 

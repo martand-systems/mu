@@ -3,7 +3,7 @@
 `status` and `log` on the old-node budget of §4.3.
 
     mu dashboard [status] [--json]    is it running, on which port (the URL never carries the token)
-    mu dashboard open [--json]        start it if needed, then open the browser through a 0600 redirect file
+    mu dashboard open [JOB] [--json]  start it if needed, then open the browser (at JOB) through a 0600 redirect file
     mu dashboard on | off             install or remove the LaunchAgent systems.martand.mu.dashboard (macOS)
     mu dashboard serve [--dev [--scenario NAME] [--fake-mac]] [--port N] [--static DIR]   (internal)
 
@@ -1715,8 +1715,12 @@ def cmd_on(a):
     if a.json:
         proto.emit_json(out)
     else:
-        print("dashboard: on (%s). mu dashboard open · mu dashboard off" % ("running from now on" if loaded else
-                                                                           out["note"]))
+        if loaded:
+            print("dashboard: on — starts at login and is running now. Open it: mu dashboard open · turn off: "
+                  "mu dashboard off")
+        else:
+            print("dashboard: on — starts at login (%s). Open it now: mu dashboard open · turn off: mu dashboard off"
+                  % out["note"])
     return 0
 
 
@@ -1732,7 +1736,7 @@ def cmd_off(a):
     if a.json:
         proto.emit_json({"ok": True, "exit": 0, "enabled": "off", "agent": "not installed"})
     else:
-        print("dashboard: off (mu dashboard open still starts it for this login)")
+        print("dashboard: off — no longer starts at login. mu dashboard open starts it until you log out")
     return 0
 
 
@@ -1754,7 +1758,8 @@ def cmd_status(a):
         print("dashboard: running on %s (pid %s, μ %s) · mu dashboard open" % (out["url"], out["pid"], out["version"]))
     else:
         print("dashboard: not running · mu dashboard open (or mu dashboard on to keep it running)")
-    print("  agent: %s · enabled: %s · nodes: %s" % (out["agent"], out["enabled"], ", ".join(out["nodes"]) or "none"))
+    print("  starts at login: %s · nodes: %s" % ("yes" if out["enabled"] == "on" and out["agent"] != "not installed"
+                                                 else "no", ", ".join(out["nodes"]) or "none"))
     return 0
 
 
@@ -1815,7 +1820,7 @@ def cmd_open(a):
                       "current token" % info["port"], "mu dashboard off, then mu dashboard open (or mu dashboard "
                       "on); see %s" % proto.tilde(os.path.join(jobs.mu_home(), "logs", "dashboard.log")))
     page = os.path.join(run_dir(), "dashboard-open.html")
-    full = "%s#t=%s" % (url, token)
+    full = "%s#t=%s%s" % (url, token, "&job=" + a.job if a.job else "")
     write_private(page, '<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer">'
                   '<meta http-equiv="refresh" content="0;url=%s"><title>μ dashboard</title>'
                   '<p><a href="%s">Open the μ dashboard</a></p>\n' % (full, full))
@@ -1830,8 +1835,8 @@ def cmd_open(a):
     if a.json:
         proto.emit_json({"ok": True, "exit": 0, "url": url, "opened": opened})
     else:
-        print("dashboard: %s%s" % (url, " (opened in the browser)" if opened else
-                                   " (could not open a browser: open %s)" % proto.tilde(page)))
+        print("dashboard: %s%s" % (url + ("#job=" + a.job if a.job else ""), " (opened in the browser)" if opened
+                                   else "\n  could not open a browser; open this file yourself: %s" % proto.tilde(page)))
     return 0
 
 
@@ -1896,7 +1901,8 @@ def api_fixtures():
 HELP = """mu dashboard: a local page of jobs, nodes and this Mac's load (docs/design/dashboard.md)
 
   mu dashboard [status] [--json]  running? on which port (the URL never carries the token)
-  mu dashboard open [--json]      start it if needed and open the browser (the token goes through a 0600 file)
+  mu dashboard open [JOB] [--json]  start it if needed and open the browser, at job JOB if given (the token goes
+                                  through a 0600 file)
   mu dashboard on | off           keep it running with a LaunchAgent (macOS), or remove the agent
   mu dashboard serve [--dev [--scenario NAME] [--fake-mac]] [--port N] [--static DIR]
                                   the server itself (launchd runs it; --dev serves fake nodes only)
@@ -1908,6 +1914,7 @@ def main(args):
     import argparse
     p = jobs.parser("mu dashboard", HELP)
     p.add_argument("sub", nargs="?", default="status", choices=("status", "open", "on", "off", "serve"))
+    p.add_argument("job", nargs="?", help=argparse.SUPPRESS)
     p.add_argument("--dev", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--scenario", help=argparse.SUPPRESS)
     p.add_argument("--fake-mac", action="store_true", help=argparse.SUPPRESS)
@@ -1917,6 +1924,9 @@ def main(args):
     if a.sub != "serve" and (a.dev or a.scenario or a.port or a.static or a.fake_mac):
         raise MuError(proto.EXIT_USAGE, "usage", "--dev, --scenario, --port and --static belong to `serve`",
                       "mu dashboard serve --dev")
+    if a.job is not None and (a.sub != "open" or not proto.JOB_ID.match(a.job)):
+        raise MuError(proto.EXIT_USAGE, "usage", "only `open` takes a job id" if a.sub != "open" else
+                      "'%s' is not a job id" % proto.clean_text(a.job, 40), "mu dashboard open 20261114-101500-k3f9qa")
     if a.scenario and not a.dev:
         raise MuError(proto.EXIT_USAGE, "usage", "--scenario needs --dev", "mu dashboard serve --dev --scenario busy")
     if a.scenario:
