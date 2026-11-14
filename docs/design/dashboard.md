@@ -719,8 +719,9 @@ token. Static files need no token (they hold no data, §4.6); every `/api/` rout
 ### 5.1 Phase 1: one page
 
 One page, three parts: machine cards, the job table, and a job detail that opens below or in place of the table
-(`#job=<id>`). No separate Nodes or This Mac pages, no search, filters beyond "from" and "node", shortcuts or theme
-toggle in phase 1. Light and dark follow the system. The wireframes give content and order; §5.3 gives the look.
+(`#job=<id>`). No separate Nodes or This Mac pages, no search, filters beyond "from" and "node", or shortcuts in phase 1.
+Light and dark follow the system, with a toggle (the owner, 2026-11-14: it stores `mu.theme` in `localStorage`, which
+`theme.js` reads before first paint). The wireframes give content and order; §5.3 gives the look.
 
 ```
  μ dashboard                                                   ● 1 of 1 nodes online · updated 2 s ago
@@ -799,13 +800,36 @@ set.
 | Group | Tokens | Rule |
 |---|---|---|
 | Neutral colour | `bg`, `surface`, `surface-raised`, `border`, `border-strong`, `text`, `text-muted`, `text-faint` | A grey scale (Tailwind's zinc as the starting point); light: white surfaces on a near-white page; dark: near-black page, surfaces one step lighter. Separation by 1 px borders, not shadows |
-| Accent | `accent`, `accent-muted`, `focus-ring` | One blue, for links, selection and focus only |
-| State colour | `running` blue, `queued` grey-violet, `succeeded` green, `failed` red, `oom` red, `timeout` amber, `cancelled` grey, `stale` and `offline` grey, `refused` red, `attention` amber | Always with an icon and a word (§5.1 rules). Text and icons ≥ 4.5:1 contrast, other marks ≥ 3:1, in both themes (axe, D26) |
-| Chart colour | `series-cores`, `series-mem`, `series-cache` (the memory colour, lighter), `limit` (`text-muted`, dashed) | Same meaning on every chart. The limit line is neutral; the memory series turns `attention` above 90 % of the limit |
+| Accent | `brand`, `on-brand`, `accent`, `accent-text`, `accent-muted`, `focus-ring` | Martand's orange, used sparingly (the owner, 2026-11-14): the μ mark, the focused or selected element, the primary action (the copy-command button) and the `running` state, never a large fill and never an error. Values below |
+| State colour | `running` orange (`accent-text`), `queued` grey, `succeeded` restrained green, `failed` red, `oom` red, `timeout` amber, `cancelled` grey, `stale` and `offline` grey, `refused` red, `attention` amber | Always with an icon and a word (§5.1 rules). Text and icons ≥ 4.5:1 contrast, other marks ≥ 3:1, in both themes (axe, D26) |
+| Chart colour | `series-cores` (the text colour), `series-mem` (`text-muted`), `series-cache` (lighter grey), `limit` (`text-muted`, dashed) | Same meaning on every chart. The limit line is neutral; the memory series turns `attention` above 90 % of the limit |
 | Type | `font-sans` (system UI: `-apple-system`, `Segoe UI`, …), `font-mono` (`ui-monospace`, SF Mono, Menlo); sizes 12 / 13 / 14 / 16 / 20 px | No web fonts. Body 14 px, tables and figures 13 px, metadata 12 px. Ids, numbers and logs in monospace with `tabular-nums` |
 | Space | 4 px steps: 4, 8, 12, 16, 24, 32 | Table rows 32 px; card padding 12–16 px |
 | Shape | radius 6 px (cards, inputs), 4 px (badges) | — |
 | Motion | 120 ms fades only | None under `prefers-reduced-motion`; numbers never animate |
+
+**Palette (the owner's colours, 2026-11-14: "the colors for Martand is orange, but mostly black and white; orange is
+used sparingly and in a tasteful manner").** Monochrome with one orange. The values live in
+`dashboard/src/styles/tokens.css`; the contrast figures are WCAG 2 ratios against `bg`, `surface` and `surface-raised`
+(the lowest of the three), checked by `dashboard/test/contrast.test.ts` (D43, the tokens' part).
+
+| Token | Light | Dark | Use and contrast |
+|---|---|---|---|
+| `bg` / `surface` / `surface-raised` | `#FAFAFA` / `#FFFFFF` / `#F4F4F4` | `#000000` / `#0B0B0B` / `#161616` | true black and white, one step apart; separation by 1 px `border` (`#E5E5E5` / `#232323`), `border-strong` (`#D4D4D4` / `#333333`) |
+| `text` / `text-muted` | `#0A0A0A` / `#525252` | `#FAFAFA` / `#A3A3A3` | ≥ 7.1:1 |
+| `text-faint` | `#8A8A8A` | `#6B6B6B` | below 4.5:1 on purpose: decoration only, never information (the D26 fault `faint-text`) |
+| `brand` | `#F26B1D` | `#F26B1D` | Martand orange: the μ mark (wordmark, favicon) and the primary button's fill, with `on-brand` `#0A0A0A` text (6.5:1) |
+| `accent`, `focus-ring` | `#EB5E0B` | `#F26B1D` | orange marks: focus ring, the selected row's bar, the running icon; ≥ 3.1:1 (light), ≥ 5.9:1 (dark) |
+| `accent-text` (= `state-running`) | `#B8460F` | `#FF8A3D` | orange words ("running"); ≥ 4.9:1 / ≥ 7.7:1. The orange on white is darker than the brand, which is 3.0:1 there |
+| `accent-muted` | `#FFF1E8` | `#24140A` | the selected row's tint, the only orange area |
+| `state-succeeded` | `#1B7F3B` | `#5BD18B` | ≥ 4.6:1 / ≥ 9.4:1 |
+| `state-failed`, `-oom`, `-refused` | `#C81E3A` | `#FF5C6C` | a crimson red, kept apart from the orange; ≥ 5.2:1 / ≥ 6.0:1 |
+| `state-timeout`, `-attention` | `#8A6100` | `#EAB308` | amber leaning yellow, kept apart from the orange; ≥ 5.0:1 / ≥ 9.4:1 |
+| `state-queued`, `-cancelled`, `-stale`, `-offline` | `text-muted` | `text-muted` | grey |
+| `series-cores` / `series-mem` / `series-cache` / `series-limit` | `#0A0A0A` / `#525252` / `#858585` / `#525252` | `#FAFAFA` / `#A3A3A3` / `#6B6B6B` / `#A3A3A3` | lines ≥ 3.3:1; the memory series turns `state-attention` above 90 % of the limit |
+
+Type: the system font stack (no web font, so nothing is fetched and the CSP needs no `font-src`); ids, numbers and
+logs in the system monospace with `tabular-nums`. The favicon is the μ mark in orange on black.
 
 Every chart and state colour pair (series on `surface`, state text and icon on `surface` and on its badge background)
 is checked for contrast in both themes by a Vitest test that computes it from `tokens.css` (D43), because axe cannot
@@ -1271,9 +1295,9 @@ reaches the PC only through a release and its auto-update, which is failing toda
    step 2's release, because the dashboard's old-node polling adds lines from 1a on (§4.3) and step 2's is the first
    release that can reach the node; job archiving can follow later.
 10. **History length** (phase 2). Mac: raw 48 h, 1-min rollups 90 days. Node host history 7 days. Enough?
-11. **The look** (revision 2). The default is a neutral, technical palette with one blue accent (§5.3). Should the
-    page carry Martand's colours or logo instead? If so, send the colour values and a logo file (SVG); they become
-    tokens and a file in the build, nothing fetched.
+11. **The look** (revision 2). **Answered 2026-11-14:** Martand's colours, mostly black and white with orange used
+    sparingly (§5.3, palette). A logo file (SVG), if the owner sends one, becomes a file in the build, nothing fetched;
+    until then the μ mark is drawn in the brand orange.
 12. **Release 1a on its own?** Recommended: yes. It shows every job by node with its state and log, and This Mac's
     load, weeks before the node figures can arrive (1b waits for the scheduler and the auto-update fix). The node card
     says plainly that live statistics come with the next node update.

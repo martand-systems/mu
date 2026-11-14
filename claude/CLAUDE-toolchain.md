@@ -153,6 +153,12 @@ A submit that failed after printing a job id (`job_id` in the JSON): `mu submit 
 After `succeeded`: `mu fetch`, validate as for a local run (the validation policy applies), and commit
 `runs/<id>.json` with the results it backs.
 
+**The dashboard** (`mu dashboard`, a read-only local page of jobs, nodes and this Mac's load). When a remote job
+starts, mention once the `dashboard:` link that `mu submit` prints (`--json`: `dashboard.url`; it carries no token,
+and appears only while the dashboard runs). Run `mu dashboard open` only when the user asks: it opens their browser.
+Keep using `mu status|log|fetch … --json` for everything you do; never read the dashboard's API (`/api`), its token
+or `$MU_HOME/run/dashboard.*`, and never start `mu dashboard serve` yourself (`mu dashboard on|off` only when asked).
+
 ## Validation
 
 The company validation policy (benchmark first, mesh convergence, no singular peaks, hand checks, stated assumptions, evidence
