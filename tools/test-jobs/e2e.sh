@@ -61,7 +61,7 @@ asmu() { sudo -u mu -H env -u XDG_CONFIG_HOME XDG_RUNTIME_DIR="/run/user/$MU_UID
 mu_node() { asmu "$NODEH/bin/mu" "$@"; }
 close_master() { asws ssh -F "$WCFG" -o "ControlPath=\"$WCP\"" -O exit mu-office-pc >/dev/null 2>&1 || true; }
 wssh() { asws ssh -F "$WCFG" -o ControlPath=none "$@"; }
-audit_lines() { sudo wc -l < /srv/mu/audit.log 2>/dev/null || echo 0; }
+audit_lines() { sudo sh -c 'wc -l < /srv/mu/audit.log' 2>/dev/null || echo unreadable; }   # root reads it (mu's 0700 folder)
 nfault() {   # nfault NAMES: the node's faults (root-owned /etc/mu/test-fault); the runner restarts to read them
   if [ -n "$*" ]; then echo "$*" | sudo tee /etc/mu/test-fault >/dev/null; sudo chmod 644 /etc/mu/test-fault
   else sudo rm -f /etc/mu/test-fault; fi
