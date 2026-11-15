@@ -68,9 +68,11 @@ submitted from. It prints the snapshot it sends, then the job id and its state:
 |---|---|---|
 | `--on NODE` | the node | the only paired node (needed when several are paired) |
 | `--name TEXT` | a label for the job | the command |
-| `--mem SIZE` | memory limit (`512M`, `16G`; powers of 1024). Above it the job ends `oom` | the node's RAM minus 2 GB |
-| `--time DUR` | wall-time limit (`90s`, `30m`, `6h`, `2d`). Then it ends `timeout` | 12 h |
-| `--cores N` | sets `$MU_JOB_CORES` only; pass it to the solver yourself (`mpirun -np $MU_JOB_CORES`, `OMP_NUM_THREADS=$MU_JOB_CORES`). Not enforced | all physical cores |
+| `--cores N` | cores granted: the job is pinned to N CPUs, `$MU_JOB_CORES`, `OMP_NUM_THREADS` and the BLAS/CalculiX/Python thread variables are N. Several jobs run at once, each on its grant | the whole node (the job runs alone) |
+| `--mem SIZE` | memory granted (`512M`, `16G`; powers of 1024). Above it the job ends `oom` | the node's RAM minus 3 GB |
+| `--time DUR` | wall-time limit (`90s`, `30m`, `6h`, `2d`). Then it ends `timeout`. A realistic one lets the job start ahead of a waiting big job | 12 h |
+| `--quick` | a quick check: 1 core, 512 MB, 10 min, starts at once even on a full node (not with `--cores/--mem/--time`) | |
+| `--priority CLASS` / `--hold` | the job's band (`high`, `urgent` need `--others`) / submit it held (`mu release` starts it) | `normal` |
 | `--output GLOB` | an output to bring back, repeatable | `[compute] outputs` in `mu.toml` |
 | `--wait [--timeout S]` | then wait for the result, as `mu status ID --wait` | |
 | `--no-rerun` | do not re-run after an interrupted attempt | re-run once |

@@ -8,6 +8,7 @@
 #   tools/test-jobs/e2e.sh probe        the probe of what §18 only read (the first CI job)
 #   tools/test-jobs/e2e.sh all          set-up, every row, then every row with its fault, then the host script's
 #                                       uninstall and reinstall (H rows: the node is made by mu-wsl2-distro.sh itself)
+#   tools/test-jobs/e2e.sh sched        set-up, then the scheduler's rows and their faults (tools/test-jobs/e2e-sched.sh)
 #   ONLY="R01 R06" tools/test-jobs/e2e.sh all      a subset (set-up always runs)
 # Results: .scratch/jobs/results.tsv and summary.md; logs in .scratch/jobs/logs/.
 set -uo pipefail
@@ -36,7 +37,7 @@ must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row
   eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
   else case "$M" in   # a row that could not even start shows nothing about the fault
-    "invite failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
+    "invite failed"*|"drain failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
     *) row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M" ;; esac; fi
   eval "$4"
 }
@@ -1028,8 +1029,11 @@ qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_no
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
 EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
 EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
-check_ran() {
+# the scheduler's rows (docs/design/scheduler.md §13): tools/test-jobs/e2e-sched.sh, run by `e2e.sh sched`
+. "$ROOT/tools/test-jobs/e2e-sched.sh"
+check_ran() {   # [ROWS FAULTS]: the expected rows and faults (default: those of `all`)
   local want got
+  [ $# = 2 ] && { EXPECT_ROWS="$1"; EXPECT_FAULTS="$2"; }
   want="$(printf '%s\n' $EXPECT_ROWS | sort | tr '\n' ' ')"
   got="$(awk -F'\t' '$1 == "PASS" || $1 == "FAIL" { print $2 }' "$WORK/results.tsv" | sort -u | tr '\n' ' ')"
   [ "$want" = "$got" ] && row PASS Z1 "every expected row ran" "$(printf '%s' "$want" | wc -w | tr -d ' ') rows" \
@@ -1069,7 +1073,9 @@ case "$MODE" in
   all) if setup; then probe; host_rows; rows; pair_rows; [ "${NO_FAULTS:-0}" = 1 ] || { faults; host_faults; pair_faults; }; host_cycle
          run_row Q13 "mu compute remove: the Mac forgets the node and deletes its relay client; the node's tunnel is refused" q_remove
          [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran; fi ;;
-  *) echo "usage: e2e.sh probe|all" >&2; exit 2 ;;
+  sched) if setup && sched_setup; then sched_rows; [ "${NO_FAULTS:-0}" = 1 ] || sched_faults
+           [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran "S0 S1 S2 S3 S4 $SCHED_ROWS" "$SCHED_FAULTS"; fi ;;
+  *) echo "usage: e2e.sh probe|all|sched" >&2; exit 2 ;;
 esac
 collect; summary
 [ "$N_FAIL" = 0 ]

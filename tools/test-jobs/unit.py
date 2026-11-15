@@ -575,7 +575,9 @@ Result=success
 ActiveState=%s
 SubState=x
 Result=%s
-' "$2" "$3" ;;
+ActiveEnterTimestampMonotonic=%s
+ControlGroup=/user.slice/test/%s
+' "$2" "$3" "${4:-0}" "$1" ;;
   is-active) echo active ;;
   *) echo "$@" >> "$STUB_DIR/calls" ;;
 esac
@@ -985,11 +987,22 @@ def t_pins(repo):
           dvv == [version] and dgz == [lin] and len(durl) == 1 and durl[0] in urls, (dvv, dgz, durl))
 
 
+def t_sched_runner():
+    base = tmpdir("sched-runner")
+    unit_sched.t_sched_runner(base, SYSTEMCTL_STUB)
+    shutil.rmtree(base, ignore_errors=True)
+
+
+sys.path.insert(0, HERE)
+import unit_sched  # noqa: E402
+unit_sched.check = check
+
 SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs": t_globs, "proxy": t_proxy,
             "classify": t_classify, "sshconfig": t_sshconfig, "controlpath": t_controlpath, "unpack": t_unpack,
             "untrusted-node": t_untrusted_node, "runner": t_runner,
             "snapshot-alone": t_snapshot_alone, "snapshot-content": t_snapshot_content,
-            "snapshot-report": t_snapshot_report}
+            "snapshot-report": t_snapshot_report, "sched": unit_sched.t_sched, "sched-sim": unit_sched.t_sched_sim,
+            "sched-runner": t_sched_runner}
 
 if __name__ == "__main__":
     sec = sys.argv[1]

@@ -20,6 +20,8 @@ MU_POLL_S (seconds between status polls, default 5), MU_JOBS_FAULT (comma-separa
   dot-globs          fetch accepts outputs under .git/ and .mu/ and lets a wildcard match hidden names
   node-hint          a node's refusal sets `next`, and its extra fields pass through unfiltered
   no-size-guard      fetch writes a member to its end before it compares the size (no early stop)
+  old-workstation    submit sends a spec without "sched" (what a workstation older than the scheduler sends)
+  no-capacity-check  submit does not compare the request with the node's capacity (the node must refuse it)
 """
 import argparse
 import base64
@@ -625,8 +627,25 @@ NODE_REFUSALS = {
     "not-installed": ("{n}'s gate is not set up", "tell the user; on the PC: " + PC_ROOT + " mu-wsl2-distro install"),
     "internal": ("{n} failed inside (an internal error)", "retry once; on the PC: " + PC_ROOT + " mu-wsl2-distro "
                  "status, and /srv/mu/audit.log"),
+    # the scheduler (docs/design/scheduler.md §4.3, §20.9)
+    "too-big": ("the job asks for more than {n} has", "size it to the node: its capacity is in `capacity` (mu compute "
+                "status {n}); do not retry unchanged"),
+    "quick-with-flags": ("--quick cannot take --cores, --mem or --time", "--quick alone (1 core, 512 MB, 10 min), or "
+                         "the flags without it"),
+    "other-project": ("{n} refused: the operation touches another project's job (another Claude session's work)",
+                      "only if the owner asked: the same command with --others"),
+    "not-allowed": ("{n} refused: this workstation may not arrange that job (another workstation's, or an owner's act)",
+                    "ask the owner to run it from the owner's workstation; do not retry"),
+    "not-queued": ("job {j} is not queued or held: it can no longer be arranged", "mu queue; mu cancel {j} stops a "
+                   "running job"),
+    "reference-not-queued": ("the job named by --before/--after is not queued or held", "mu queue (pick a queued "
+                             "job), or --front / --back"),
+    "already-finished": ("job {j} has already finished", "mu status {j}"),
+    "busy": ("{n}'s queue lock was not free within 2 minutes (a checkout); nothing was changed", "retry in a minute"),
+    "update-failed": ("{n} could not start its update", "mu compute status {n}; the node's journal has the details"),
 }
-NODE_EXTRA_KEYS = ("installed", "largest", "field", "node_protocol", "node_mu", "argument", "verb", "state")
+NODE_EXTRA_KEYS = ("installed", "largest", "field", "node_protocol", "node_mu", "argument", "verb", "state", "capacity",
+                   "would_touch")
 ERROR_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
 
@@ -646,7 +665,7 @@ def node_error(rc, text, name, job_id=None):
         ans = {}
     code = proto.NODE_TO_CLIENT.get(rc, proto.EXIT_ERROR)
     err = ans.get("error") if isinstance(ans.get("error"), str) and ERROR_NAME.match(ans.get("error")) else "node-error"
-    if err == "not-finished":
+    if err == "not-finished" or err in proto.USAGE_ERRORS:
         code = proto.EXIT_USAGE
     if err in ("protocol-mismatch", "key-revoked"):
         code = proto.EXIT_REFUSED
@@ -976,6 +995,10 @@ def cmd_compute_status(a):
                     h["hw"].get("cpu_model"), h["hw"].get("cores_physical"), h["hw"].get("mem_total_kb", 0) / 1048576.0,
                     d.get("free_gb"), d.get("where"), d.get("min_free_gb"), "enforced" if lim.get("memory") else
                     "NOT enforced (jobs are refused)", h.get("last_stop")))
+                from mu import qctl
+                print("  " + qctl.capacity_line(h))
+                for w in h.get("warnings") or []:
+                    print("  WARNING: %s" % w)
             else:
                 sys.stderr.write("%s: %s\n    next: %s\n" % (r["node"], r["message"], r["next"]))
     return worst
@@ -1316,12 +1339,19 @@ def cmd_submit(a, command):
             if a.cores < 1:
                 raise MuError(proto.EXIT_USAGE, "bad-cores", "--cores must be at least 1", "e.g. --cores 8")
             limits["cores"] = a.cores
+        if a.quick:   # the express lane (docs/design/scheduler.md §3.4)
+            if a.cores is not None or a.mem or a.time:
+                raise MuError(proto.EXIT_USAGE, "quick-with-flags", "--quick is 1 core, 512 MB, 10 min: it cannot take "
+                              "--cores, --mem or --time", "--quick alone for a check, or --cores/--mem/--time without it")
+            limits["quick"] = True
         if any("\0" in x for x in command):
             raise MuError(proto.EXIT_USAGE, "bad-command", "the command holds a NUL byte", "remove it from the command")
     conn = Conn(conf)
     ans = hello(conn)                        # nothing of the project is made or sent before the node says yes
     check_node(ans, node_name, pin, job_id)
+    sched_note = None
     if not a.resume:
+        sched_note = check_sizes(a, ans, node_name, limits)
         if not a.allow_large:
             total, big, bigp = uncommitted_size(prj.root)
             if total > LARGE_UNTRACKED:
@@ -1338,14 +1368,22 @@ def cmd_submit(a, command):
         pid = prj.id
         if fault("full-push"):   # a repository of its own on the node for every job: a full copy each time
             pid = "%s-%s" % (pid[:-13], hashlib.sha256(job_id.encode()).hexdigest()[:12])
-        spec = {"schema": 1, "job_id": job_id, "name": a.name or " ".join(command)[:80], "project": prj.name,
+        spec = {"schema": 1, "sched": 0 if fault("old-workstation") else 1, "job_id": job_id, "name": a.name or " ".join(command)[:80], "project": prj.name,
                 "project_id": pid, "snapshot": snap["snapshot"], "tree": snap["tree"], "head": snap["head"],
                 "dirty": snap["dirty"], "mu_version": prj.pin, "argv": command, "cwd": prj.rel_cwd,
                 "outputs": outputs, "limits": limits, "rerun": not a.no_rerun,
                 "submitted": {"at": proto.iso(), "host": socket.gethostname().split(".")[0], "user": getpass.getuser(),
                               "mu": os.environ.get("MU_INFRA_VERSION", "?"), "path": "relay"}}
+        for k, v in (("priority", a.priority), ("hold", a.hold or None), ("others", a.others or None)):
+            if v:
+                spec[k] = v
         rec = {"schema": 1, "job_id": job_id, "node": node_name, "state": "sending", "spec": spec,
                "warnings": {"gitlinks": snap["gitlinks"], "lfs": snap["lfs"]}}
+        if sched_note:
+            rec["note"] = sched_note
+        hint = qctl_hint(prj.root, spec["name"], a)
+        if hint:
+            rec["size_hint"] = hint
         prj.write_job_record(rec)
     try:
         return send_job(a, prj, conn, conf, rec, spec, job_id, node_name)
@@ -1356,6 +1394,45 @@ def cmd_submit(a, command):
             e.hint = (e.hint + "; then " if e.hint else "") + "mu submit --resume %s (the same job; never a new " \
                 "submit)" % job_id
         raise
+
+
+def check_sizes(a, ans, node_name, limits):
+    """Before the snapshot (scheduler.md §4.3, §11, §20.12): a request larger than a node with the scheduler is refused
+    here (too-big, exit 2: nothing is sent); an older node gets --quick as --cores 1 --mem 512M --time 10m, and
+    --priority/--hold, which it would ignore, are refused (node-too-old, exit 6). -> a note for the answer, or None."""
+    if "sched" in (ans.get("features") or []):
+        cap = ans.get("capacity") or {}
+        big = []
+        if isinstance(cap.get("cores"), int) and (limits.get("cores") or 0) > cap["cores"]:
+            big.append("--cores %d (the node has %d)" % (limits["cores"], cap["cores"]))
+        if isinstance(cap.get("mem_bytes"), int) and (limits.get("mem_bytes") or 0) > cap["mem_bytes"]:
+            big.append("--mem %s (the node has %s for jobs)" % (proto.human_size(limits["mem_bytes"]),
+                                                                proto.human_size(cap["mem_bytes"])))
+        if big and not fault("no-capacity-check"):
+            raise MuError(proto.EXIT_USAGE, "too-big", "the job asks for more than %s has: %s. Nothing was sent" % (
+                node_name, "; ".join(big)), "the node takes at most --cores %s --mem %dM; do not retry unchanged" % (
+                cap.get("cores"), (cap.get("mem_bytes") or 0) >> 20), capacity=cap)
+        return None
+    if a.priority or a.hold:
+        raise MuError(proto.EXIT_NODE_CANNOT, "node-too-old", "%s's μ has no queue control: --priority and --hold "
+                      "would be ignored, so nothing was sent" % node_name, "submit without them, or wait for %s's "
+                      "auto-update (mu compute status %s)" % (node_name, node_name))
+    if limits.pop("quick", None):
+        limits.update(cores=1, mem_bytes=512 << 20, time_s=600)
+        q = (ans.get("queue") or {})
+        return "%s runs one job at a time (μ older than the scheduler): --quick sent as --cores 1 --mem 512M --time " \
+            "10m, queued behind %s job(s)" % (node_name, (q.get("running") or 0) + (q.get("queued") or 0))
+    return None
+
+
+def qctl_hint(root, name, a):
+    from mu import qctl
+    given = [k for k, v in (("cores", a.cores), ("mem", a.mem), ("time", a.time)) if v] + (["cores", "mem", "time"]
+                                                                                            if a.quick else [])
+    try:
+        return qctl.size_hint(root, name, given)
+    except Exception:  # noqa: a hint must never stop a submit
+        return None
 
 
 def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
@@ -1386,6 +1463,12 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
     out = {"ok": True, "exit": 0, "job_id": job_id, "node": node_name, "state": res.get("state"),
            "position": res.get("position"), "duplicate": bool(res.get("duplicate")), "snapshot": spec["snapshot"],
            "dirty": spec["dirty"], "warnings": warnings}
+    for k in ("sizing", "waiting_for", "starts_by", "place", "band", "held", "delays"):   # the scheduler's (§7.2)
+        if k in res:
+            out[k] = res[k]
+    if rec.get("note"):
+        out["note"] = rec["note"]
+    out["next"] = rec.get("size_hint") or "mu status %s --wait --timeout 500" % job_id
     if a.wait:
         a.job_id, a.on, a.submitted = job_id, node_name, out
         if not a.json:
@@ -1394,9 +1477,20 @@ def send_job(a, prj, conn, conf, rec, spec, job_id, node_name):
     if a.json:
         proto.emit_json(out)
     else:
-        pos = " (position %s)" % res["position"] if res.get("position") else ""
-        print("%s %s on %s%s%s" % (job_id, res.get("state"), node_name, pos, " — already known: not sent twice" if
-                                   res.get("duplicate") else ""))
+        from mu import qctl
+        pos = " #%s" % res["position"] if res.get("position") else ""
+        sz = res.get("sizing") or {}
+        size = " · %s cores, %s, %s (%s)" % (sz.get("cores"), qctl.gb(sz.get("mem_bytes")), qctl.dur(sz.get("time_s")),
+                                             sz.get("why")) if sz else ""
+        print("%s %s%s on %s%s%s" % (job_id, res.get("state"), pos, node_name, size, " — already known: not sent twice"
+                                     if res.get("duplicate") else ""))
+        w = qctl.state_words(dict(res, job_id=job_id))
+        if w:
+            print("  " + w)
+        if out.get("note"):
+            print("  note: " + out["note"])
+        if rec.get("size_hint"):
+            print("  next: " + rec["size_hint"])
         print("  mu status %s --wait --timeout 500 · mu log %s --tail 20 · mu fetch %s" % (job_id, job_id, job_id))
     return 0
 
@@ -1434,6 +1528,10 @@ def describe(s):
         bits.append("position %s" % s["position"])
     if s.get("exit_code") is not None:
         bits.append("exit %s" % s["exit_code"])
+    from mu import qctl
+    w = qctl.state_words(s)   # the scheduler's fields (an older node sends none)
+    if w:
+        bits.append(w)
     if s.get("note"):
         bits.append(s["note"])
     return " · ".join(bits)
@@ -1858,7 +1956,8 @@ def run_record(res, node, prj):
             "queued_at": res.get("queued_at"), "started_at": res.get("started_at"), "ended_at": res.get("ended_at"),
             "wall_s": res.get("wall_s"), "limits": res.get("limits"), "outputs": res.get("outputs"),
             "outputs_missing": res.get("outputs_missing"), "log": res.get("log"), "toolchain": res.get("toolchain"),
-            "node": res.get("node"), "unit": res.get("unit"), "path": "relay",
+            "node": res.get("node"), "unit": res.get("unit"), "path": "relay", "usage": res.get("usage"),
+            "grant": res.get("grant"),
             "archive": "%s:/srv/mu/jobs/%s/work" % (node, res["job_id"]), "fetched_at": proto.iso(),
             "result_sha256": res.get("sha256")}
 
@@ -1927,6 +2026,8 @@ COMPUTE_HELP = """mu compute: the compute nodes paired with this computer (docs/
   mu compute invite --cancel ID               cancel it
   mu compute list        the paired nodes and their last answer (no network)
   mu compute status [NODE]   ask the node(s): hello through the relay (exit 0 = up)
+  mu compute update NODE [--wait] [--timeout S]   install the latest μ release on the node now, beside its jobs
+                             (mu autoupdate run --force in a unit of its own; the default moves between job starts)
   mu compute remove NODE [--keep-relay-client]   forget a node here (prints the command that revokes this computer's
                              key there); deletes its relay client when this computer holds the admin token
   mu compute proxy NODE      ssh's ProxyCommand (not for people)
@@ -1972,6 +2073,12 @@ def main(cmd, args):
         if sub == "invite":
             from mu import invite
             return invite.cmd_invite(invite.invite_parser().parse_args(rest))
+        if sub == "update":
+            from mu import qctl
+            p.add_argument("node")
+            p.add_argument("--wait", action="store_true", help="wait until the node's update has a result")
+            p.add_argument("--timeout", type=float, metavar="S", help="with --wait (default 3600)")
+            return qctl.cmd_compute_update(p.parse_args(rest))
         raise MuError(2, "usage", "unknown: mu compute %s" % sub, "mu compute invite|add|list|status|remove (mu compute "
                       "--help)")
     if cmd == "submit":
@@ -1981,10 +2088,18 @@ def main(cmd, args):
                    "usage: mu submit [options] -- CMD ARG...   (the node runs `mu run CMD ARG...`)")
         p.add_argument("--on", metavar="NODE", help="the paired node (needed when several are paired)")
         p.add_argument("--name", help="a label for the job (default: the command)")
-        p.add_argument("--mem", metavar="SIZE", help="memory limit, e.g. 16G (default: node RAM - 2 GB; above it: oom)")
-        p.add_argument("--time", metavar="DUR", help="wall-time limit, e.g. 6h (default 12h; then: timeout)")
-        p.add_argument("--cores", type=int, metavar="N", help="sets $MU_JOB_CORES for the job (default: all physical "
-                       "cores); pass it to the solver yourself (mpirun -np $MU_JOB_CORES); not enforced")
+        p.add_argument("--mem", metavar="SIZE", help="memory granted, e.g. 16G (default: node RAM - 3 GB; above it: oom)")
+        p.add_argument("--time", metavar="DUR", help="wall-time limit, e.g. 6h (default 12h; then: timeout). A "
+                       "realistic --time lets the job start ahead of a waiting big one")
+        p.add_argument("--cores", type=int, metavar="N", help="cores granted to the job (CPUs pinned, thread variables "
+                       "set; $MU_JOB_CORES); default: the whole node")
+        p.add_argument("--quick", action="store_true", help="a check or diagnostic: 1 core, 512 MB, 10 min; starts at "
+                       "once even when the node is full (not with --cores/--mem/--time)")
+        p.add_argument("--priority", choices=("urgent", "high", "normal", "low"), help="the job's band (default "
+                       "normal; high and urgent need --others; urgent: the owner's key only)")
+        p.add_argument("--hold", action="store_true", help="submit held: it keeps its place, starts after mu release")
+        p.add_argument("--others", action="store_true", help="with --priority high|urgent: it may pass other "
+                       "projects' jobs (only when the owner asked)")
         p.add_argument("--output", action="append", default=[], metavar="GLOB", help="output glob, repeatable "
                        "(default: [compute] outputs in mu.toml)")
         p.add_argument("--no-rerun", action="store_true", help="do not re-run after an interrupted attempt")

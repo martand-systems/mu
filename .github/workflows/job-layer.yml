@@ -6,6 +6,8 @@
 #                           fail) and local.sh (a user-level sshd and chisel, stub systemd); macOS for bash 3.2 and
 #                           the Mac's OpenSSH; Linux also runs the other suites bin/mu and the installer have
 #   probe                   what §18 only read: systemd, cgroup v2, delegation, an oom-kill, mu-sshd with PAM
+#   sched                   the scheduler's rows (docs/design/scheduler.md §13, release 1: concurrency, queue control,
+#                           a release installed and switched while jobs run) on the same kind of node, each with its fault
 #   e2e                     every row of §16 on real systemd through the relay, then each row with its fault; the
 #                           node is paired by one code (docs/design/pairing.md §13.4: S3 and the Q rows, each Q row
 #                           shown to fail with its fault: the node's, the Mac's or the relay's, mu-relayd -tags faults)
@@ -16,7 +18,7 @@
 name: job-layer
 on:
   push:
-    branches: ["job-layer", "pairing"]
+    branches: ["job-layer", "pairing", "scheduler-r1"]
     paths:
       - "src/mu/**"
       - "tools/test-pair/**"
@@ -132,6 +134,30 @@ jobs:
             .scratch/jobs/results.tsv
             .scratch/jobs/logs/
             .scratch/jobs/out/
+            .scratch/s4/logs/
+          include-hidden-files: true
+          retention-days: 14
+
+  sched:
+    name: scheduler end to end (scheduler.md §13 rows, then each with its fault)
+    needs: probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: e2e.sh sched
+        run: tools/test-jobs/e2e.sh sched
+      - name: Summary
+        if: always()
+        run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: job-layer-sched
+          path: |
+            .scratch/jobs/summary.md
+            .scratch/jobs/results.tsv
+            .scratch/jobs/logs/
             .scratch/s4/logs/
           include-hidden-files: true
           retention-days: 14

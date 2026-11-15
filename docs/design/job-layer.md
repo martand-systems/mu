@@ -589,11 +589,15 @@ One loop, once a second, holding `/srv/mu/lock` for each change:
 1. First pass only: empty `tmp/`, run the recovery table (§9.3).
 2. If a job is `running`: read its unit (`systemctl --user show mu-job-<id>.service -p LoadState,ActiveState,Result`).
    Still active: nothing. Ended: classify (§8.5).
-3. Else take the queued job with the smallest `accepted_ns`: make `work/` (§6.4), write `state.json = running,
-   attempt n`, then start the unit (§8.4). A checkout or start that fails is `failed` with the reason.
-4. Keep `$MU_HOME/state/busy` (the runner's pid on its first line) while any job is queued or running; remove it
-   when none is. That is the contract `mu autoupdate` already has.
-5. Idle and `$MU_HOME/default` is not the version this runner started under: exit 0. systemd starts the new code.
+3. **Since the scheduler (docs/design/scheduler.md, release 1)** several jobs run at once: each pass, `sched.plan()`
+   decides from the grants in the running jobs' `state.json` which queued jobs start (admission by cores and
+   memory, a reservation for the head with EASY backfill, the `--quick` express lane, priority bands and held jobs
+   in the walk of `/srv/mu/queue.json`). Each start makes `work/` (§6.4), writes `state.json = running, attempt n`
+   with its grant, then starts the unit (§8.4). A checkout or start that fails is `failed` with the reason.
+4. Keep `$MU_HOME/state/busy` (the runner's pid on its first line) while any job is queued or running (held jobs
+   alone do not count); remove it when none is. Hold `$MU_HOME/state/start.lock` while starting jobs.
+5. `$MU_HOME/default` is not the version this runner started under: exit 0 between two passes, idle or not (no job
+   is starting then); systemd starts the new code, which adopts the running units (scheduler.md §9).
 
 ### 8.4 The job unit
 
@@ -682,7 +686,10 @@ script). fsync itself is not tested: the tests kill writers (SIGKILL), they do n
 ## 10. Limits and queue
 
 One running job, first in first out, queue on the node. FEA and CFD want every core and most of the memory, and a
-queue on a laptop that sleeps is worth less than one on the node.
+queue on a laptop that sleeps is worth less than one on the node. **Superseded by the scheduler**
+(docs/design/scheduler.md, release 1): several jobs run at once, each on the cores and memory it was granted; a job
+without flags is still the whole node and runs alone; `MemoryMax` is the grant, out of the node's memory minus 3 GiB
+(2 GiB for the system, 1 GiB for `--quick` jobs).
 
 | Property | Value | Why |
 |---|---|---|
@@ -692,7 +699,7 @@ queue on a laptop that sleeps is worth less than one on the node.
 | `OOMPolicy=kill` | | one process killed for memory ends the whole job, the shim included, so the outcome is one: `oom` |
 | `TasksMax` | 4096 | |
 | `KillMode=control-group`, `TimeoutStopSec=5` | | cancel and shutdown end MPI ranks and other children within the 8 s the host adapter gives user services |
-| `MU_JOB_CORES` | `--cores`, else the physical cores | an environment variable only: no μ wrapper reads it yet, so the job passes it on itself (`mpirun -np $MU_JOB_CORES`, `OMP_NUM_THREADS=$MU_JOB_CORES`). No CPU quota: with one job it adds nothing |
+| `MU_JOB_CORES` | `--cores`, else the whole node | since the scheduler: the grant. The shim pins the job to the grant's CPUs (`MU_JOB_CPUS`) and the thread variables are set from it; express (`--quick`) units get `CPUQuota=100%` (scheduler.md §5, §6). `MemoryMax` and `RuntimeMaxSec` are the grant's |
 
 `--mem` takes `K`, `M`, `G` (powers of 1024); `--time` takes `s`, `m`, `h`, `d`.
 
@@ -757,7 +764,13 @@ against the user slice. Sandboxing (`ProtectHome`, `PrivateTmp`) is stage 3.
   still uses. On every accepted submit the node writes `pins/<project-id>/mu.toml` (`[mu] version = "<pin>"`) and
   adds that folder to `$MU_HOME/projects.txt`. The dispatcher's `pinned_versions` then keeps it; clean-up is also
   skipped while `state/busy` exists, which covers a queued job with an older pin.
-- The node's own code is the default version (§3). A switch of the default waits for `state/busy` to go.
+- The node's own code is the default version (§3). **Changed with the scheduler** (scheduler.md §9 "Version switch",
+  superseded 2026-11-14): a new release installs while jobs run and the default moves between two job starts (the
+  runner's `state/start.lock`); the runner restarts on it and adopts the running units; clean-up (gc) still waits
+  for `state/busy` to go, and keeps every version in `$MU_HOME/state/needed-versions` (the runner writes the μ
+  version of every queued, held and running job there: held jobs alone leave the node idle, and a project's pin moves
+  on with its next submit) and the default as it is then. `mu compute update NODE` starts that update from a
+  workstation (forced only from an owner key).
 
 ## 13. What needs root on the node
 
