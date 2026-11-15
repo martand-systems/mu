@@ -1,0 +1,76 @@
+/* The μ dashboard's design tokens (docs/design/dashboard.md §5.3), light and dark. Martand's colours: mostly black and
+   white, a neutral grey ramp, and ONE orange used sparingly: the brand mark, the focused or selected element, the
+   primary action (the copy-command button) and the "running" state. Never a large fill, never an error. Errors are a
+   distinct red, success a restrained green; every state colour goes with an icon and a word.
+   Contrast (WCAG 2.x, computed by D43 from this file): text tokens >= 4.5:1 and marks >= 3:1 on bg, surface and
+   surface-raised, in both themes; text-faint is below 4.5:1 on purpose and is never used for information. */
+:root,
+[data-theme="light"] {
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --surface-raised: #f4f4f4;
+  --border: #e5e5e5;
+  --border-strong: #d4d4d4;
+  --text: #0a0a0a;
+  --text-muted: #525252;
+  --text-faint: #8a8a8a;
+
+  --brand: #f26b1d;            /* Martand orange: the μ mark, the primary button's fill (with --on-brand text) */
+  --on-brand: #0a0a0a;         /* text on --brand: 6.5:1 */
+  --accent: #eb5e0b;           /* orange marks on light surfaces (focus ring, selected bar, running icon): >= 3.1:1 */
+  --accent-text: #b8460f;      /* orange words on light surfaces ("running"): >= 4.9:1 */
+  --accent-muted: #fff1e8;     /* the selected row's tint: the only orange area, kept faint */
+  --focus-ring: var(--accent);
+
+  --state-running: var(--accent-text);
+  --state-queued: var(--text-muted);
+  --state-succeeded: #1b7f3b;
+  --state-failed: #c81e3a;
+  --state-oom: #c81e3a;
+  --state-timeout: #8a6100;
+  --state-cancelled: var(--text-muted);
+  --state-stale: var(--text-muted);
+  --state-offline: var(--text-muted);
+  --state-refused: #c81e3a;
+  --state-attention: #8a6100;
+
+  --series-cores: #0a0a0a;
+  --series-mem: #525252;
+  --series-cache: #858585;
+  --series-limit: #525252;
+}
+
+[data-theme="dark"] {
+  --bg: #000000;
+  --surface: #0b0b0b;
+  --surface-raised: #161616;
+  --border: #232323;
+  --border-strong: #333333;
+  --text: #fafafa;
+  --text-muted: #a3a3a3;
+  --text-faint: #6b6b6b;
+
+  --brand: #f26b1d;
+  --on-brand: #0a0a0a;
+  --accent: #f26b1d;           /* >= 5.9:1 on the dark surfaces */
+  --accent-text: #ff8a3d;      /* >= 7.7:1 */
+  --accent-muted: #24140a;
+  --focus-ring: var(--accent);
+
+  --state-running: var(--accent-text);
+  --state-queued: var(--text-muted);
+  --state-succeeded: #5bd18b;
+  --state-failed: #ff5c6c;
+  --state-oom: #ff5c6c;
+  --state-timeout: #eab308;
+  --state-cancelled: var(--text-muted);
+  --state-stale: var(--text-muted);
+  --state-offline: var(--text-muted);
+  --state-refused: #ff5c6c;
+  --state-attention: #eab308;
+
+  --series-cores: #fafafa;
+  --series-mem: #a3a3a3;
+  --series-cache: #6b6b6b;
+  --series-limit: #a3a3a3;
+}

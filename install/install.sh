@@ -33,7 +33,7 @@ set -Eeuo pipefail
 LAYER_FORMAT="mu-layer-2"     # bump when the way the env and CAM layers are built changes (forces new layer hashes)
 FLATPAK_FORMAT="mu-flatpak-2" # the same for flatpak app layers (2: built offline from the download cache, without the
                               # unpinned related refs). Other app layers are keyed by their archives' SHA-256 alone.
-DISPATCHER_REV=11              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
+DISPATCHER_REV=12              # must match MU_DISPATCHER_REV in bin/mu; bump on every change to bin/mu or bin/git-lfs
 
 RECIPE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -s)-$(uname -m)" in
@@ -264,7 +264,8 @@ rm -rf "${T:?}"
 mkdir -p "$T/bin" "$T/libexec" "$T/apps"
 touch "$T/.installing"
 mkdir -p "$T/recipe"
-( cd "$RECIPE" && tar --exclude .git --exclude __pycache__ --exclude .DS_Store --exclude './toolchain/pip-stubs/*/build' -cf - . ) \
+( cd "$RECIPE" && tar --exclude .git --exclude __pycache__ --exclude .DS_Store --exclude './toolchain/pip-stubs/*/build' \
+    --exclude ./dashboard/node_modules --exclude ./dashboard/test-results --exclude ./dashboard/playwright-report -cf - . ) \
   | ( cd "$T/recipe" && tar -xf - )
 R="$T/recipe"
 cp "$R/wrappers/$FAMILY/"* "$T/bin/"

@@ -4,3 +4,10 @@ __pycache__/
 /build/
 /dist/
 /.scratch/
+/dashboard/node_modules/
+/dashboard/test-results/
+/dashboard/playwright-report/
+# copies that a synced folder (iCloud's Desktop) makes of files it saw change ("index 2.html"); never committed.
+# D28 (--ignored) still flags them in a working copy that has them
+/share/dashboard/**/* [0-9]*
+/dashboard/**/* [0-9]*

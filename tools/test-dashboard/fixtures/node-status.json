@@ -1,0 +1,17 @@
+{
+ "attempt": 1,
+ "cancel_requested": false,
+ "ended_at": null,
+ "exit_code": null,
+ "job_id": "20261114-093500-hl3b0o",
+ "log_size": 21803,
+ "name": "frame-fea",
+ "note": null,
+ "ok": true,
+ "position": null,
+ "project_id": "jatayu-6fbf5aebb090",
+ "queued_at": "2026-11-14T09:35:00Z",
+ "started_at": "2026-11-14T09:35:16Z",
+ "state": "running",
+ "unit": "mu-job-20261114-093500-hl3b0o.service"
+}

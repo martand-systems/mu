@@ -1,0 +1,266 @@
+{
+ "api": 1,
+ "jobs": [
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "job_id": "20261114-094140-za26kp",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": {
+    "anon": 9784925083,
+    "cpu_cores": 16.83,
+    "file": 2100000000,
+    "log_size": 13920,
+    "max": 22000000000,
+    "peak": 12776322086,
+    "pids": 44,
+    "shmem": 400000000,
+    "stale": false,
+    "t": 1794649998.2
+   },
+   "log_size": 13920,
+   "mine": true,
+   "name": "frame-fea",
+   "node": "lab-pc",
+   "note": null,
+   "position": null,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794649300.0,
+   "short": "za26kp",
+   "stale": false,
+   "started_at": 1794649310.0,
+   "state": "running",
+   "usage": null
+  }
+ ],
+ "mac": {
+  "battery": {
+   "on_battery": false,
+   "percent": 100.0
+  },
+  "cores": {
+   "eff": 4,
+   "logical": 8,
+   "perf": 4,
+   "physical": 8
+  },
+  "cpu_pct": 38.7,
+  "host": "fixture-mac",
+  "load": [
+   2.1,
+   1.9,
+   1.7
+  ],
+  "mem": {
+   "available": 8005542654,
+   "pressure": "ok",
+   "total": 17179869184,
+   "used": 9174326530
+  },
+  "mu_version": "v2026.11.9",
+  "name": "This Mac",
+  "per_core": [
+   24.0,
+   41.4,
+   46.2,
+   24.7,
+   28.9,
+   50.4,
+   48.6,
+   44.2
+  ],
+  "sampler": "fake",
+  "series": {
+   "cpu_pct": [
+    [
+     1794650002.0,
+     38.7
+    ]
+   ],
+   "mem_used": [
+    [
+     1794650002.0,
+     9174326530
+    ]
+   ]
+  },
+  "stale": false,
+  "t": 1794650002.0
+ },
+ "more": {
+  "lab-pc": false,
+  "office-pc": false
+ },
+ "nodes": [
+  {
+   "attention": [],
+   "error": null,
+   "features": [
+    "stats",
+    "usage",
+    "watch",
+    "metrics"
+   ],
+   "hello": {
+    "autoupdate": {
+     "enabled": true,
+     "last_result": "ok"
+    },
+    "clock_offset_s": 0.0,
+    "cores_logical": 32,
+    "cores_physical": 16,
+    "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
+    "disk": {
+     "free_gb": 89,
+     "min_free_gb": 20
+    },
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "key": "avi-mac",
+    "last_stop": "clean",
+    "mem_total": 25769803776,
+    "mu_installed": [
+     "v2026.11.8",
+     "v2026.11.9"
+    ],
+    "mu_version": "v2026.11.9",
+    "protocol": 1,
+    "queue": {
+     "queued": 0,
+     "running": 1
+    },
+    "runner": "active",
+    "t": 1794650000.0,
+    "wsl": true
+   },
+   "jobs_listed": 1,
+   "link": "relay",
+   "list_stale": false,
+   "list_t": 1794650000.0,
+   "more": false,
+   "name": "lab-pc",
+   "offline_since": null,
+   "old_node": false,
+   "old_node_text": null,
+   "reconnecting": false,
+   "series": {
+    "cpu_pct": [
+     [
+      1794649998.2,
+      60.5
+     ]
+    ]
+   },
+   "state": "online",
+   "stats": {
+    "cpu_pct": 60.5,
+    "disk": {
+     "free_gb": 89,
+     "min_free_gb": 20
+    },
+    "load": [
+     18.2,
+     17.8,
+     15.0
+    ],
+    "mem": {
+     "avail": 12284878693,
+     "cached": 2100000000,
+     "shmem": 400000000,
+     "total": 25769803776,
+     "used": 13484925083
+    },
+    "node_stale": false,
+    "per_core": [
+     57,
+     56,
+     63,
+     56,
+     61,
+     58,
+     57,
+     57,
+     60,
+     61,
+     55,
+     62,
+     64,
+     62,
+     63,
+     60,
+     60,
+     58,
+     65,
+     61,
+     63,
+     63,
+     57,
+     60,
+     64,
+     56,
+     64,
+     61,
+     59,
+     63,
+     65,
+     61
+    ],
+    "psi": {
+     "cpu_some10": 36.7,
+     "mem_some10": 0.0
+    },
+    "queue": {
+     "queued": 0,
+     "running": 1
+    },
+    "stale": false,
+    "t": 1794649998.2,
+    "uptime_s": 86400
+   }
+  },
+  {
+   "attention": [],
+   "error": {
+    "auto_retry": true,
+    "error": "node-offline",
+    "exit": 4,
+    "message": "the relay is up, but office-pc is not connected to it (its tunnel is down, or the PC is off or asleep) [node-offline]",
+    "next": "retry later; on the PC: wsl -d mu-compute -u root -- mu-wsl2-distro status. A job already accepted is unaffected",
+    "retry_at": 1794650005.0,
+    "verb": "hello"
+   },
+   "features": [],
+   "hello": null,
+   "jobs_listed": 0,
+   "link": "relay",
+   "list_stale": true,
+   "list_t": null,
+   "more": false,
+   "name": "office-pc",
+   "offline_since": 1794650000.0,
+   "old_node": false,
+   "old_node_text": null,
+   "reconnecting": false,
+   "series": {
+    "cpu_pct": []
+   },
+   "state": "offline",
+   "stats": null
+  }
+ ],
+ "now": 1794650002.0,
+ "ok": true,
+ "summary": {
+  "nodes": 2,
+  "online": 1,
+  "queued": 0,
+  "running": 1
+ }
+}

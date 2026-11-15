@@ -1,0 +1,128 @@
+{
+ "api": 1,
+ "attention": [],
+ "error": null,
+ "features": [
+  "stats",
+  "usage",
+  "watch",
+  "metrics"
+ ],
+ "hello": {
+  "autoupdate": {
+   "enabled": true,
+   "last_result": "ok"
+  },
+  "clock_offset_s": 0.0,
+  "cores_logical": 32,
+  "cores_physical": 16,
+  "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
+  "disk": {
+   "free_gb": 89,
+   "min_free_gb": 20
+  },
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "key": "avi-mac",
+  "last_stop": "clean",
+  "mem_total": 25769803776,
+  "mu_installed": [
+   "v2026.11.8",
+   "v2026.11.9"
+  ],
+  "mu_version": "v2026.11.9",
+  "protocol": 1,
+  "queue": {
+   "queued": 1,
+   "running": 2
+  },
+  "runner": "active",
+  "t": 1794650000.0,
+  "wsl": true
+ },
+ "jobs_listed": 8,
+ "link": "relay",
+ "list_stale": false,
+ "list_t": 1794650000.0,
+ "more": false,
+ "name": "office-pc",
+ "now": 1794650002.0,
+ "offline_since": null,
+ "ok": true,
+ "old_node": false,
+ "old_node_text": null,
+ "reconnecting": false,
+ "series": {
+  "cpu_pct": [
+   [
+    1794649998.2,
+    65.1
+   ]
+  ]
+ },
+ "state": "online",
+ "stats": {
+  "cpu_pct": 65.1,
+  "disk": {
+   "free_gb": 89,
+   "min_free_gb": 20
+  },
+  "load": [
+   20.1,
+   19.7,
+   16.5
+  ],
+  "mem": {
+   "avail": 6743238318,
+   "cached": 2100000000,
+   "shmem": 400000000,
+   "total": 25769803776,
+   "used": 19026565458
+  },
+  "node_stale": false,
+  "per_core": [
+   67,
+   65,
+   64,
+   69,
+   69,
+   67,
+   69,
+   68,
+   60,
+   64,
+   63,
+   60,
+   61,
+   61,
+   64,
+   60,
+   69,
+   66,
+   64,
+   61,
+   66,
+   64,
+   66,
+   60,
+   65,
+   65,
+   66,
+   68,
+   61,
+   65,
+   65,
+   69
+  ],
+  "psi": {
+   "cpu_some10": 40.6,
+   "mem_some10": 0.0
+  },
+  "queue": {
+   "queued": 1,
+   "running": 2
+  },
+  "stale": false,
+  "t": 1794649998.2,
+  "uptime_s": 86400
+ }
+}

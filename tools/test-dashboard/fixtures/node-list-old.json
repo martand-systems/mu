@@ -1,0 +1,73 @@
+{
+ "jobs": [
+  {
+   "attempt": 1,
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T05:54:27Z",
+   "exit_code": null,
+   "job_id": "20261114-034320-8rsx3v",
+   "log_size": 160014,
+   "name": "frame-fea",
+   "note": "the job used more memory than its 22 GB limit",
+   "ok": true,
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T03:43:20Z",
+   "started_at": "2026-11-14T03:43:40Z",
+   "state": "oom",
+   "unit": "mu-job-20261114-034320-8rsx3v.service"
+  },
+  {
+   "attempt": 1,
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T05:45:15Z",
+   "exit_code": 3,
+   "job_id": "20261114-054320-lwusq5",
+   "log_size": 2062,
+   "name": "frame-fea",
+   "note": null,
+   "ok": true,
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T05:43:20Z",
+   "started_at": "2026-11-14T05:43:40Z",
+   "state": "failed",
+   "unit": "mu-job-20261114-054320-lwusq5.service"
+  },
+  {
+   "attempt": 1,
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T08:24:52Z",
+   "exit_code": 0,
+   "job_id": "20261114-074320-pg20as",
+   "log_size": 49862,
+   "name": "cfd-cavity",
+   "note": null,
+   "ok": true,
+   "position": null,
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": "2026-11-14T07:43:20Z",
+   "started_at": "2026-11-14T07:43:40Z",
+   "state": "succeeded",
+   "unit": "mu-job-20261114-074320-pg20as.service"
+  },
+  {
+   "attempt": 1,
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "job_id": "20261114-095319-vzv44f",
+   "log_size": 0,
+   "name": "frame-fea",
+   "note": null,
+   "ok": true,
+   "position": 1,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T09:53:19Z",
+   "started_at": null,
+   "state": "queued",
+   "unit": null
+  }
+ ],
+ "ok": true
+}

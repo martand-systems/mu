@@ -1,0 +1,93 @@
+{
+ "api": 1,
+ "commands": {
+  "cancel": "mu cancel 20261114-094640-0k1w3s --on office-pc",
+  "fetch": "mu fetch 20261114-094640-0k1w3s --on office-pc",
+  "log": "mu log 20261114-094640-0k1w3s -f --on office-pc",
+  "node": "mu compute status office-pc",
+  "status": "mu status 20261114-094640-0k1w3s --on office-pc"
+ },
+ "index": {
+  "accepted": 1794649600.0,
+  "fetched": null,
+  "key": "avi-mac",
+  "submit_started": 1794649597.0
+ },
+ "job": {
+  "as_of": 1794650000.0,
+  "attempt": 1,
+  "cancel_requested": false,
+  "ended_at": null,
+  "exit_code": null,
+  "job_id": "20261114-094640-0k1w3s",
+  "limits": {
+   "cores": 2,
+   "mem_bytes": 8000000000,
+   "time_s": 43200
+  },
+  "live": {
+   "anon": 3175006931,
+   "cpu_cores": 1.76,
+   "file": 2100000000,
+   "log_size": 6123,
+   "max": 8000000000,
+   "peak": 5902007208,
+   "pids": 44,
+   "shmem": 400000000,
+   "stale": false,
+   "t": 1794649998.2
+  },
+  "log_size": 6163,
+  "mine": true,
+  "name": "frame-fea-v2",
+  "node": "office-pc",
+  "note": null,
+  "position": null,
+  "project": "jatayu",
+  "project_id": "jatayu-6fbf5aebb090",
+  "queued_at": 1794649600.0,
+  "short": "0k1w3s",
+  "stale": false,
+  "started_at": 1794649700.0,
+  "state": "running",
+  "usage": null
+ },
+ "node": {
+  "metrics": true,
+  "name": "office-pc",
+  "old_node": false,
+  "state": "online"
+ },
+ "now": 1794650002.0,
+ "ok": true,
+ "record": {
+  "accepted": 1794649600.0,
+  "argv": [
+   "python",
+   "frame/fea.py",
+   "--mesh",
+   "2.0"
+  ],
+  "cwd": "",
+  "dirty": true,
+  "head": "abd38acdf8c4fdf384c174d1677fd9ffc4bf8935",
+  "limits": {
+   "cores": 2,
+   "mem_bytes": 8000000000,
+   "time_s": 43200
+  },
+  "mu_version": "v2026.11.9",
+  "outputs": [
+   "results/*.json"
+  ],
+  "project_root": "/Users/example/jatayu",
+  "snapshot": "50ed4634f46872300196027e4a22a81b8ab4377f",
+  "submitted": {
+   "at": 1794649600.0,
+   "host": "avi-mac",
+   "mu": "v2026.11.9",
+   "user": "avi"
+  }
+ },
+ "run": null
+}

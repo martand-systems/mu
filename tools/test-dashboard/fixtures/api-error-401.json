@@ -1,0 +1,6 @@
+{
+ "api": 1,
+ "error": "token",
+ "message": "this page has no current token: run  mu dashboard open  in a terminal (or ask Claude to)",
+ "ok": false
+}

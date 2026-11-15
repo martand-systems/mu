@@ -1,0 +1,31 @@
+{
+ "attempt": 1,
+ "cancel_requested": false,
+ "ended_at": "2026-11-14T05:54:27Z",
+ "exit_code": null,
+ "job_id": "20261114-034320-8rsx3v",
+ "log_size": 160014,
+ "name": "frame-fea",
+ "note": "the job used more memory than its 22 GB limit",
+ "ok": true,
+ "position": null,
+ "project_id": "jatayu-6fbf5aebb090",
+ "queued_at": "2026-11-14T03:43:20Z",
+ "started_at": "2026-11-14T03:43:40Z",
+ "state": "oom",
+ "unit": "mu-job-20261114-034320-8rsx3v.service",
+ "usage": {
+  "cores_avg": 16.91,
+  "cpu_s": 132692.8,
+  "mem_events": {
+   "max": 3,
+   "oom_kill": 1
+  },
+  "mem_peak_bytes": 22000000000,
+  "mem_work_peak_bytes": 21780000000,
+  "pids_peak": 44,
+  "source": "runner-sampled",
+  "sys_s": 1326.9,
+  "user_s": 131365.9
+ }
+}

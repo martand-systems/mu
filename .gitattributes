@@ -1,0 +1,3 @@
+# the dashboard's committed build (CI's artifact, docs/design/dashboard.md §4.6.1): no diffs, not counted by GitHub
+share/dashboard/** -diff linguist-generated
+dashboard/package-lock.json linguist-generated

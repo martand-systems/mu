@@ -1,0 +1,52 @@
+{
+ "autoupdate": {
+  "enabled": true,
+  "last_result": "ok"
+ },
+ "disk": {
+  "free_gb": 89,
+  "host": "C",
+  "min_free_gb": 20,
+  "where": "C: (/mnt/c)"
+ },
+ "features": [
+  "stats",
+  "usage",
+  "watch",
+  "metrics"
+ ],
+ "hw": {
+  "cores_logical": 32,
+  "cores_physical": 16,
+  "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "mem_total_kb": 25165824,
+  "wsl": "6.6.87.2-microsoft-standard-WSL2"
+ },
+ "key": "avi-mac",
+ "last_stop": "clean",
+ "limits": {
+  "memory": true,
+  "pids": true,
+  "selftest_at": "2026-11-13T09:53:20Z",
+  "selftest_detail": "ok"
+ },
+ "mu": {
+  "default": "v2026.11.9",
+  "infra": "v2026.11.9",
+  "installed": [
+   "v2026.11.8",
+   "v2026.11.9"
+  ]
+ },
+ "node": "office-pc",
+ "ok": true,
+ "protocol": 1,
+ "protocol_min": 1,
+ "queue": {
+  "queued": 1,
+  "running": 2
+ },
+ "runner": "active",
+ "time": "2026-11-14T09:53:20Z"
+}
