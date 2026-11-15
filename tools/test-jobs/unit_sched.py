@@ -463,7 +463,7 @@ def t_sched_runner(base, stubs_text):
 
     def started():
         try:
-            return [ln.split()[1][7:-8] for ln in open(os.path.join(st["stub"], "calls")) if ln.startswith("start ")]
+            return [ln.split()[1][7:-8] for ln in open(os.path.join(st["stub"], "calls")) if ln.startswith("start mu-job-")]
         except OSError:
             return []
 
@@ -498,9 +498,9 @@ def t_sched_runner(base, stubs_text):
           flag("one-at-a-time") + flag("cpus-reused") + flag("cpus-from-plan-cache"),
           started() == [J[0], J[1]] and set(g0.get("cpus", [])).isdisjoint(g1.get("cpus", [0])) and
           S(J[2]).get("state") == "queued" and not violation(), (started(), g0, g1, violation()))
-    check("the unit: MemoryMax = the grant, RuntimeMaxSec = --time, MU_JOB_CPUS, thread variables, TMPDIR" +
+    check("the unit: MemoryMax = the grant, RuntimeMaxSec = --time + min(4 h, --time) (the backstop; release 2), MU_JOB_CPUS, thread variables, TMPDIR" +
           flag("mem-max-is-capacity") + flag("no-thread-env"),
-          "MemoryMax=%d" % (512 * MI) in a0 and "RuntimeMaxSec=600" in a0 and
+          "MemoryMax=%d" % (512 * MI) in a0 and "RuntimeMaxSec=1200" in a0 and
           "--setenv=MU_JOB_CPUS=%s" % sched.fmt_cpus(g0.get("cpus", [])) in a0 and "--setenv=OMP_NUM_THREADS=2" in a0
           and "--setenv=PYTHON_CPU_COUNT=2" in a0 and "--setenv=CCX_NPROC_EQUATION_SOLVER=2" in a0 and
           any(x.startswith("--setenv=TMPDIR=") and x.endswith("/tmp") for x in a0) and
@@ -938,3 +938,416 @@ def serve(node, key, verb, *args, rc=0):
     if got != rc:
         out["_rc"] = got
     return out
+
+
+# ------------------------------------------------------------------------------------------------ release 2: pause
+PAUSE_SYSTEMCTL_STUB = r"""#!/bin/sh
+# systemctl --user for the pause checks: units are lines "UNIT ACTIVESTATE RESULT" in $STUB_DIR/units (the last one
+# counts); FreezerState in $STUB_DIR/fz-UNIT (default running); timers are files $STUB_DIR/timer-NAME; every call is
+# logged in $STUB_DIR/calls
+shift
+echo "$*" >> "$STUB_DIR/calls"
+case "$1" in
+  show)
+    line=$(grep "^$2 " "$STUB_DIR/units" 2>/dev/null | tail -1)
+    if [ -z "$line" ]; then printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\nResult=success\n'; exit 0; fi
+    fz=$(cat "$STUB_DIR/fz-$2" 2>/dev/null || echo running)
+    set -- $line; printf 'LoadState=loaded\nActiveState=%s\nSubState=x\nResult=%s\nActiveEnterTimestampMonotonic=%s\nControlGroup=/user.slice/test/%s\nFreezerState=%s\n' "$2" "$3" "${4:-0}" "$1" "$fz" ;;
+  freeze) [ -f "$STUB_DIR/freeze-fails" ] || echo frozen > "$STUB_DIR/fz-$2" ;;
+  thaw) echo running > "$STUB_DIR/fz-$2" ;;
+  is-active) if [ -f "$STUB_DIR/timer-$2" ]; then echo active; else echo inactive; fi ;;
+  stop) rm -f "$STUB_DIR/timer-$2"
+        case "$2" in mu-job-*) echo "$2 inactive success" >> "$STUB_DIR/units" ;; esac ;;
+esac
+exit 0
+"""
+PAUSE_RUN_STUB = r"""#!/bin/sh
+# systemd-run --user: a timer (--on-active) makes $STUB_DIR/timer-UNIT.timer; a service is registered as active
+t=""; for a in "$@"; do case "$a" in --unit=*) u="${a#--unit=}" ;; --on-active=*) t=1 ;; esac; done
+echo "start $u $*" >> "$STUB_DIR/calls"
+if [ -n "$t" ]; then : > "$STUB_DIR/timer-$u.timer"; exit 0; fi
+echo "$u active success" >> "$STUB_DIR/units"
+exit 0
+"""
+
+
+def t_sched_pause(base):
+    """Release 2 (scheduler.md §20.5-§20.8, §22): lending by CPU-id sets in plan(), the invariants, the victim choice,
+    and the runner and the verbs against stubs of systemd that keep a FreezerState per unit."""
+    cap = cap_of(4, 2 * G)
+    now = 1000.0
+    # a frozen lender A (whole node, 1 GiB granted, holds 600 MiB), deadline now + 300
+    A = run("A", [0, 1, 2, 3], 1 * G, 3600, now - 100)
+    A["pause"] = {"phase": "frozen", "deadline": now + 300, "held_mem": 600 * MI}
+    A["end"] = now + 300 + 3500 + sched.SLACK_S
+    q = [{"id": "B", "req": req(2, 256 * MI, 20)}, {"id": "C", "req": req(2, 256 * MI, 600)}]
+    pl = sched.plan(now, cap, [A], q)
+    g = grants(pl)
+    check("a frozen lender's cores: a 20 s job borrows 2 of them (class borrowing, until its deadline); a 10 min one "
+          "does not" + flag("lend-without-deadline") + flag("borrow-past-deadline"),
+          ids(pl) == ["B"] and g["B"]["class"] == "borrowing" and set(g["B"]["cpus"]) <= {0, 1, 2, 3} and
+          g["B"]["borrowed"][0]["from"] == "A" and g["B"]["borrowed"][0]["until_mono"] == now + 300, pl["starts"])
+    # memory: A lends 1 GiB - 600 MiB = 424 MiB; M = 2 GiB with 1 GiB more held by D (1 core... none left): no free
+    D_ = run("D", [], 1 * G, 3600, now - 100)
+    pl = sched.plan(now, cap, [A, D_], [{"id": "B", "req": req(2, 512 * MI, 20)}])
+    check("a borrower that needs more memory than the lender lends and none is free waits" + flag("lend-whole-grant") +
+          flag("borrower-mem-unchecked"), ids(pl) == [], pl["starts"])
+    pl = sched.plan(now, cap, [A, D_], [{"id": "B", "req": req(2, 400 * MI, 20)}])
+    check("one within the lent 424 MiB starts, all of its memory borrowed",
+          ids(pl) == ["B"] and grants(pl)["B"]["borrowed"][0]["mem_bytes"] == 400 * MI, pl["starts"])
+    check("plan's lent: 4 cores and 424 MiB lent by frozen jobs" + flag("lend-whole-grant"),
+          pl["lent"]["cores"] == 4 and pl["lent"]["mem_bytes"] == 1 * G - 600 * MI, pl["lent"])
+    # invariants
+    Bg = dict(grants(sched.plan(now, cap, [A], [{"id": "B", "req": req(2, 256 * MI, 20)}]))["B"], active_mono=now)
+    B = {"id": "B", "grant": Bg, "end": sched.end_bound(Bg)}
+    check("invariants: a borrower inside a frozen lender's ids is fine", sched.invariants(cap, [A, B]) == [],
+          sched.invariants(cap, [A, B]))
+    A2 = dict(A, pause=None)
+    bad = sched.invariants(cap, [A2, B])
+    check("invariants: a borrower on a lender that is not frozen is a violation", any("not frozen" in x for x in bad), bad)
+    Bl = dict(B, end=now + 400)
+    bad = sched.invariants(cap, [A, Bl])
+    check("invariants: a borrower that ends after its lender's deadline is a violation", any("deadline" in x for x in bad),
+          bad)
+    # a borrower whose lender has ended keeps its own CPU ids until its unit ends
+    pl2 = sched.plan(now, cap, [B], [{"id": "C", "req": req(2, 256 * MI, 600)}])
+    pl3 = sched.plan(now, cap, [B], [{"id": "C", "req": req(3, 256 * MI, 600)}])
+    check("a borrower whose lender ended keeps its CPU ids: a 2-core job gets the other two, a 3-core one waits" +
+          flag("lender-ends-ids-freed"), ids(pl2) == ["C"] and not set(grants(pl2)["C"]["cpus"]) & set(Bg["cpus"]) and
+          ids(pl3) == [], (pl2["starts"], pl3["starts"]))
+    # the auto-pause's victims
+    c = [{"id": "x", "cores": 4, "est_lent": 1 * G, "active_mono": 1}, {"id": "y", "cores": 2, "est_lent": 0, "active_mono": 5},
+         {"id": "z", "cores": 2, "est_lent": 100 * MI, "active_mono": 9}]
+    check("victims: the smallest set by jobs then extra cores (y, 2 cores, for a 2-core job)",
+          sched.choose_victims(c, 2, 0, 0) == ["z"], sched.choose_victims(c, 2, 0, 0))
+    check("victims: the urgent job's memory must fit in free plus the set's lent memory" + flag("pause-without-mem-check"),
+          sched.choose_victims(c, 2, 512 * MI, 0) == ["x"], sched.choose_victims(c, 2, 512 * MI, 0))
+
+    # ---------------------------------------------------------------- the runner and the verbs, against stubs
+    stubs = os.path.join(base, "bin")
+    os.makedirs(stubs, exist_ok=True)
+    for name, text in (("systemctl", PAUSE_SYSTEMCTL_STUB), ("systemd-run", PAUSE_RUN_STUB)):
+        with open(os.path.join(stubs, name), "w") as f:
+            f.write(text)
+        os.chmod(os.path.join(stubs, name), 0o755)
+    os.environ.update(MU_SYSTEMCTL=os.path.join(stubs, "systemctl"), MU_SYSTEMD_RUN=os.path.join(stubs, "systemd-run"),
+                      MU_WSL_HOST_DRIVE="/nonexistent", MU_NODE_OWNERS=os.path.join(base, "owners"), MU_NODE_CHECK="1",
+                      MU_CGROUP_ROOT=os.path.join(base, "cg"))
+    with open(os.path.join(base, "owners"), "w") as f:
+        f.write("ci-owner\n")
+    from mu import node, pausectl
+    node.capacity = lambda nd=None: sched.capacity(nd if nd is not None else node.node_info(), [0, 1, 2, 3], 64 * G)
+    order = []
+
+    def prep(j):
+        order.append(("checkout", j["id"], len(calls())))
+        shutil.rmtree(os.path.join(j["dir"], "work"), ignore_errors=True)
+        os.mkdir(os.path.join(j["dir"], "work"))
+    node.prepare_work = prep
+    st = {}
+    seq = [0]
+
+    def fresh(tag, **conf):
+        d = os.path.join(base, tag)
+        for x in ("srv/jobs", "stub", "home/state"):
+            os.makedirs(os.path.join(d, x))
+        node.ROOT = os.path.join(d, "srv")
+        os.environ["MU_HOME"] = os.path.join(d, "home")
+        os.environ["STUB_DIR"] = st["stub"] = os.path.join(d, "stub")
+        sc = {"cores": 4, "mem_bytes": 2 * G}
+        sc.update(conf)
+        durable.write_record(os.path.join(node.ROOT, "node.json"), {"name": "n", "min_free_gb": 0, "sched": sc,
+                             "freezer": {"ok": True, "mem_lend": True, "boot_id": node.boot_id()}})
+        node.STARTED_HERE.clear()
+        del order[:]
+
+    def mkjob(jid, cores, mem, t, band=None, pausable=False, quick=False):
+        seq[0] += 1
+        d = node.job_dir(jid)
+        os.makedirs(d)
+        lim = {"cores": cores, "mem_bytes": mem, "time_s": t}
+        if quick:
+            lim = {"cores": None, "mem_bytes": None, "time_s": None, "quick": True}
+        job = {"schema": 1, "sched": 1, "job_id": jid, "project_id": "p1-0123456789ab", "mu_version": "v1",
+               "argv": ["true"], "cwd": "", "outputs": [], "limits": lim, "rerun": True, "accepted_ns": seq[0],
+               "key": "ci-owner", "name": jid[-6:]}
+        if band:
+            job["priority"] = band
+        if pausable:
+            job["pausable"] = True
+        durable.write_record(os.path.join(d, "job.json"), job)
+        stt = {"state": "queued", "attempt": 1}
+        if band:
+            stt["band"] = band
+        durable.write_record(os.path.join(d, "state.json"), stt)
+        return d
+
+    def calls():
+        try:
+            return open(os.path.join(st["stub"], "calls")).read().splitlines()
+        except OSError:
+            return []
+
+    def job(jid):
+        return node.load_job(jid)
+
+    def pz(jid):
+        return (durable.read_record(os.path.join(node.job_dir(jid), "state.json")) or {}).get("pause") or {}
+
+    def setst(jid, **kw):
+        p_ = os.path.join(node.job_dir(jid), "state.json")
+        s_ = durable.read_record(p_)
+        s_.update(kw)
+        durable.write_record(p_, s_)
+
+    def setpause(jid, **kw):
+        s_ = durable.read_record(os.path.join(node.job_dir(jid), "state.json"))
+        if s_.get("pause"):   # (absent under some faults: the checks that follow fail, they do not crash)
+            setst(jid, pause=dict(s_["pause"], **kw))
+
+    def fz(jid):
+        try:
+            return open(os.path.join(st["stub"], "fz-mu-job-%s.service" % jid)).read().strip()
+        except OSError:
+            return "running"
+
+    def unit_end(jid, result="success"):
+        with open(os.path.join(st["stub"], "units"), "a") as f:
+            f.write("mu-job-%s.service inactive %s\n" % (jid, result))
+
+    def memcur(jid, n):
+        d = os.path.join(base, "cg", "user.slice", "test", "mu-job-%s.service" % jid)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "memory.current"), "w") as f:
+            f.write("%d\n" % n)
+
+    def inv():
+        try:
+            return open(os.path.join(node.ROOT, "state", "invariant-violation")).read()
+        except OSError:
+            return ""
+
+    def tryverb(f, args):
+        try:
+            return f("ci-owner", dict({"from": "p1-0123456789ab"}, **args))
+        except node.NodeError as e:
+            return {"ok": False, "error": e.error, "message": e.message, "rc": e.rc}
+
+    J, K, L, U = "20261115-100000-aaaaaa", "20261115-100001-bbbbbb", "20261115-100002-cccccc", "20261115-100003-uuuuuu"
+
+    # 1. pause, lend, resume
+    fresh("pause")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    memcur(J, 300 * MI)
+    check("an ordinary job is started with a time-limit timer for its --time" + flag("count-paused-time"),
+          any(c.startswith("start mu-limit-%s " % J) and "--on-active=600s" in c for c in calls()), calls())
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "300"})
+    p0 = pz(J)
+    check("mu pause: the unit frozen, the pause on disk (phase frozen, deadline, held = memory.current + 512 MiB)" +
+          flag("pause-noop") + flag("pause-in-memory-only"),
+          a.get("ok") and ("freeze mu-job-%s.service" % J) in calls() and p0.get("phase") == "frozen" and
+          p0.get("held_mem_bytes") == 812 * MI and fz(J)
+          == "frozen", (a, p0))
+    check("mu pause: the limit timer stopped, the dead-man timer armed at the deadline + 120 s, MemoryMax lowered" +
+          flag("no-dead-man"),
+          ("stop mu-limit-%s.timer" % J) in calls() and any(c.startswith("start mu-thaw-%s " % J) for c in calls()) and
+          any(c.startswith("set-property --runtime mu-job-%s.service MemoryMax=%d" % (J, 812 * MI)) for c in calls()),
+          calls()[-12:])
+    check("the pause answer's shape: paused, time, lent, next" + flag("drop-field"),
+          all(k in a for k in ("paused", "time", "lent", "next")) and all(
+              k in (a.get("paused") or {}) for k in ("since", "until", "by", "why", "held_mem_bytes", "lent_to",
+                                                     "resume_asked", "resumes_by", "frozen")), a)
+    mkjob(K, 2, 256 * MI, 20)
+    mkjob(L, 2, 256 * MI, 600)
+    node.step()
+    kg = (job(K)["state"] or {}).get("grant") or {}
+    check("a 20 s job borrows the paused job's cores and memory (class borrowing); a 10 min one waits" +
+          flag("lend-without-deadline"),
+          kg.get("class") == "borrowing" and (job(L)["state"] or {}).get("state") == "queued" and not inv(),
+          (kg, (job(L)["state"] or {}).get("state"), inv()))
+    s = node.status_of(job(J))
+    check("status of the paused job: state running, paused (lent_to the borrower), time, the note" + flag("drop-field"),
+          s["state"] == "running" and (s.get("paused") or {}).get("lent_to") == [K] and "time" in s and
+          "paused until" in (s.get("note") or ""), s)
+    r = tryverb(pausectl.verb_resume, {"id": J})
+    check("resume while the borrower runs: resuming, resumes_by, still frozen" + flag("thaw-over-borrower") + flag("drop-field"),
+          r.get("state") == "resuming" and "resumes_by" in r and pz(J).get("phase") == "frozen" and
+          (pz(J).get("resume_asked") or {}).get("by") == "ci-owner", r)
+    node.step()
+    check("no sample shares a CPU between two unfrozen jobs" + flag("thaw-over-borrower"), not inv(), inv())
+    unit_end(K)
+    node.step()
+    js = job(J)["state"] or {}
+    check("the borrower ended: the lender is thawed on that pass, MemoryMax back to the grant, the pause in its history",
+          not js.get("pause") and ("thaw mu-job-%s.service" % J) in calls() and
+          any(c.startswith("set-property --runtime mu-job-%s.service MemoryMax=%d" % (J, G)) for c in calls()) and
+          len(js.get("pauses") or []) == 1 and js.get("pause_count") == 1, js)
+    check("after the thaw the limit timer is armed again with the time left",
+          [c for c in calls() if c.startswith("start mu-limit-%s " % J)][-1:] != [] and
+          os.path.exists(os.path.join(st["stub"], "timer-mu-limit-%s.timer" % J)), calls()[-6:])
+
+    # 2. the deadline, re-pause raised to a borrower's end, the valve
+    fresh("deadline")
+    mkjob(J, 4, 1 * G, 3600)
+    node.step(first=True)
+    node.step()
+    memcur(J, 300 * MI)
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    mkjob(K, 2, 256 * MI, 20)
+    node.step()
+    kend = pausectl.end_bound(job(K)["state"])
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "1"})
+    check("a re-pause while a borrower runs is raised to the borrower's end (deadline_raised_to)" + flag("repause-shortens"),
+          a.get("ok") and "deadline_raised_to" in a and pz(J).get("deadline_mono") >= kend - 0.01, (a, pz(J), kend))
+    setpause(J, deadline_mono=time.monotonic() - 61)
+    node.step()
+    check("the valve: a borrower alive past the lender's deadline + 60 s is killed, the lender thawed with MemoryMax "
+          "still at held (restored once the borrower's unit ended)" + flag("no-valve"),
+          any(c.startswith("kill --signal=SIGKILL mu-job-%s" % K) for c in calls()) and not pz(J) and
+          (job(J)["state"] or {}).get("mem_restore_pending"), (pz(J), calls()[-6:]))
+    unit_end(K)
+    node.step()
+    check("memory restored once the borrower's unit ended", not (job(J)["state"] or {}).get("mem_restore_pending"),
+          job(J)["state"])
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    setpause(J, deadline_mono=time.monotonic() - 1)
+    node.step()
+    check("a pause ends at its deadline (no borrower)" + flag("no-pause-deadline"), not pz(J), pz(J))
+
+    # 3. limits and refusals
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "8000"})
+    check("a pause over 2 h is refused pause-limit", a.get("error") == "pause-limit", a)
+    fresh("limits")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "700"})
+    check("a pause past the budget (min(4 h, --time)) is refused pause-limit with the figures",
+          a.get("error") == "pause-limit" and "600" in a.get("message", ""), a)
+    mkjob(K, 1, 256 * MI, 600, quick=True)
+    node.step()
+    a = tryverb(pausectl.verb_pause, {"id": K})
+    check("an express job is never paused", a.get("error") == "pause-limit", a)
+    setst(J, grant=dict(job(J)["state"]["grant"], limit_timer=False))
+    a = tryverb(pausectl.verb_pause, {"id": J})
+    check("a job started without a limit timer (the previous release) is refused", a.get("error") == "pause-limit", a)
+    a = tryverb(pausectl.verb_pause, {"id": L})
+    check("pausing a job the node does not have: no-such-job", a.get("error") == "no-such-job", a)
+    mkjob(L, 4, 1 * G, 600)
+    a = tryverb(pausectl.verb_pause, {"id": L})
+    check("pausing a queued job: not-running", a.get("error") == "not-running", a)
+
+    # 4. cancel of a paused job thaws first; the result's run_s and paused_s; a re-queue drops the pause
+    fresh("cancel")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    n0 = len(calls())
+    pausectl.stop_unit("mu-job-%s.service" % J)
+    cc = calls()[n0:]
+    ti = [i for i, c in enumerate(cc) if c.startswith("thaw mu-job-")]
+    si = [i for i, c in enumerate(cc) if c.startswith("stop mu-job-")]
+    check("cancel of a paused job: thawed, then stopped (it gets its SIGTERM)" + flag("cancel-without-thaw") +
+          flag("stop-without-thaw"), ti and si and ti[0] < si[0], cc)
+    fresh("result")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    j = job(J)
+    s2 = dict(j["state"], started_epoch=time.time() - 35, paused_total_s=15.0)
+    j["state"] = s2
+    res = node.write_result(j, "timeout", "runner")
+    check("result.json: wall 35 s, paused 15 s -> run_s 20, paused_s 15, pauses" + flag("count-paused-time"),
+          abs((res.get("run_s") or 0) - 20) < 1.5 and abs((res.get("paused_s") or 0) - 15) < 0.5 and "pauses" in res, res)
+    fresh("requeue")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    node.interrupted(job(J), "the node stopped")
+    js = job(J)["state"]
+    check("a re-queued attempt (VM stop while paused) drops the pause; the note says it was paused" +
+          flag("requeue-keeps-pause"), js.get("state") == "queued" and not js.get("pause") and
+          "was paused" in (js.get("note") or ""), js)
+
+    # 5. the time-limit marker; a job with a result is never kept frozen; frozen outside μ; thawed outside μ
+    fresh("timelimit")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    setst(J, paused_total_s=840.0)
+    durable.write_durable(os.path.join(node.job_dir(J), "timelimit"), "x\n")
+    unit_end(J, "success")
+    node.step()
+    r = job(J)["result"] or {}
+    check("the limit timer's marker: timeout, 'not counting 14m paused'", r.get("state") == "timeout" and
+          "not counting 14m" in (r.get("note") or ""), r)
+    fresh("after-result")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    j = job(J)
+    durable.write_record(os.path.join(j["dir"], "result.json"), {"schema": 1, "job_id": J, "state": "succeeded"})
+    node.step()
+    check("a unit frozen after the shim wrote its result is thawed at once" + flag("freeze-after-result"),
+          fz(J) == "running", calls()[-5:])
+    fresh("outside")
+    mkjob(J, 4, 1 * G, 600)
+    node.step(first=True)
+    node.step()
+    tryverb(pausectl.verb_pause, {"id": J, "for": "200"})
+    with open(os.path.join(st["stub"], "fz-mu-job-%s.service" % J), "w") as f:
+        f.write("running\n")   # the dead-man timer thawed it while the runner was down
+    node.step()
+    ev = open(os.path.join(node.job_dir(J), "events.log")).read()
+    check("frozen in state.json but running in systemd: 'thawed outside μ', the pause closed, the limit re-armed",
+          not pz(J) and "thawed outside" in ev and os.path.exists(os.path.join(st["stub"], "timer-mu-limit-%s.timer" % J)),
+          (pz(J), ev[-300:]))
+    with open(os.path.join(st["stub"], "fz-mu-job-%s.service" % J), "w") as f:
+        f.write("frozen\n")
+    node.step()
+    check("frozen in systemd with no pause recorded: thawed", fz(J) == "running", calls()[-4:])
+    if os.path.exists(os.path.join(st["stub"], "timer-mu-limit-%s.timer" % J)):
+        os.unlink(os.path.join(st["stub"], "timer-mu-limit-%s.timer" % J))
+    node.step()
+    check("an unfrozen job whose limit timer is gone gets one again on the next pass" + flag("limit-in-runner-loop"),
+          os.path.exists(os.path.join(st["stub"], "timer-mu-limit-%s.timer" % J)), calls()[-4:])
+
+    # 6. auto-pause
+    for f_, marked, last in (("marked", True, None), ("unmarked", False, None), ("cooldown", True, 60)):
+        fresh("auto-" + f_)
+        mkjob(J, 4, 1 * G, 3600, pausable=marked)
+        node.step(first=True)
+        node.step()
+        memcur(J, 300 * MI)
+        if last:
+            setst(J, last_thaw_mono=time.monotonic() - last)
+        del order[:]
+        mkjob(U, 2, 256 * MI, 60, band="urgent")
+        n0 = len(calls())
+        node.step()
+        ug = (job(U)["state"] or {}).get("grant") or {}
+        if f_ == "marked":
+            cc = calls()[n0:]
+            fi = [i for i, c in enumerate(cc) if c.startswith("freeze ")]
+            check("auto-pause: a --pausable job is frozen for an urgent job, which starts on its lent cores in the same "
+                  "pass" + flag("pause-unmarked"), pz(J).get("why") == "auto" and pz(J).get("for_job") == U and
+                  ug.get("class") == "borrowing", (pz(J), ug))
+            check("auto-pause: the urgent job's checkout comes before the freeze" + flag("freeze-before-checkout"),
+                  [o[:2] for o in order[:1]] == [("checkout", U)] and fi and fi[0] + n0 >= order[0][2],
+                  (order, cc[:8]))
+            durable.write_record(os.path.join(node.job_dir(U), "result.json"), {"schema": 1, "job_id": U,
+                                                                                  "state": "succeeded"})
+            unit_end(U)
+            node.step()
+            check("auto-pause: the victim is thawed as soon as the urgent job ended" + flag("keep-pause-after-beneficiary"),
+                  not pz(J), pz(J))
+        elif f_ == "unmarked":
+            check("auto-pause: a job not submitted --pausable is never paused (policy marked)" + flag("pause-unmarked"),
+                  not pz(J) and not ug, (pz(J), ug))
+        else:
+            check("auto-pause: no second pause within 15 min of running since the last thaw" + flag("no-cooldown"),
+                  not pz(J) and not ug, (pz(J), ug))

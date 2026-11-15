@@ -34,7 +34,7 @@ def report(e, as_json):
 
 def main(argv):
     if not argv:
-        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|queue|hold|release|move|priority|relay|node|"
+        sys.stderr.write("usage: mu compute|submit|status|log|fetch|cancel|queue|hold|release|move|priority|pause|resume|relay|node|"
                          "dashboard ... (mu help)\n")
         return 2
     cmd, args = argv[0], argv[1:]
@@ -46,7 +46,7 @@ def main(argv):
         if cmd == "node":
             from mu import node
             return node.main(args)
-        if cmd in ("queue", "hold", "release", "move", "priority"):   # docs/design/scheduler.md §20.2
+        if cmd in ("queue", "hold", "release", "move", "priority", "pause", "resume"):   # docs/design/scheduler.md §20.2
             from mu import qctl
             return qctl.main(cmd, args)
         if cmd == "dashboard":

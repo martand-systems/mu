@@ -24,7 +24,8 @@ NODE_TO_CLIENT = {NODE_USAGE: EXIT_ERROR, NODE_PROTOCOL: EXIT_REFUSED, NODE_NO_S
                   NODE_UNAVAILABLE: EXIT_NODE_CANNOT, NODE_INTERNAL: EXIT_ERROR, NODE_TOOLCHAIN: EXIT_VERSION,
                   NODE_NOPERM: EXIT_REFUSED}
 # node refusals with exit 64 that mean "this request, as it is, cannot be done": the client exits 2 for them
-USAGE_ERRORS = ("too-big", "quick-with-flags", "other-project", "not-queued", "reference-not-queued", "already-finished")
+USAGE_ERRORS = ("too-big", "quick-with-flags", "other-project", "not-queued", "reference-not-queued", "already-finished",
+                "not-running", "pause-limit")
 
 NODE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")        # the relay's rule for client names
 RESERVED_NODES = ("local", "auto")

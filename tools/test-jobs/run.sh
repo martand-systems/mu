@@ -277,6 +277,15 @@ for f in one-at-a-time cpus-from-plan-cache mem-max-is-capacity no-thread-env gr
          unconfirmed-as-interrupted no-note-active owner-from-node-json; do
   must_fail_tagged "scheduler: the runner's passes and the queue verbs" "$f" "$PY1" sched-runner
 done
+# release 2 (scheduler.md §20.5-§20.8, §22): pause, lending, the timers, auto-pause; the checks, then each fault
+py_section "$PY1" sched-pause
+for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-mem-unchecked pause-without-mem-check \
+         count-paused-time pause-noop pause-in-memory-only no-dead-man drop-field thaw-over-borrower repause-shortens \
+         no-valve no-pause-deadline cancel-without-thaw stop-without-thaw requeue-keeps-pause freeze-after-result \
+         limit-in-runner-loop pause-unmarked freeze-before-checkout keep-pause-after-beneficiary no-cooldown \
+         lender-ends-ids-freed; do
+  must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
+done
 
 section "chisel pins agree (apps.toml, relay/Dockerfile, the distro script)"
 py_section "$PY1" pins "$REPO"

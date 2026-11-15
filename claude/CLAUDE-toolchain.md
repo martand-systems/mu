@@ -165,6 +165,17 @@ computer. `mu compute list` shows what is paired (no network); `mu compute statu
   do not retry. Exit 6 `node-too-old`: the node's μ is older than queue control; wait for its update
   (`mu compute update office-pc` installs the latest release now, beside running jobs; ask the user first).
 - `mu submit --hold` submits a job held (it starts after `mu release`).
+- **Pause and resume** (nodes whose `hello.features` has `pause`): `mu pause <id> [--for 15m]` freezes a running job
+  (default 30 min, at most 2 h; at most min(4 h, its `--time`) paused per run); its cores and unused memory are lent
+  to jobs that fit before it resumes by itself. `mu resume <id>` thaws it now, or after the job borrowing its cores
+  ends (`resuming`; with `--timeout S` exit 10 if still waiting). Pausing another project's job only when the owner
+  asked, with `--others`. Exit 2 `pause-limit`: over a limit, or an express job, a borrower, or a job started before
+  pause existed; exit 6 `node-too-old` / `pause-unavailable`: the node cannot pause.
+- **Mark long solver runs `--pausable`** (CalculiX, OpenFOAM with mpirun on the node, Gmsh, numpy sweeps) when they
+  use no network, no wall-clock timeouts of their own (`timeout`, `subprocess` timeouts) and are not timing
+  measurements: the node may then pause them for up to 30 min for an urgent job. **Never** mark benchmarks, `perf/`
+  runs or the scaling series.
+- A paused job's result carries `paused_s`; use `run_s` for timings, never `wall_s`.
 - Declare outputs in mu.toml (`[compute]` `outputs = ["results/*.json"]`) or with `--output GLOB` (repeatable).
   Only declared files, the log and a result record come back, and never into `.git` or `.mu` (a wildcard matches no
   hidden name). Keep them small (fetch stops above 50 MB unless `--max-size`).
