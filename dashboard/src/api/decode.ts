@@ -3,8 +3,8 @@
 // safe default) so a hostile or broken answer can never reach a component as the wrong type. Every departure from the
 // contract is recorded in `problems`: the page ignores them, the tests (D38) require none on the golden fixtures.
 import type {
-  JobDetail, JobMetrics, JobRow, JobState, JobsList, Limits, LiveJob, LogPiece, MacCard, MetricSample, NodeCard,
-  NodeError, NodeHello, NodeState, NodeStats, Overview, Series, Session, Usage,
+  DisplayState, Grant, JobDetail, JobMetrics, JobRow, JobState, JobsList, Limits, LiveJob, LogPiece, MacCard, MetricSample,
+  NodeCard, NodeError, NodeHello, NodeState, NodeStats, Overview, Paused, Series, Session, Usage, Who,
 } from "./types";
 
 export class ApiMismatch extends Error {} // "api" is not 1: the page and the server are from different releases
@@ -264,7 +264,11 @@ function decodeStats(c: Ctx, st: Obj, p: string): NodeStats {
     psi: { cpu_some10: n(c, psi, "cpu_some10", `${p}.psi`, 0, 100), mem_some10: n(c, psi, "mem_some10", `${p}.psi`, 0, 100) },
     disk: { free_gb: n(c, disk, "free_gb", `${p}.disk`, 0, 1e9), min_free_gb: n(c, disk, "min_free_gb", `${p}.disk`, 0, 1e9) },
     uptime_s: n(c, st, "uptime_s", p, 0, 1e10),
-    queue: { running: n(c, q, "running", `${p}.queue`, 0, 1e6), queued: n(c, q, "queued", `${p}.queue`, 0, 1e6) },
+    queue: {
+      running: n(c, q, "running", `${p}.queue`, 0, 1e6), queued: n(c, q, "queued", `${p}.queue`, 0, 1e6),
+      held: n(c, q, "held", `${p}.queue`, 0, 1e6), paused: n(c, q, "paused", `${p}.queue`, 0, 1e6),
+      express: n(c, q, "express", `${p}.queue`, 0, 1e6),
+    },
     node_stale: b(c, st, "node_stale", p),
   };
 }
@@ -302,7 +306,7 @@ export function decodeNode(v: unknown, c: Ctx, p = "node"): NodeCard {
 }
 
 // ------------------------------------------------------------------------------------------------ jobs
-const JOB_STATES = ["queued", "running", "succeeded", "failed", "cancelled", "timeout", "oom", "interrupted", "unknown"] as const;
+const JOB_STATES = ["queued", "held", "running", "succeeded", "failed", "cancelled", "timeout", "oom", "interrupted", "unknown"] as const;
 export const JOB_ID = /^[0-9]{8}-[0-9]{6}-[0-9a-z]{6}$/;
 
 function decodeLimits(c: Ctx, l: Obj, p: string): Limits {
@@ -332,7 +336,58 @@ function decodeLive(c: Ctx, l: Obj, p: string): LiveJob {
     anon: n(c, l, "anon", p), file: n(c, l, "file", p), shmem: n(c, l, "shmem", p),
     peak: n(c, l, "peak", p), max: n(c, l, "max", p), pids: n(c, l, "pids", p, 0, 1e9),
     log_size: n(c, l, "log_size", p, 0, 1e15),
+    grant_cores: n(c, l, "grant_cores", p, 0, MAX_CORES),
+    class: l.class === null ? null : oneOf(c, l, "class", p, CLASSES, "normal"),
+    paused: b(c, l, "paused", p),
   };
+}
+
+const CLASSES = ["normal", "express", "borrowing"] as const;
+const BANDS = ["urgent", "high", "normal", "low"] as const;
+const PHASES = ["freezing", "frozen", "thawing"] as const;
+
+function decodeWho(c: Ctx, o: Obj, k: string, p: string): Who | null {
+  const w = objOrNull(c, o, k, p);
+  return w === null ? null : { by: s(c, w, "by", `${p}.${k}`, 64), at: n(c, w, "at", `${p}.${k}`, 0, MAX_T) };
+}
+
+function decodePaused(c: Ctx, z: Obj, p: string): Paused {
+  return {
+    phase: z.phase === null ? null : oneOf(c, z, "phase", p, PHASES, "frozen"),
+    since: n(c, z, "since", p, 0, MAX_T),
+    until: n(c, z, "until", p, 0, MAX_T),
+    by: s(c, z, "by", p, 64),
+    why: z.why === null ? null : oneOf(c, z, "why", p, ["hand", "auto"] as const, "hand"),
+    for_job: s(c, z, "for_job", p, 40),
+    held_mem_bytes: n(c, z, "held_mem_bytes", p),
+    lent_to: strList(c, z, "lent_to", p, 40, 16),
+    resume_asked: decodeWho(c, z, "resume_asked", p),
+    resumes_by: n(c, z, "resumes_by", p, 0, MAX_T),
+  };
+}
+
+function decodeGrant(c: Ctx, g: Obj, p: string): Grant {
+  return {
+    cores: n(c, g, "cores", p, 0, MAX_CORES),
+    cpus: s(c, g, "cpus", p, 200),
+    mem_bytes: n(c, g, "mem_bytes", p),
+    time_s: n(c, g, "time_s", p, 0, 1e9),
+    class: g.class === null ? null : oneOf(c, g, "class", p, CLASSES, "normal"),
+    borrowed: arr(c, g, "borrowed", p, 16).map((x, i) => {
+      const b0 = obj(c, x, `${p}.borrowed[${i}]`);
+      const bp = `${p}.borrowed[${i}]`;
+      return { from: s(c, b0, "from", bp, 40), cpus: s(c, b0, "cpus", bp, 200), mem_bytes: n(c, b0, "mem_bytes", bp), until: n(c, b0, "until", bp, 0, MAX_T) };
+    }),
+  };
+}
+
+/** The display state (contract §2): paused while freezing or frozen with no resume asked; resuming once a resume is
+ *  asked or while thawing. A paused job's `state` stays "running". */
+export function displayOf(state: JobState, paused: Paused | null): DisplayState | null {
+  if (state !== "running" || paused === null) return null;
+  if (paused.resume_asked !== null || paused.phase === "thawing") return "resuming";
+  if (paused.phase === "freezing" || paused.phase === "frozen") return "paused";
+  return null;
 }
 
 export function decodeJob(v: unknown, c: Ctx, p = "job"): JobRow {
@@ -340,6 +395,12 @@ export function decodeJob(v: unknown, c: Ctx, p = "job"): JobRow {
   const usage = objOrNull(c, o, "usage", p);
   const live = objOrNull(c, o, "live", p);
   const limits = objOrNull(c, o, "limits", p);
+  const grant = objOrNull(c, o, "grant", p);
+  const pz = objOrNull(c, o, "paused", p);
+  const tm = objOrNull(c, o, "time", p);
+  // paused-as-running (D48's fault): the decoder drops `paused`, so a frozen job looks like a running one
+  const paused = pz === null || __FAULT_PAUSED_AS_RUNNING__ ? null : decodePaused(c, pz, `${p}.paused`);
+  const state = oneOf(c, o, "state", p, JOB_STATES, "unknown");
   let id = sReq(c, o, "job_id", p, 40);
   if (!JOB_ID.test(id)) {
     c.note(`${p}.job_id`, "not a job id");
@@ -353,7 +414,7 @@ export function decodeJob(v: unknown, c: Ctx, p = "job"): JobRow {
     project: s(c, o, "project", p, 200),
     project_id: s(c, o, "project_id", p, 200),
     mine: b(c, o, "mine", p),
-    state: oneOf(c, o, "state", p, JOB_STATES, "unknown"),
+    state,
     position: n(c, o, "position", p, 0, 1e6),
     attempt: n(c, o, "attempt", p, 0, 1e6),
     queued_at: n(c, o, "queued_at", p, 0, MAX_T),
@@ -368,6 +429,21 @@ export function decodeJob(v: unknown, c: Ctx, p = "job"): JobRow {
     limits: limits === null ? null : decodeLimits(c, limits, `${p}.limits`),
     as_of: n(c, o, "as_of", p, 0, MAX_T),
     stale: b(c, o, "stale", p),
+    band: o.band === null ? null : oneOf(c, o, "band", p, BANDS, "normal"),
+    held: decodeWho(c, o, "held", p),
+    place: n(c, o, "place", p, 0, 1e6),
+    class: o.class === null ? null : oneOf(c, o, "class", p, CLASSES, "normal"),
+    grant: grant === null ? null : decodeGrant(c, grant, `${p}.grant`),
+    ends_by: n(c, o, "ends_by", p, 0, MAX_T),
+    pausable: o.pausable === null ? null : b(c, o, "pausable", p),
+    paused,
+    time: tm === null ? null : {
+      limit_s: n(c, tm, "limit_s", `${p}.time`, 0, 1e9), run_s: n(c, tm, "run_s", `${p}.time`, 0, 1e10),
+      paused_s: n(c, tm, "paused_s", `${p}.time`, 0, 1e10), budget_left_s: n(c, tm, "budget_left_s", `${p}.time`, 0, 1e10),
+    },
+    run_s: n(c, o, "run_s", p, 0, 1e10),
+    paused_s: n(c, o, "paused_s", p, 0, 1e10),
+    display: displayOf(state, paused),
   };
 }
 
@@ -398,6 +474,7 @@ export function decodeOverview(v: unknown, c = new Ctx()): Overview {
     summary: {
       nodes: nReq(c, sum, "nodes", `${p}.summary`, 0, 1e4), online: nReq(c, sum, "online", `${p}.summary`, 0, 1e4),
       running: nReq(c, sum, "running", `${p}.summary`, 0, 1e6), queued: nReq(c, sum, "queued", `${p}.summary`, 0, 1e6),
+      held: nReq(c, sum, "held", `${p}.summary`, 0, 1e6), paused: nReq(c, sum, "paused", `${p}.summary`, 0, 1e6),
     },
   };
 }
@@ -471,6 +548,9 @@ export function decodeJobDetail(v: unknown, c = new Ctx()): JobDetail {
       fetch: sReq(c, cmd, "fetch", `${p}.commands`, 300),
       cancel: sReq(c, cmd, "cancel", `${p}.commands`, 300),
       node: sReq(c, cmd, "node", `${p}.commands`, 300),
+      resume: sReq(c, cmd, "resume", `${p}.commands`, 300),
+      release: sReq(c, cmd, "release", `${p}.commands`, 300),
+      front: sReq(c, cmd, "front", `${p}.commands`, 300),
     },
   };
 }
@@ -516,6 +596,7 @@ export function decodeJobMetrics(v: unknown, c = new Ctx()): JobMetrics {
         t: nReq(c, m, "t", sp, 0, MAX_T), cpu: n(c, m, "cpu", sp, 0, MAX_CORES), anon: n(c, m, "anon", sp),
         file: n(c, m, "file", sp), shmem: n(c, m, "shmem", sp), cur: n(c, m, "cur", sp), peak: n(c, m, "peak", sp),
         max: n(c, m, "max", sp), pids: n(c, m, "pids", sp, 0, 1e9), psi_mem: n(c, m, "psi_mem", sp, 0, 100),
+        paused: b(c, m, "paused", sp),
       };
     }),
     complete: b(c, o, "complete", p),

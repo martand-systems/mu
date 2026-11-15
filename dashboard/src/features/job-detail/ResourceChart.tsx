@@ -47,17 +47,52 @@ function axes(c: Colours, yFmt: (v: number) => string, xLabels: boolean): uPlot.
   ];
 }
 
-function Pane({ data, opts, width, onCursor, label }: { data: uPlot.AlignedData; opts: Omit<uPlot.Options, "width">; width: number; onCursor: (i: number | null) => void; label: string }) {
+/** Hatched spans where the job was frozen, labelled "paused" (contract §6), drawn under the series. */
+function drawPaused(u: uPlot, spans: [number, number][], ink: string) {
+  if (!spans.length) return;
+  const ctx = u.ctx;
+  const { top, height } = u.bbox;
+  const px = devicePixelRatio || 1;
+  for (const [a, b] of spans) {
+    const x0 = u.valToPos(a, "x", true);
+    const x1 = Math.max(u.valToPos(b, "x", true), x0 + 2 * px);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, top, x1 - x0, height);
+    ctx.clip();
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = px;
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    for (let x = x0 - height; x < x1; x += 6 * px) {
+      ctx.moveTo(x, top + height);
+      ctx.lineTo(x + height, top);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = ink;
+    ctx.font = `${Math.round(11 * px)}px -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif`;
+    if (x1 - x0 > 44 * px) ctx.fillText("paused", x0 + 4 * px, top + 13 * px);
+    ctx.restore();
+  }
+}
+
+function Pane({ data, opts, width, onCursor, label, paused, ink }: { data: uPlot.AlignedData; opts: Omit<uPlot.Options, "width">; width: number; onCursor: (i: number | null) => void; label: string; paused: [number, number][]; ink: string }) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const cursorCb = useRef(onCursor);
+  const spans = useRef(paused);
   useEffect(() => {
     cursorCb.current = onCursor;
   }, [onCursor]);
   useEffect(() => {
+    spans.current = paused;
+    plot.current?.redraw(false);
+  }, [paused]);
+  useEffect(() => {
     if (!host.current || width < 50) return;
     const u = new uPlot(
-      { ...opts, width, hooks: { setCursor: [(self) => cursorCb.current(self.cursor.idx ?? null)] } },
+      { ...opts, width, hooks: { setCursor: [(self) => cursorCb.current(self.cursor.idx ?? null)], drawClear: [(self) => drawPaused(self, spans.current, ink)] } },
       data,
       host.current,
     );
@@ -68,7 +103,7 @@ function Pane({ data, opts, width, onCursor, label }: { data: uPlot.AlignedData;
     };
     // the chart is rebuilt when its options change (a theme change); new data only calls setData below
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opts, width]);
+  }, [opts, width, ink]);
   useEffect(() => {
     plot.current?.setData(data);
   }, [data]);
@@ -118,7 +153,9 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
   }), [colours, limitMem, hot, syncKey]);
 
   const coresData = useMemo((): uPlot.AlignedData => [cols.t, cols.cores, cols.t.map(() => limitCores)], [cols, limitCores]);
-  const memData = useMemo((): uPlot.AlignedData => [cols.t, cols.work, cols.cache, cols.t.map(() => limitMem)], [cols, limitMem]);
+  // the limit line follows memory.max: it steps down to the held amount while the job is frozen, and back up after
+  const memData = useMemo((): uPlot.AlignedData => [cols.t, cols.work, cols.cache, cols.max.map((m) => m ?? limitMem)], [cols, limitMem]);
+  const pausedS = cols.paused.reduce((a, [x, y]) => a + (y - x), 0);
 
   const at = idx !== null && idx < cols.t.length ? idx : cols.t.length - 1;
   const pick = (a: (number | null)[]) => {
@@ -126,7 +163,7 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
     return null;
   };
   const peakWork = cols.work.reduce<number | null>((m, v) => (v !== null && (m === null || v > m) ? v : m), null);
-  const summary = `${label}: memory ${bytes(lastWork)} now, peak ${bytes(peakWork)}, limit ${bytes(limitMem)}; cores ${num(pick(cols.cores))}${limitCores !== null ? ` of ${limitCores}` : ""}`;
+  const summary = `${label}: memory ${bytes(lastWork)} now, peak ${bytes(peakWork)}, limit ${bytes(limitMem)}; cores ${num(pick(cols.cores))}${limitCores !== null ? ` of ${limitCores}` : ""}${cols.paused.length ? `; paused ${cols.paused.length === 1 ? "once" : `${cols.paused.length} times`}, ${Math.round(pausedS / 60)} min` : ""}`;
 
   if (cols.t.length === 0) return <p className="px-3 py-6 text-sm text-text-muted">No samples yet: the node samples the job every 5 s once it runs.</p>;
 
@@ -137,13 +174,16 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className={`inline-block h-0.5 w-3 ${hot ? "bg-attention" : "bg-[var(--series-mem)]"}`} /><dt className="font-sans text-text-muted">working (anon+shm)</dt><dd className="text-text">{bytes(pick(cols.work))}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cache)]" /><dt className="font-sans text-text-muted">cache (reclaimable)</dt><dd className="text-text">{bytes(pick(cols.cache))}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block w-3 border-t border-dashed border-[var(--series-limit)]" /><dt className="font-sans text-text-muted">limit</dt><dd className="text-text">{bytes(limitMem)}</dd></div>
+        {cols.paused.length > 0 && (
+          <div className="flex items-center gap-1.5" data-testid="paused-legend"><span aria-hidden="true" className="inline-block h-2 w-3 border border-border-strong bg-[repeating-linear-gradient(135deg,var(--text-muted)_0_1px,transparent_1px_4px)]" /><dt className="font-sans text-text-muted">paused</dt><dd className="text-text">{Math.round(pausedS / 60)} min, cores not counted</dd></div>
+        )}
         <div className="flex items-center gap-1.5"><dt className="font-sans text-text-muted">at</dt><dd className="text-text">{clock(cols.t[at] ?? null)}</dd></div>
       </dl>
       <div ref={box} className="flex min-w-0 flex-col gap-1">
         <p className="text-xs text-text-muted" aria-hidden="true">cores</p>
-        <Pane data={coresData} opts={coresOpts} width={width} onCursor={setIdx} label={`cores over the run: ${summary}`} />
+        <Pane data={coresData} opts={coresOpts} width={width} onCursor={setIdx} label={`cores over the run: ${summary}`} paused={cols.paused} ink={colours.axis} />
         <p className="mt-2 text-xs text-text-muted" aria-hidden="true">memory</p>
-        <Pane data={memData} opts={memOpts} width={width} onCursor={setIdx} label={`memory over the run: ${summary}`} />
+        <Pane data={memData} opts={memOpts} width={width} onCursor={setIdx} label={`memory over the run: ${summary}`} paused={cols.paused} ink={colours.axis} />
       </div>
       <div>
         <ToggleButton pressed={table} onChange={setTable} icon={Table2}>show as table</ToggleButton>

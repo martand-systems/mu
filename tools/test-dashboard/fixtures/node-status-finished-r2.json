@@ -1,0 +1,44 @@
+{
+ "attempt": 1,
+ "band": "normal",
+ "cancel_requested": false,
+ "ended_at": "2026-11-14T07:23:20Z",
+ "exit_code": 0,
+ "job_id": "20261114-042000-3zv05p",
+ "log_size": 224276,
+ "name": "frame-fea",
+ "note": null,
+ "ok": true,
+ "paused_s": 840.0,
+ "pauses": [
+  {
+   "by": "avi-mac",
+   "for_job": null,
+   "from": "2026-11-14T05:43:20Z",
+   "lent_mem_bytes": 3920000000,
+   "to": "2026-11-14T05:57:20Z",
+   "why": "hand"
+  }
+ ],
+ "position": null,
+ "project_id": "jatayu-6fbf5aebb090",
+ "queued_at": "2026-11-14T04:20:00Z",
+ "run_s": 10140.0,
+ "started_at": "2026-11-14T04:20:20Z",
+ "state": "succeeded",
+ "unit": "mu-job-20261114-042000-3zv05p.service",
+ "usage": {
+  "cores_avg": 16.91,
+  "cpu_s": 171467.4,
+  "mem_events": {
+   "max": 0,
+   "oom_kill": 0
+  },
+  "mem_peak_bytes": 11270000000,
+  "mem_work_peak_bytes": 9800000000,
+  "pids_peak": 44,
+  "source": "cgroup",
+  "sys_s": 1714.7,
+  "user_s": 169752.7
+ }
+}

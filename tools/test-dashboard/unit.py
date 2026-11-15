@@ -1180,11 +1180,132 @@ def t_agent():
          "a real LaunchAgent is not loaded by the tests (the owner's Mac and CI runners)")
 
 
+# ------------------------------------------------------------------------------------------------ phase 1b (Mac side)
+def tag(name, f):
+    """A check's name, tagged when its own fault is on (run.sh's must_fail_tagged counts only tagged FAILs)."""
+    return name + (" (fault %s is on: this must FAIL)" % f if durable.fault(f) else "")
+
+
+def t_phase1b():
+    # D04b: v2026.11.10's node (features without stats): the old-node plan, nothing it would refuse
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    p = InProc("r1-node", clock=clock)
+    node = p.sc.nodes["office-pc"]
+    p.ticks(600)
+    verbs = sorted({v for (_, v, _) in calls(node)})
+    check(tag("D04b: a node whose features lack stats is asked only hello, list, status (no stats, watch, metrics)",
+              "features-any"), set(verbs) <= {"hello", "list", "status"}, verbs)
+    n = len(calls(node, "list"))
+    check(tag("D04b: ... on the old-node steps (15 s busy, 60 s idle): 10 to 45 list calls in 10 min", "features-any"),
+          10 <= n <= 45, n)
+    card = p.app.workers["office-pc"].card()
+    check(tag("D04b: the card says 'update μ on office-pc for live statistics'", "features-any"),
+          card["old_node"] and card["old_node_text"] == "update μ on office-pc for live statistics",
+          (card["old_node"], card["old_node_text"]))
+    check(tag("D04b: the node card is online, not an error (no refused verb)", "features-any"),
+          card["state"] == "online" and card["error"] is None, (card["state"], card["error"]))
+    held = [r for r in p.app.rows() if r["state"] == "held"]
+    check("phase 1b: a held job is shown held, with who held it (r1 already sends it)",
+          len(held) == 1 and held[0]["held"] and held[0]["held"]["by"] == "avi-mac", held)
+    p.stop()
+    # the paused scenario: release 2's fields reach the API (contract §3.1)
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    p = InProc("paused", clock=clock)
+    p.ticks(10)
+    rows = {r["name"]: r for r in p.app.rows()}
+    lender, bor, res = rows["frame-fea"], rows["sched-probe"], rows["cfd-wing"]
+    if "frame-fea" in rows and rows["frame-fea"]["state"] != "running":
+        lender = [r for r in p.app.rows() if r["name"] == "frame-fea" and r["state"] == "running"][0]
+    check(tag("phase 1b: a paused lender's row: paused.phase frozen, lent_to, time.paused_s, its state running",
+              "drop-sched-fields"),
+          lender["state"] == "running" and (lender["paused"] or {}).get("phase") == "frozen" and
+          (lender["paused"] or {}).get("lent_to") == [bor["job_id"]] and (lender["time"] or {}).get("paused_s", 0) >= 300,
+          (lender["paused"], lender["time"]))
+    check(tag("phase 1b: a borrower's row: class borrowing, borrowed from the lender", "drop-sched-fields"),
+          bor["class"] == "borrowing" and bor["grant"] and bor["grant"]["borrowed"] and
+          bor["grant"]["borrowed"][0]["from"] == lender["job_id"], bor["grant"])
+    check(tag("phase 1b: a job whose resume was asked carries resume_asked and resumes_by", "drop-sched-fields"),
+          res["paused"] and res["paused"]["resume_asked"] and res["paused"]["resume_asked"]["by"] == "avi-mac" and
+          res["paused"]["resumes_by"], res["paused"])
+    bands = {r["name"]: r["band"] for r in p.app.rows() if r["state"] == "queued"}
+    check(tag("phase 1b: bands reach the rows (urgent, low)", "drop-sched-fields"),
+          bands.get("loads-check") == "urgent" and bands.get("sweep-aoa") == "low", bands)
+    fin = [r for r in p.app.rows() if r["state"] == "succeeded" and r["paused_s"]]
+    check(tag("phase 1b: a finished job that was paused has run_s and paused_s", "drop-sched-fields"),
+          fin and fin[0]["paused_s"] == 840 and fin[0]["run_s"] and fin[0]["run_s"] < 10980, fin)
+    live = p.app.workers["office-pc"].live(clock.wall())
+    check("phase 1b: live figures carry grant_cores, class and paused (stats §3.4)",
+          live.get(lender["job_id"], {}).get("paused") is True and live[lender["job_id"]]["grant_cores"] == 20 and
+          live[bor["job_id"]]["class"] == "borrowing", live.get(lender["job_id"]))
+    m = p.app.api_metrics(lender["job_id"])
+    check("phase 1b: the whole-run series marks samples taken while paused",
+          any(x.get("paused") for x in m["samples"]) and not all(x.get("paused") for x in m["samples"]),
+          len(m["samples"]))
+    p.stop()
+    # a watch line that repeats a sample (only the rev moved) adds no point to the series
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    p = InProc("idle", clock=clock)
+    w = p.app.workers["office-pc"]
+    st = p.sc.nodes["office-pc"].stats()
+    w.on_stats(dict(st))
+    w.on_stats(dict(st, rev=st["rev"] + 1))
+    check("phase 1b: the series drops a watch line whose t it already has", len(w.series) == 1, len(w.series))
+    p.stop()
+
+
+def t_compute_status():
+    """D21: mu compute status --json carries `stats` from a node with the feature, and none from an older node."""
+    import io
+    import contextlib
+    base = tmpdir("cstatus")
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    nodes = {"new": dashfake.Scenario("busy", clock=clock).nodes["office-pc"],
+             "old": dashfake.Scenario("r1-node", clock=clock).nodes["office-pc"]}
+
+    class C:
+        def __init__(self, conf):
+            self.n = nodes[conf["name"]]
+            self.cp = "x"
+
+        def muxed(self):
+            return True
+
+        def call(self, verb, **a):
+            return self.n.call(verb, **{k: str(v) for k, v in a.items()})
+    saved = jobs.Conn, jobs.load_node
+    jobs.Conn = C
+    jobs.load_node = lambda n: {"name": n, "_dir": base}
+    try:
+        out = {}
+        for name in ("new", "old"):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = jobs.cmd_compute_status(type("A", (), {"node": name, "json": True})())
+            out[name] = (rc, json.loads(buf.getvalue()))
+    finally:
+        jobs.Conn, jobs.load_node = saved
+    st = out["new"][1].get("stats")
+    check(tag("D21: mu compute status --json includes stats from a node with the feature", "drop-stats"),
+          isinstance(st, dict) and st.get("ok") and "host" in st and "running" in st, st)
+    check("D21: ... and omits it, without an error, from an older node",
+          out["old"][0] == 0 and "stats" not in out["old"][1] and out["old"][1].get("ok"), out["old"])
+    calls_old = sorted({v for (_, v, _) in calls(nodes["old"])})
+    check("D21: an older node is not asked for stats", calls_old == ["hello"], calls_old)
+    # mu fetch marks fetched in jobs.index (phase 1b)
+    jobs.index_append({"job_id": "20261114-093500-hl3b0o", "node": "office-pc", "fetched": None})
+    jobs.index_mark_fetched("20261114-093500-hl3b0o")
+    e = jobs.index_read().get("20261114-093500-hl3b0o") or {}
+    check(tag("phase 1b: mu fetch marks the job fetched in jobs.index", "no-fetched-mark"),
+          bool(e.get("fetched")) and e.get("node") == "office-pc", e)
+    shutil.rmtree(base, ignore_errors=True)
+
+
 SECTIONS = {
     "allowlist": t_allowlist, "controlpath": t_controlpath, "http": t_http, "lifecycle": t_lifecycle, "open": t_open,
     "submitline": t_submitline, "index": t_index, "oldnode": t_oldnode, "errors": t_errors, "idle": t_idle,
     "battery": t_battery, "nodes": t_nodes, "stale": t_stale, "wake": t_wake, "devguard": t_devguard, "logs": t_logs,
     "fixtures": t_fixtures, "sampler": t_sampler, "build": t_build, "agent": t_agent,
+    "phase1b": t_phase1b, "compute-status": t_compute_status,
 }
 
 if __name__ == "__main__":

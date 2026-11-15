@@ -233,6 +233,36 @@ for p in $PYS; do
   done
   py_section "$p" atomic "$([ "${QUICK:-0}" = 1 ] && echo 30 || echo 120)"
 done
+section "dashboard 1b: the node's sampler, rev and read-only verbs (tools/test-jobs/unit_stats.py)"
+stats_section() {   # stats_section PY [SECTIONS]: unit_stats.py's ok/FAIL lines count here
+  local py="$1" out rc; shift
+  out="$("$py" -I -S "$HERE/unit_stats.py" "$@" 2>&1)"; rc=$?
+  printf '%s\n' "$out" | while IFS= read -r l; do printf '  %s\n' "$l"; done
+  PASS=$((PASS + $(printf '%s\n' "$out" | grep -c '^ok ')))
+  if [ "$rc" != 0 ] || printf '%s\n' "$out" | grep -q '^Traceback'; then
+    FAILN=$((FAILN + 1)); FAILED="$FAILED
+  - unit_stats.py $* ($(basename "$py"), exit $rc)"
+  fi
+}
+stats_must_fail() {   # stats_must_fail FAULT SECTION: only a FAIL of a check tagged with FAULT counts
+  local f="$1" out n; shift
+  out="$(MU_JOBS_FAULT="$f" "$PY1" -I -S "$HERE/unit_stats.py" "$@" 2>&1)"
+  n="$(printf '%s\n' "$out" | grep -c "^FAIL .*(fault $f is on")"
+  if [ "$n" -gt 0 ]; then ok "must-fail: dashboard 1b $*, with fault $f ($n check(s) tagged with it failed, as they must)"
+  else bad "must-fail: dashboard 1b $*, with fault $f: no check tagged with it failed" "$(printf '%s\n' "$out" | grep -E '^FAIL|Traceback')"; fi
+}
+for p in $PYS; do stats_section "$p"; done
+stats_must_fail rev-frozen rev
+stats_must_fail no-age host
+stats_must_fail rename-field-node host
+stats_must_fail paused-line-missing line
+stats_must_fail metrics-from-zero verbs
+stats_must_fail journal-each-call verbs
+stats_must_fail no-cap verbs
+stats_must_fail sampler-scan-all sampler
+stats_must_fail cores-avg-by-wall runtime
+stats_must_fail read-cgroup-after-exit runtime
+stats_must_fail stats-scan cost
 section "the same checks, each with its fault put in"
 must_fail "torn records (a changed record with the old sum)" no-checksum "$PY1" durable
 must_fail "atomic write" in-place "$PY1" atomic 120

@@ -10,7 +10,8 @@ import { bytes, clock, duration, num, shortDuration } from "../../lib/format";
 import { jobHref, openJob } from "../../lib/route";
 import { EmptyState } from "../../ui/EmptyState";
 import { Segmented } from "../../ui/Segmented";
-import { JobStateBadge } from "../../ui/StateBadge";
+import { BandChip, JobStateBadge } from "../../ui/StateBadge";
+import { schedText, type NameOf } from "../../lib/sched";
 
 type SortKey = "name" | "time" | "mem";
 type Sort = { key: SortKey; dir: "ascending" | "descending" } | null;
@@ -20,7 +21,8 @@ const FINISHED = new Set(["succeeded", "failed", "cancelled", "timeout", "oom", 
 
 /** The time column's seconds: the wait of a queued job, the elapsed time of a running one, the wall time of a finished one. */
 export function jobSeconds(j: JobRow, now: number): number | null {
-  if (j.state === "queued") return j.queued_at !== null ? now - j.queued_at : null;
+  if (j.state === "queued" || j.state === "held") return j.queued_at !== null ? now - j.queued_at : null;
+  if (j.state === "running" && j.time && j.time.run_s !== null) return j.time.run_s; // run time: paused time not counted
   if (j.state === "running") return j.started_at !== null ? now - j.started_at : null;
   if (j.started_at !== null && j.ended_at !== null) return j.ended_at - j.started_at;
   return null;
@@ -40,7 +42,7 @@ export function jobMem(j: JobRow): { v: number | null; mark: string; title: stri
 }
 
 function jobCores(j: JobRow): { v: number | null; of: number | null } {
-  if (j.state === "running" && j.live) return { v: j.live.cpu_cores, of: j.limits?.cores ?? null };
+  if (j.state === "running" && j.live) return { v: j.live.cpu_cores, of: j.live.grant_cores ?? j.limits?.cores ?? null };
   if (j.usage) return { v: j.usage.cores_avg, of: j.limits?.cores ?? null };
   return { v: null, of: null };
 }
@@ -71,7 +73,7 @@ export function noteText(state: string, note: string): string {
   return note.toLowerCase().startsWith(state.toLowerCase()) ? note : `${state}: ${note}`;
 }
 
-function Row({ j, now }: { j: JobRow; now: number }) {
+function Row({ j, now, nameOf }: { j: JobRow; now: number; nameOf: NameOf }) {
   const secs = jobSeconds(j, now);
   const mem = jobMem(j);
   const cores = jobCores(j);
@@ -81,8 +83,9 @@ function Row({ j, now }: { j: JobRow; now: number }) {
   const stale = rowStale || liveStale;
   const asOf = rowStale && j.as_of !== null ? j.as_of : liveStale && j.live ? j.live.t : null;
   const name = j.name ?? "(no name)";
-  const timeText = j.state === "queued" ? `waits ${shortDuration(secs)}` : duration(secs);
+  const timeText = j.state === "queued" || j.state === "held" ? `waits ${shortDuration(secs)}` : duration(secs);
   const fig = liveStale ? "text-stale" : "text-text";
+  const sched = schedText(j, now, nameOf);
   return (
     <>
       <tr
@@ -99,7 +102,8 @@ function Row({ j, now }: { j: JobRow; now: number }) {
       >
         <td className="px-2 py-1.5 max-md:col-start-1 max-md:row-start-1 max-md:p-0">
           <span className="inline-flex items-center gap-2 whitespace-nowrap">
-            <JobStateBadge state={j.state} position={j.position} />
+            <JobStateBadge state={j.state} position={j.position} display={j.display} />
+            <BandChip band={j.band} />
             {stale && (
               <span className="inline-flex items-center gap-0.5 text-xs text-stale" data-age="stale">
                 <Clock3 aria-hidden="true" size={11} />
@@ -139,11 +143,11 @@ function Row({ j, now }: { j: JobRow; now: number }) {
           <ChevronRight size={12} className="text-text-faint group-hover:text-text" />
         </td>
       </tr>
-      {j.note && (
+      {(j.note || sched) && (
         <tr className="max-md:block" data-note-for={j.job_id}>
           <td />
-          <td colSpan={8} className="px-2 pb-1.5 text-xs text-text-muted max-md:block max-md:px-3">
-            {noteText(j.state, j.note)}
+          <td colSpan={8} className="px-2 pb-1.5 text-xs text-text-muted max-md:block max-md:px-3" data-sched={sched ? "1" : undefined}>
+            {sched ?? noteText(j.state, j.note ?? "")}
             {j.usage?.source === "runner-sampled" && <> (~ last sample, up to 5 s old)</>}
           </td>
         </tr>
@@ -175,6 +179,10 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
   const [node, setNode] = useState<string>("all");
   const [sort, setSort] = useState<Sort>(null);
   const nodeNames = useMemo(() => nodes.map((n) => n.name), [nodes]);
+  const nameOf = useMemo(() => {
+    const m = new Map(jobs.map((j) => [j.job_id, j.name ?? j.short]));
+    return (id: string) => m.get(id) ?? id.slice(-6);
+  }, [jobs]);
   const shown = useMemo(
     () => sorted(jobs.filter((j) => (from === "all" || j.mine) && (node === "all" || j.node === node)), sort, now),
     [jobs, from, node, sort, now],
@@ -245,7 +253,7 @@ export function JobTable({ jobs, nodes, more, firstNode }: { jobs: JobRow[]; nod
             </thead>
             <tbody className="max-md:block">
               {shown.map((j) => (
-                <Row key={j.job_id} j={j} now={now} />
+                <Row key={j.job_id} j={j} now={now} nameOf={nameOf} />
               ))}
             </tbody>
           </table>

@@ -39,6 +39,13 @@ must_fail() {    # must_fail FAULT PY SECTION: with MU_JOBS_FAULT=FAULT the sect
   if [ "$n" -gt 0 ]; then ok "must-fail: $*, with fault $f ($n check(s) failed, as they must)"
   else bad "must-fail: $*, with fault $f: nothing failed" "$out"; fi
 }
+must_fail_tagged() {   # as must_fail, but only a FAIL of a check tagged with that fault counts (phase 1b)
+  local f="$1" py="$2" out n; shift 2
+  out="$(cd "$ROOT" && MU_JOBS_FAULT="$f" "$py" -I -S "$HERE/unit.py" "$@" 2>&1)"
+  n="$(printf '%s\n' "$out" | grep -c "^FAIL .*(fault $f is on")"
+  if [ "$n" -gt 0 ]; then ok "must-fail: $*, with fault $f ($n check(s) tagged with it failed, as they must)"
+  else bad "must-fail: $*, with fault $f: no check tagged with it failed" "$(printf '%s\n' "$out" | grep -E '^FAIL|Traceback')"; fi
+}
 
 PYS="${MU_TEST_PYTHONS:-}"
 if [ -z "$PYS" ]; then
@@ -54,7 +61,7 @@ export MU_HOME="$ROOT/mu home"; mkdir -p "$MU_HOME"
 export NO_COLOR=1
 unset MU_JOBS_FAULT MU_NODE_FAULT MU_DASH_BATTERY MU_LAUNCHCTL MU_LAUNCH_AGENTS_DIR MU_OPENER MU_VERSION 2>/dev/null || true
 
-FAST="allowlist controlpath devguard submitline index oldnode errors idle battery wake nodes stale logs fixtures agent http open"
+FAST="allowlist controlpath devguard submitline index oldnode errors idle battery wake nodes stale logs fixtures agent http open phase1b compute-status"
 SLOW="lifecycle sampler"
 [ "${QUICK:-0}" = 1 ] && SLOW=""
 for py in $PYS; do
@@ -97,6 +104,11 @@ must_fail serve-last-as-live  "$PY1" stale
 must_fail list-age-only       "$PY1" stale
 must_fail rename-field        "$PY1" fixtures
 must_fail stale-build         "$PY1" build
+# phase 1b (docs/design/dashboard.md §7.1.2): each on the check it targets
+must_fail_tagged features-any      "$PY1" phase1b
+must_fail_tagged drop-sched-fields "$PY1" phase1b
+must_fail_tagged drop-stats        "$PY1" compute-status
+must_fail_tagged no-fetched-mark   "$PY1" compute-status
 [ -n "$SLOW" ] && must_fail no-lock "$PY1" lifecycle
 if [ -n "$SLOW" ] && "$PY1" -I -S -c "import sys; sys.path.insert(0, '$REPO/src'); from mu import dashboard; sys.exit(dashboard.load_psutil() is None)" 2>/dev/null; then
   must_fail cpu-first-call    "$PY1" sampler

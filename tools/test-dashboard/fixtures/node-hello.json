@@ -1,4 +1,5 @@
 {
+ "auto_pause": "marked",
  "autoupdate": {
   "enabled": true,
   "last_result": "ok"
@@ -10,10 +11,14 @@
   "where": "C: (/mnt/c)"
  },
  "features": [
-  "stats",
+  "sched",
   "usage",
+  "queue-control",
+  "update",
+  "stats",
   "watch",
-  "metrics"
+  "metrics",
+  "pause"
  ],
  "hw": {
   "cores_logical": 32,
@@ -41,9 +46,13 @@
  },
  "node": "office-pc",
  "ok": true,
+ "pause": {
+  "mem_lend": true
+ },
  "protocol": 1,
  "protocol_min": 1,
  "queue": {
+  "paused": 0,
   "queued": 1,
   "running": 2
  },

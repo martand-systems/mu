@@ -9,7 +9,7 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { apiJson, expect, gotoJob, openDash, restartServer, setTheme, stopServer, test, type Dash } from "./helpers";
 
-const WEBKIT_TOO = /^(D05|D06|D07|D16|D29|D42|D47)\b/;
+const WEBKIT_TOO = /^(D05|D06|D07|D16|D29|D42|D47|D48)\b/;
 test.beforeEach(({ browserName }, info) => {
   test.skip(browserName === "webkit" && !WEBKIT_TOO.test(info.title), "Chromium only (§7.1)");
 });
@@ -46,6 +46,68 @@ test("D04 an old node (no features): the jobs are listed and the card says to up
   await gotoJob(page, id);
   await expect(page.getByTestId("resources-old-node"), "D04: the detail of an old node's job has no chart").toBeVisible();
   await expect(page.getByTestId("resource-chart")).toHaveCount(0);
+});
+
+test("D04b a v2026.11.10 node (features without stats): the old-node card, no error", async ({ page, serve }) => {
+  const d = await serve("r1-node");
+  await openDash(page, d);
+  const card = page.getByTestId("card-node-office-pc");
+  await expect(card.locator('[data-machine-state="old-node"]'), "D04b: the r1 node's card asks for an update").toBeVisible({ timeout: 15000 });
+  await expect(card.getByText(/live figures start after it updates$/), "D04b: the r1 node's card asks for an update").toBeVisible();
+  await page.waitForTimeout(4000); // a watch or stats call would have been refused by now
+  await expect(card.locator('[data-machine-state="error"]'), "D04b: no refused verb turns the card to error").toHaveCount(0);
+  await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
+  const held = page.locator('tr[data-state="held"]');
+  await expect(held, "D04b: a held job is shown held").toHaveCount(1);
+  await expect(page.locator(`[data-note-for="${await held.getAttribute("data-job")}"]`)).toContainText(/^held by avi-mac \d\d:\d\d · keeps place \d+$/);
+});
+
+// ------------------------------------------------------------------------------------------------ D48
+test("D48 scheduler release 2 on the page: paused, resuming, held, borrower and bands", async ({ page, serve }) => {
+  const d = await serve("paused");
+  await openDash(page, d);
+  await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
+  const named = (n: string) => page.locator("tr[data-job]").filter({ has: page.getByRole("link", { name: n, exact: true }) }).filter({ hasNot: page.locator('[data-state="succeeded"]') });
+  const lender = named("frame-fea");
+  const lid = (await lender.first().getAttribute("data-job"))!;
+  await expect(lender.first().locator('[data-state="paused"]'), "D48: the frozen lender shows paused, not running").toBeVisible({ timeout: 15000 });
+  await expect(page.locator(`[data-note-for="${lid}"]`)).toContainText(/^paused by avi-mac until \d\d:\d\d · resumes by itself$/);
+  // a paused job never shows orange: no running-coloured text in its row
+  const orange = await lender.first().evaluate((el) => {
+    const run = getComputedStyle(document.documentElement).getPropertyValue("--state-running").trim();
+    const probe = document.createElement("span");
+    probe.style.color = run;
+    document.body.append(probe);
+    const want = getComputedStyle(probe).color;
+    probe.remove();
+    return [...el.querySelectorAll("*")].some((x) => getComputedStyle(x).color === want);
+  });
+  expect(orange, "D48: no orange on a paused job").toBe(false);
+  const res = named("cfd-wing").first();
+  await expect(res.locator('[data-state="resuming"]'), "D48: resuming").toBeVisible();
+  await expect(page.locator(`[data-note-for="${await res.getAttribute("data-job")}"]`)).toContainText(/^resuming: waits for sched-probe \(ends by \d\d:\d\d\)$/);
+  const bor = named("sched-probe").first();
+  await expect(page.locator(`[data-note-for="${await bor.getAttribute("data-job")}"]`), "D48: the borrower").toContainText(/^on cores lent by frame-fea until \d\d:\d\d$/);
+  await expect(page.locator('tr[data-state="held"] [data-state="held"]'), "D48: held").toBeVisible();
+  await expect(page.locator('[data-band="urgent"]'), "D48: the urgent band chip").toBeVisible();
+  await expect(page.locator('[data-band="low"]'), "D48: the low band chip").toBeVisible();
+  await expect(page.locator('[data-band="normal"]')).toHaveCount(0);
+  // the node card: what a paused job keeps, and the paused count
+  const card = page.getByTestId("card-node-office-pc");
+  await expect(card.locator(`[data-job-line="${lid}"]`), "D48: the card says what the paused job keeps").toContainText(/keeps .* \(paused\)/);
+  await expect(card.locator('[data-fig="node-queue"]')).toContainText("2 paused · 1 held");
+  // the detail: the resume command, the time bar's words
+  await gotoJob(page, lid);
+  await expect(page.getByTestId("commands").getByText(/^mu resume \S+$/), "D48: the paused job's command is mu resume").toBeVisible();
+  await expect(page.getByTestId("time-label"), "D48: the time bar counts run time").toContainText(/run of 6h.* paused \(not counted\) · resumes by itself at \d\d:\d\d$/);
+  await expect(page.getByTestId("paused-legend"), "D48: the chart marks the paused span").toBeVisible({ timeout: 15000 });
+  await axe(page, "paused detail");
+  await page.goto(`${d.url}/`);
+  await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
+  await axe(page, "paused overview");
+  const heldId = await page.locator('tr[data-state="held"]').getAttribute("data-job");
+  await gotoJob(page, heldId);
+  await expect(page.getByTestId("commands").getByText(/^mu release \S+$/), "D48: the held job's command is mu release").toBeVisible();
 });
 
 test("D39 old-node budget, the page: each state change of the job is shown within 20 s", async ({ page, serve }) => {

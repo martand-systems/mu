@@ -23,6 +23,8 @@ MU_POLL_S (seconds between status polls, default 5), MU_JOBS_FAULT (comma-separa
   old-workstation    submit sends a spec without "sched" (what a workstation older than the scheduler sends)
   no-capacity-check  submit does not compare the request with the node's capacity (the node must refuse it)
   no-index           submit writes no jobs.index line (docs/design/dashboard.md D22)
+  drop-stats         mu compute status --json leaves out a node's stats (dashboard D21)
+  no-fetched-mark    mu fetch does not mark the job fetched in jobs.index (dashboard phase 1b)
   submit-waits       submit connects to the dashboard's port and waits for an answer (D19)
 """
 import argparse
@@ -332,6 +334,15 @@ def index_append(entry):
             os.close(fd)
     except OSError:
         pass
+
+
+def index_mark_fetched(job_id):
+    """mu fetch: the job's jobs.index entry again, with `fetched` set (the last line of a job wins). Best effort."""
+    if fault("no-fetched-mark"):
+        return
+    e = index_read().get(job_id)
+    if e is not None:
+        index_append(dict(e, fetched=proto.iso()))
 
 
 def _index_young(line):
@@ -1054,6 +1065,11 @@ def cmd_compute_status(a):
         try:
             ans = hello(conn)
             rec.update(ok=True, rtt_s=round(time.time() - t0, 3), reused=reused, hello=ans)
+            if "stats" in (ans.get("features") or []) and not fault("drop-stats"):
+                try:   # the node's live figures (dashboard D21); an older node has no `stats` and gets no call
+                    rec["stats"] = conn.call("stats")
+                except MuError as e:
+                    rec["stats"] = {"ok": False, "exit": e.code, "error": e.error, "message": e.message}
         except MuError as e:
             rec.update(ok=False, exit=e.code, error=e.error, message=e.message, next=e.hint, rtt_s=round(time.time() - t0, 3))
             worst = worst or e.code
@@ -2019,6 +2035,7 @@ def cmd_fetch(a):
         conn.fail(rc, err, st, muxed)
     written = box.get("written", [])
     record = run_record(res, conf["name"], prj)
+    index_mark_fetched(a.job_id)
     run_path = None
     if prj:
         ensure_dir(os.path.join(prj.root, "runs"), 0o755)

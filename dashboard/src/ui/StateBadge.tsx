@@ -1,10 +1,10 @@
 // StateBadge: the only place state colours are applied (docs/design/dashboard.md §5.3). Never colour alone: every
 // state has an icon and a word. Orange marks "running" only; errors are red, success a restrained green.
 import {
-  Ban, CircleAlert, CircleCheck, CircleDashed, CircleHelp, CircleSlash, CircleX, Clock3, CloudOff, KeyRound, LoaderCircle,
-  MemoryStick, Play, RefreshCw, ShieldX, TimerOff, TriangleAlert, type LucideIcon,
+  Ban, CircleAlert, CircleCheck, CircleDashed, CircleHelp, CirclePlay, CircleSlash, CircleX, Clock3, CloudOff, Hand,
+  KeyRound, LoaderCircle, MemoryStick, Pause, Play, RefreshCw, ShieldX, TimerOff, TriangleAlert, type LucideIcon,
 } from "lucide-react";
-import type { JobState, NodeState } from "../api/types";
+import type { Band, DisplayState, JobState, NodeState } from "../api/types";
 
 export type Tone = "running" | "queued" | "succeeded" | "failed" | "timeout" | "muted" | "attention" | "online";
 
@@ -28,6 +28,7 @@ type Look = { icon: LucideIcon; word: string; tone: Tone };
 export const JOB_LOOK: Record<JobState, Look> = {
   running: { icon: Play, word: "running", tone: "running" },
   queued: { icon: Clock3, word: "queued", tone: "queued" },
+  held: { icon: Hand, word: "held", tone: "muted" },
   succeeded: { icon: CircleCheck, word: "succeeded", tone: "succeeded" },
   failed: { icon: CircleX, word: "failed", tone: "failed" },
   oom: { icon: MemoryStick, word: "oom", tone: "failed" },
@@ -35,6 +36,12 @@ export const JOB_LOOK: Record<JobState, Look> = {
   cancelled: { icon: Ban, word: "cancelled", tone: "muted" },
   interrupted: { icon: CircleSlash, word: "interrupted", tone: "attention" },
   unknown: { icon: CircleHelp, word: "unknown", tone: "muted" },
+};
+
+// paused and resuming are display states of a running job (contract §2): grey, never orange
+export const DISPLAY_LOOK: Record<DisplayState, Look> = {
+  paused: { icon: Pause, word: "paused", tone: "muted" },
+  resuming: { icon: CirclePlay, word: "resuming", tone: "muted" },
 };
 
 export type MachineState = NodeState | "reconnecting" | "old-node" | "stale";
@@ -52,16 +59,26 @@ export const MACHINE_LOOK: Record<MachineState, Look> = {
   stale: { icon: Clock3, word: "stale", tone: "muted" },
 };
 
-export function JobStateBadge({ state, position }: { state: JobState; position?: number | null }) {
-  const l = JOB_LOOK[state];
+export function JobStateBadge({ state, position, display }: { state: JobState; position?: number | null; display?: DisplayState | null }) {
+  const l = display ? DISPLAY_LOOK[display] : JOB_LOOK[state];
   const Icon = l.icon;
   return (
-    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${toneClass(l.tone)}`} data-state={state}>
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${toneClass(l.tone)}`} data-state={display ?? state}>
       <Icon aria-hidden="true" size={14} strokeWidth={2} className="shrink-0" />
       <span>{l.word}</span>
       {state === "queued" && position !== null && position !== undefined && (
         <span className="font-mono tabular-nums text-text-muted">#{position}</span>
       )}
+    </span>
+  );
+}
+
+/** A band chip: outlined and monochrome; "normal" is unmarked (contract §6). */
+export function BandChip({ band }: { band: Band | null }) {
+  if (band === null || band === "normal") return null;
+  return (
+    <span className="inline-flex items-center rounded-sm border border-border-strong px-1 text-[11px] leading-4 text-text-muted" data-band={band}>
+      {band}
     </span>
   );
 }

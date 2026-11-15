@@ -60,6 +60,9 @@
  "node": "office-pc",
  "ok": true,
  "queue": {
+  "express": 0,
+  "held": 0,
+  "paused": 0,
   "queued": 1,
   "running": 2
  },
@@ -67,22 +70,28 @@
  "running": [
   {
    "anon": 9651558527,
+   "class": "normal",
    "cpu_cores": 16.63,
    "file": 2100000000,
+   "grant_cores": 20,
    "job_id": "20261114-093500-hl3b0o",
    "log_size": 21803,
    "max": 22000000000,
+   "paused": false,
    "peak": 12637620868,
    "pids": 44,
    "shmem": 400000000
   },
   {
    "anon": 3175006931,
+   "class": "normal",
    "cpu_cores": 1.76,
    "file": 2100000000,
+   "grant_cores": 2,
    "job_id": "20261114-094640-0k1w3s",
    "log_size": 6123,
    "max": 8000000000,
+   "paused": false,
    "peak": 5902007208,
    "pids": 44,
    "shmem": 400000000

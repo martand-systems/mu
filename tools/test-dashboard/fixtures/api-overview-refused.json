@@ -92,8 +92,10 @@
  "now": 1794650002.0,
  "ok": true,
  "summary": {
+  "held": 0,
   "nodes": 1,
   "online": 0,
+  "paused": 0,
   "queued": 0,
   "running": 0
  }

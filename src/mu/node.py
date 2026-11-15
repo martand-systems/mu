@@ -117,7 +117,8 @@ ARG_RULES = {"id": proto.JOB_ID, "project": proto.PROJECT_ID, "repo": proto.REPO
              # queue control (scheduler.md §20.4): from and others are claims made by code mu owns, like by=
              "before": proto.JOB_ID, "after": proto.JOB_ID, "to": re.compile(r"^(front|back)$"),
              "class": re.compile(r"^(urgent|high|normal|low)$"), "from": proto.PROJECT_ID, "others": re.compile(r"^[01]$")}
-FEATURES = ("sched", "usage", "queue-control", "update")
+FEATURES = ("sched", "usage", "queue-control", "update", "stats", "watch", "metrics")
+ARG_RULES["interval"] = re.compile(r"^[0-9]{1,2}$")
 LOCK_WAIT_S = 120             # a verb waits this long for the queue lock (the runner holds it through checkouts)
 SAMPLE_EVERY = 5              # ticks between two samples of the running jobs (§7.1)
 STARTED_HERE = set()          # fault grant-in-memory-only: the jobs this runner process started
@@ -757,7 +758,11 @@ def sampled_usage(j, wall_s):
         return None
     out = {k: u.get(k) for k in ("cpu_s", "user_s", "sys_s", "mem_peak_bytes", "mem_work_peak_bytes", "pids_peak",
                                  "mem_events")}
-    out["cores_avg"] = round(u["cpu_s"] / wall_s, 2) if wall_s and isinstance(u.get("cpu_s"), (int, float)) else None
+    if fault("read-cgroup-after-exit"):   # the unit's cgroup is gone by now: this reads nothing
+        cg = (j["state"] or {}).get("cgroup") or "/nonexistent"
+        g = cg_usage(cg) if os.path.isdir("/sys/fs/cgroup" + cg) else {}
+        out = {k: g.get(k) for k in out}
+    out["cores_avg"] = nodestats.cores_avg(out.get("cpu_s"), j["state"], wall_s)
     out["source"] = "runner-sampled"
     out["sampled_at"] = u.get("t")
     return out
@@ -1222,7 +1227,7 @@ def verb_list(key, args):
     unfinished = [status_of(j, v) for j in mine if not j["result"]]
     finished = sorted((status_of(j, v) for j in mine if j["result"]), key=lambda s: s.get("ended_at") or "")[-limit:] if limit else []
     return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
-            "rev": int(v["order"].get("rev") or 0)}
+            "rev": nodestats.read_rev()}
 
 
 def verb_log(key, args):
@@ -1230,23 +1235,11 @@ def verb_log(key, args):
     off = int(args.get("offset", "0") or 0)
     cap = int(args["max"]) if args.get("max") else None
     follow = args.get("follow") == "1"
-    out = sys.stdout.buffer
     path = os.path.join(j["dir"], "log")
     sent = 0
     while True:
-        try:
-            with open(path, "rb") as f:
-                f.seek(off)
-                while cap is None or sent < cap:
-                    b = f.read(65536 if cap is None else min(65536, cap - sent))
-                    if not b:
-                        break
-                    out.write(b)
-                    out.flush()
-                    off += len(b)
-                    sent += len(b)
-        except FileNotFoundError:
-            pass
+        off, n = send_range(path, off, None if cap is None else cap - sent)
+        sent += n
         if not follow or (cap is not None and sent >= cap):
             return None
         if job_result(j["dir"]):
@@ -1257,6 +1250,26 @@ def verb_log(key, args):
                 return None
             continue
         time.sleep(0.5)
+
+
+def send_range(path, off, cap=None):
+    """The bytes of PATH from OFF (at most CAP) to stdout: log and metrics (dashboard §4.2). -> (new offset, sent)."""
+    out = sys.stdout.buffer
+    sent = 0
+    try:
+        with open(path, "rb") as f:
+            f.seek(off)
+            while cap is None or sent < cap:
+                b = f.read(65536 if cap is None else min(65536, cap - sent))
+                if not b:
+                    break
+                out.write(b)
+                out.flush()
+                off += len(b)
+                sent += len(b)
+    except FileNotFoundError:
+        pass
+    return off, sent
 
 
 def verb_fetch(key, args):
@@ -1592,8 +1605,10 @@ def serve(argv):
     if verb not in VERBS:
         journal("refused key=%s verb=%s unknown-verb" % (key, verb[:32]))
         return refuse(NodeError(proto.NODE_USAGE, "unknown-verb", "verbs: " + " ".join(sorted(VERBS)), verb=verb[:32]))
-    journal("key=%s verb=%s%s" % (key, verb, (" id=" + args["id"]) if "id" in args else (
-        " repo=" + args["repo"] if "repo" in args else "")))
+    quiet = verb in nodestats.QUIET_VERBS and not fault("journal-each-call")   # dashboard §4.2: refusals only
+    if not quiet:
+        journal("key=%s verb=%s%s" % (key, verb, (" id=" + args["id"]) if "id" in args else (
+            " repo=" + args["repo"] if "repo" in args else "")))
     try:
         if not os.path.isdir(ROOT) or not os.access(ROOT, os.W_OK):
             raise NodeError(proto.NODE_UNAVAILABLE, "not-enabled", "the root step makes it: mu-wsl2-distro install",
@@ -1603,6 +1618,8 @@ def serve(argv):
             answer(out)
         return 0
     except NodeError as e:
+        if quiet:
+            journal("refused key=%s verb=%s%s %s" % (key, verb, (" id=" + args["id"]) if "id" in args else "", e.error))
         return refuse(e)
     except BrokenPipeError:
         return 0
@@ -2006,6 +2023,7 @@ def step(first=False, stop=None, started=None):
     started with; once the default is another (an update moved it), nothing more starts until the runner restarts."""
     with Lock():
         jobs = scan_jobs()
+        nodestats.note_pass(jobs)
         node = node_info()
         cap_log = log_cap_bytes(node)
         running, drain = [], set()
@@ -2310,6 +2328,8 @@ def cg_usage(cg, prev=None):
     pids = read_text("/sys/fs/cgroup%s/pids.current" % cg).strip()
     cur = int(cur) if cur.isdigit() else None
     work = (mst.get("anon", 0) + mst.get("shmem", 0)) if mst else None
+    mmax = read_text("/sys/fs/cgroup%s/memory.max" % cg).strip()
+    psi = re.search(r"^some .*avg10=([0-9.]+)", read_text("/sys/fs/cgroup%s/memory.pressure" % cg), re.M)
 
     def mx(a, b):
         vals = [x for x in (a, b) if isinstance(x, int)]
@@ -2322,7 +2342,11 @@ def cg_usage(cg, prev=None):
            "mem_work_peak_bytes": mx(work, prev.get("mem_work_peak_bytes")),
            "mem_events": {"max": ev.get("max", 0), "oom_kill": ev.get("oom_kill", 0)} if ev else prev.get("mem_events"),
            "pids": int(pids) if pids.isdigit() else None,
-           "pids_peak": mx(int(pids) if pids.isdigit() else None, prev.get("pids_peak"))}
+           "pids_peak": mx(int(pids) if pids.isdigit() else None, prev.get("pids_peak")),
+           # phase 1b (dashboard §4.2): the figures of one metrics.jsonl line, and the monotonic time of the cpu rate
+           "anon": mst.get("anon"), "file": mst.get("file"), "shmem": mst.get("shmem"),
+           "mem_max": int(mmax) if mmax.isdigit() else None, "psi_mem": float(psi.group(1)) if psi else None,
+           "mono": round(time.monotonic(), 3)}
     return out
 
 
@@ -2347,21 +2371,38 @@ def thread_masks(cg, main_only=False):
 
 
 def sample():
-    """Every SAMPLE_EVERY ticks, outside the lock (§7.1): each running job's usage.json (a view: rename, no fsync) and
-    the per-thread CPU mask check (§5.2 item 4). Nothing here decides anything."""
-    for j in scan_jobs():
-        st = j["state"] or {}
-        if j["result"] or st.get("state") != "running" or not st.get("cgroup"):
+    """Every SAMPLE_EVERY ticks, outside the lock (§7.1): each running job's usage.json (a view: rename, no fsync), its
+    metrics.jsonl line, metrics/now.json (dashboard §4.2), and the per-thread CPU mask check (§5.2 item 4). Only the
+    jobs the last pass saw running are read (nodestats.LAST_RUNNING), never every job folder. Nothing here decides
+    anything."""
+    if fault("sample-under-lock"):
+        with Lock():
+            return _sample()
+    return _sample()
+
+
+def _sample():
+    if fault("sampler-scan-all"):
+        todo = [(j["id"], j["dir"]) for j in scan_jobs()]
+    else:
+        todo = list(nodestats.LAST_RUNNING)
+    rows = []
+    for jid, d in todo:
+        st = durable.read_record(os.path.join(d, "state.json")) or {}
+        if st.get("state") != "running" or not st.get("cgroup") or os.path.exists(os.path.join(d, "result.json")):
             continue
+        j = {"id": jid, "dir": d, "state": st, "result": None}
         cg = st["cgroup"]
         if not os.path.isdir("/sys/fs/cgroup" + cg):
             continue
         path = os.path.join(j["dir"], "usage.json")
-        u = cg_usage(cg, read_json(path))
+        prev = read_json(path) or {}
+        u = cg_usage(cg, prev)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(u, f)
         os.replace(tmp, path)
+        rows.append(nodestats.job_line(j, st, u, prev))
         g = grant_of(j)
         if not g or g.get("class") == "express" or st.get("affinity_widened"):
             continue
@@ -2376,6 +2417,7 @@ def sample():
                         durable.write_record(os.path.join(j["dir"], "state.json"), s2)
                 event(j["dir"], "affinity widened by %s: %s (granted %s)" % (comm[:64], lst, sched.fmt_cpus(g["cpus"])))
                 break
+    nodestats.write_now(rows)
 
 
 def set_busy(busy):
@@ -2462,9 +2504,15 @@ def own_usage(j, wall_s):
         return None
     prev = read_json(os.path.join(j["dir"], "usage.json")) or {}
     u = cg_usage(cg, prev)
+    if fault("usage-from-shim"):   # the shim's own rusage, not the job's cgroup (D01 must see the difference)
+        import resource
+        r = resource.getrusage(resource.RUSAGE_SELF)
+        u = dict(u, cpu_s=round(r.ru_utime + r.ru_stime, 2), user_s=round(r.ru_utime, 2), sys_s=round(r.ru_stime, 2),
+                 mem_peak_bytes=r.ru_maxrss * 1024, mem_work_peak_bytes=r.ru_maxrss * 1024)
     out = {k: u.get(k) for k in ("cpu_s", "user_s", "sys_s", "mem_peak_bytes", "mem_work_peak_bytes", "pids_peak",
                                  "mem_events")}
-    out["cores_avg"] = round(u["cpu_s"] / wall_s, 2) if wall_s > 0 and isinstance(u.get("cpu_s"), (int, float)) else None
+    st = durable.read_record(os.path.join(j["dir"], "state.json")) or j["state"]   # paused time (contract §3.6)
+    out["cores_avg"] = nodestats.cores_avg(out.get("cpu_s"), st, wall_s) if wall_s > 0 else None
     out["source"] = "cgroup"
     return out
 
@@ -2786,3 +2834,7 @@ def main(args):
         return 0
     sys.stderr.write("mu node: unknown subcommand %r\n\n%s\n" % (sub, usage))
     return 64
+
+
+from mu import nodestats  # noqa: E402
+VERBS.update(nodestats.VERBS)

@@ -1,0 +1,314 @@
+{
+ "jobs": [
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T07:23:20Z",
+   "exit_code": 0,
+   "job_id": "20261114-042000-3zv05p",
+   "log_size": 224276,
+   "name": "frame-fea",
+   "note": null,
+   "ok": true,
+   "paused_s": 840.0,
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T04:20:00Z",
+   "run_s": 10140.0,
+   "started_at": "2026-11-14T04:20:20Z",
+   "state": "succeeded",
+   "unit": "mu-job-20261114-042000-3zv05p.service",
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 171467.4,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 11270000000,
+    "mem_work_peak_bytes": 9800000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 1714.7,
+    "user_s": 169752.7
+   }
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T05:45:15Z",
+   "exit_code": 3,
+   "job_id": "20261114-054320-lwusq5",
+   "log_size": 2062,
+   "name": "frame-fea",
+   "note": null,
+   "ok": true,
+   "paused_s": 0,
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T05:43:20Z",
+   "run_s": 95.0,
+   "started_at": "2026-11-14T05:43:40Z",
+   "state": "failed",
+   "unit": "mu-job-20261114-054320-lwusq5.service",
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 1606.4,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 6899999999,
+    "mem_work_peak_bytes": 6000000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 16.1,
+    "user_s": 1590.3
+   }
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": "2026-11-14T08:24:52Z",
+   "exit_code": 0,
+   "job_id": "20261114-074320-pg20as",
+   "log_size": 49862,
+   "name": "cfd-cavity",
+   "note": null,
+   "ok": true,
+   "paused_s": 0,
+   "position": null,
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": "2026-11-14T07:43:20Z",
+   "run_s": 2472.0,
+   "started_at": "2026-11-14T07:43:40Z",
+   "state": "succeeded",
+   "unit": "mu-job-20261114-074320-pg20as.service",
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 41801.5,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 6899999999,
+    "mem_work_peak_bytes": 6000000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 418.0,
+    "user_s": 41383.5
+   }
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": "2026-11-14T14:28:20Z",
+   "exit_code": null,
+   "grant": {
+    "class": "normal",
+    "cores": 20,
+    "cpus": "0-19",
+    "mem_bytes": 22000000000,
+    "time_s": 21600
+   },
+   "job_id": "20261114-081320-ux90yo",
+   "log_size": 109824,
+   "name": "frame-fea",
+   "note": "paused until 10:03 by avi-mac",
+   "ok": true,
+   "pausable": true,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": null,
+    "held_mem_bytes": 5880000000,
+    "lent_to": [
+     "20261114-094800-lyms3c"
+    ],
+    "phase": "frozen",
+    "resume_asked": null,
+    "resumes_by": null,
+    "since": "2026-11-14T09:48:20Z",
+    "until": "2026-11-14T10:03:20Z",
+    "why": "hand"
+   },
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T08:13:20Z",
+   "started_at": "2026-11-14T08:23:20Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 14100,
+    "limit_s": 21600,
+    "paused_s": 300,
+    "run_s": 5100
+   },
+   "unit": "mu-job-20261114-081320-ux90yo.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": "2026-11-14T13:08:20Z",
+   "exit_code": null,
+   "grant": {
+    "class": "normal",
+    "cores": 2,
+    "cpus": "0-1",
+    "mem_bytes": 4000000000,
+    "time_s": 14400
+   },
+   "job_id": "20261114-084640-v70sqb",
+   "log_size": 79074,
+   "name": "cfd-wing",
+   "note": "paused for lyms3c until 09:58",
+   "ok": true,
+   "pausable": true,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": "20261114-094800-lyms3c",
+    "held_mem_bytes": 720000000,
+    "lent_to": [
+     "20261114-094800-lyms3c"
+    ],
+    "phase": "frozen",
+    "resume_asked": {
+     "at": "2026-11-14T09:52:20Z",
+     "by": "avi-mac"
+    },
+    "resumes_by": "2026-11-14T09:54:20Z",
+    "since": "2026-11-14T09:33:20Z",
+    "until": "2026-11-14T09:58:20Z",
+    "why": "auto"
+   },
+   "position": null,
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": "2026-11-14T08:46:40Z",
+   "started_at": "2026-11-14T08:48:20Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 13200,
+    "limit_s": 14400,
+    "paused_s": 1200,
+    "run_s": 2700
+   },
+   "unit": "mu-job-20261114-084640-v70sqb.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": {
+    "at": "2026-11-14T09:23:20Z",
+    "by": "avi-mac",
+    "owner": true
+   },
+   "job_id": "20261114-092000-r504us",
+   "log_size": 0,
+   "name": "mesh-study",
+   "note": null,
+   "ok": true,
+   "place": 1,
+   "position": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T09:20:00Z",
+   "started_at": null,
+   "state": "held",
+   "unit": "mu-job-20261114-092000-r504us.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "borrowing",
+   "ended_at": null,
+   "ends_by": "2026-11-14T09:58:30Z",
+   "exit_code": null,
+   "grant": {
+    "borrowed": [
+     {
+      "cpus": "0-3",
+      "from": "20261114-081320-ux90yo",
+      "mem_bytes": 2000000000,
+      "until": "2026-11-14T10:03:20Z"
+     }
+    ],
+    "class": "borrowing",
+    "cores": 4,
+    "cpus": "0-3",
+    "mem_bytes": 2000000000,
+    "time_s": 600
+   },
+   "job_id": "20261114-094800-lyms3c",
+   "log_size": 5923,
+   "name": "sched-probe",
+   "note": null,
+   "ok": true,
+   "pausable": false,
+   "paused": null,
+   "position": null,
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": "2026-11-14T09:48:00Z",
+   "started_at": "2026-11-14T09:48:30Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 0,
+    "limit_s": 600,
+    "paused_s": 0,
+    "run_s": 290
+   },
+   "unit": "mu-job-20261114-094800-lyms3c.service"
+  },
+  {
+   "attempt": 1,
+   "band": "urgent",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": false,
+   "job_id": "20261114-095140-b0hq9m",
+   "log_size": 0,
+   "name": "loads-check",
+   "note": null,
+   "ok": true,
+   "place": 1,
+   "position": 1,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T09:51:40Z",
+   "started_at": null,
+   "state": "queued",
+   "unit": null
+  },
+  {
+   "attempt": 1,
+   "band": "low",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": false,
+   "job_id": "20261114-095230-h8eax8",
+   "log_size": 0,
+   "name": "sweep-aoa",
+   "note": null,
+   "ok": true,
+   "place": 2,
+   "position": 2,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": "2026-11-14T09:52:30Z",
+   "started_at": null,
+   "state": "queued",
+   "unit": null
+  }
+ ],
+ "ok": true,
+ "rev": 23
+}

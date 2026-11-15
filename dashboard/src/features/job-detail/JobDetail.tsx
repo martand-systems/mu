@@ -16,7 +16,9 @@ import { CopyCommand } from "../../ui/CopyCommand";
 import { EmptyState } from "../../ui/EmptyState";
 import { Meter } from "../../ui/Meter";
 import { Skeleton } from "../../ui/Skeleton";
-import { JobStateBadge } from "../../ui/StateBadge";
+import { BandChip, JobStateBadge } from "../../ui/StateBadge";
+import { hm, schedText, timeLabel } from "../../lib/sched";
+import { timeBar } from "../../lib/series";
 import { LogView } from "./LogView";
 import { ResourceChart } from "./ResourceChart";
 
@@ -51,16 +53,16 @@ const FINISHED = new Set(["succeeded", "failed", "cancelled", "timeout", "oom", 
 
 /** The job's progress at a glance, beside its state: "5m10s of 12h00m", "waiting 2m · #1 in the queue", "41m12s · exit 0". */
 function Progress({ j, now }: { j: Detail["job"]; now: number }) {
-  const limit = j.limits?.time_s ?? null;
-  if (j.state === "running" && j.started_at !== null) {
+  const tb = timeBar(j, now);
+  if (j.state === "running" && j.started_at !== null && tb) {
     return (
       <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
-        <span data-testid="elapsed">{duration(now - j.started_at)}</span>
-        {limit !== null && <span className="text-text-muted"> of {shortDuration(limit)}</span>}
+        <span data-testid="elapsed">{duration(tb.run_s)}</span>
+        {tb.limit_s !== null && <span className="text-text-muted"> of {shortDuration(tb.limit_s)}</span>}
       </span>
     );
   }
-  if (j.state === "queued") {
+  if (j.state === "queued" || j.state === "held") {
     return (
       <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
         waiting {j.queued_at !== null ? shortDuration(now - j.queued_at) : "—"}
@@ -73,6 +75,9 @@ function Progress({ j, now }: { j: Detail["job"]; now: number }) {
       <span className="whitespace-nowrap text-base tabular-nums text-text" data-testid="progress">
         <span data-testid="elapsed">{duration(j.ended_at - j.started_at)}</span>
         {j.exit_code !== null && <span className="text-text-muted"> · exit {j.exit_code}</span>}
+        {j.run_s !== null && j.paused_s !== null && j.paused_s > 0 && (
+          <span className="text-text-muted" data-testid="finished-run"> · {shortDuration(j.run_s)} run · paused {shortDuration(j.paused_s)}</span>
+        )}
       </span>
     );
   }
@@ -85,6 +90,23 @@ function Commands({ d }: { d: Detail }) {
   const j = d.job;
   const c = d.commands;
   const logOnce = c.log.replace(/ -f\b/, "");
+  if (j.display) {   // paused or resuming: the page stays read-only, it gives the command
+    return (
+      <div className="flex flex-wrap gap-2" data-testid="commands">
+        <CopyCommand cmd={c.resume} primary what="resume" />
+        <CopyCommand cmd={c.log} what="log" />
+        <CopyCommand cmd={c.status} what="status" />
+      </div>
+    );
+  }
+  if (j.state === "held") {
+    return (
+      <div className="flex flex-wrap gap-2" data-testid="commands">
+        <CopyCommand cmd={c.release} primary what="release" />
+        <CopyCommand cmd={c.cancel} what="cancel" />
+      </div>
+    );
+  }
   if (j.state === "running") {
     return (
       <div className="flex flex-wrap gap-2" data-testid="commands">
@@ -99,6 +121,7 @@ function Commands({ d }: { d: Detail }) {
     return (
       <div className="flex flex-wrap gap-2" data-testid="commands">
         <CopyCommand cmd={`${c.status} --wait --timeout 500`} primary what="wait" />
+        <CopyCommand cmd={c.front} what="move to the front" />
         <CopyCommand cmd={c.cancel} what="cancel" />
       </div>
     );
@@ -116,21 +139,30 @@ function Header({ d, now }: { d: Detail; now: number }) {
   const j = d.job;
   const r = d.record;
   const limits = j.limits ?? r?.limits ?? null;
-  const frac = j.state === "running" && j.started_at !== null && limits?.time_s ? Math.min(1, Math.max(0, (now - j.started_at) / limits.time_s)) : null;
+  const tb = timeBar(j, now);
+  const frac = tb && tb.limit_s ? Math.min(1, Math.max(0, tb.run_s / tb.limit_s)) : null;
+  const sched = schedText(j, now);
   return (
     <div className="flex flex-col gap-3" data-testid="job-header">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <BackLink />
           <h2 className="min-w-0 truncate text-lg font-semibold text-text" title={j.name ?? ""}>{j.name ?? "(no name)"}</h2>
-          <JobStateBadge state={j.state} position={j.state === "queued" ? null : j.position} />
+          <JobStateBadge state={j.state} position={j.state === "queued" ? null : j.position} display={j.display} />
+          <BandChip band={j.band} />
           <Progress j={j} now={now} />
           <span className="whitespace-nowrap text-sm text-text-muted">· on <span className="text-text">{d.node.name}</span></span>
           {j.cancel_requested && <span className="text-xs text-text-muted">cancel asked</span>}
         </div>
-        {frac !== null && (
-          <div className="h-0.5 w-full overflow-hidden rounded-full bg-border" aria-hidden="true" data-testid="time-bar">
-            <div className="h-full bg-text" style={{ width: `${(frac * 100).toFixed(2)}%` }} />
+        {frac !== null && tb && (
+          <div className="flex flex-col gap-1">
+            <div className="h-0.5 w-full overflow-hidden rounded-full bg-border" aria-hidden="true" data-testid="time-bar">
+              <div className="h-full bg-text" style={{ width: `${(frac * 100).toFixed(2)}%` }} />
+            </div>
+            <p className="text-xs tabular-nums text-text-muted" data-testid="time-label">
+              {timeLabel(tb.run_s, tb.limit_s, tb.paused_s)}
+              {j.display === "paused" && j.paused?.until !== null && j.paused?.until !== undefined && <> · resumes by itself at {hm(j.paused.until, now)}</>}
+            </p>
           </div>
         )}
       </div>
@@ -154,7 +186,8 @@ function Header({ d, now }: { d: Detail; now: number }) {
           </Meta>
         )}
       </dl>
-      {j.note && <p className="text-sm text-text-muted">{noteText(j.state, j.note)}</p>}
+      {sched ? <p className="text-sm text-text-muted" data-testid="sched-text">{sched}</p>
+        : j.note && <p className="text-sm text-text-muted">{noteText(j.state, j.note)}</p>}
       <Commands d={d} />
     </div>
   );
@@ -163,14 +196,14 @@ function Header({ d, now }: { d: Detail; now: number }) {
 function liveSample(j: JobRow): MetricSample | null {
   const l = j.live;
   if (!l) return null;
-  return { t: l.t, cpu: l.cpu_cores, anon: l.anon, file: l.file, shmem: l.shmem, cur: null, peak: l.peak, max: l.max, pids: l.pids, psi_mem: null };
+  return { t: l.t, cpu: l.cpu_cores, anon: l.anon, file: l.file, shmem: l.shmem, cur: null, peak: l.peak, max: l.max, pids: l.pids, psi_mem: null, paused: l.paused };
 }
 
 function Resources({ d }: { d: Detail }) {
   const j = d.job;
   const now = useNow();
   const running = j.state === "running";
-  const can = d.node.metrics && !d.node.old_node && j.state !== "queued";
+  const can = d.node.metrics && !d.node.old_node && j.state !== "queued" && j.state !== "held";
   const m = useJobMetrics(j.job_id, running, can);
   const ov = useOverview();
   const card = ov.data?.nodes.find((n) => n.name === d.node.name);

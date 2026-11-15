@@ -36,9 +36,31 @@ test.use({ viewport: { width: 1440, height: 900 } });
 
 test("screens: overview in every scenario", async ({ page, serve }) => {
   test.setTimeout(240000);
-  for (const sc of ["busy", "idle", "offline", "refused", "old-node", "hostile", "many"]) {
+  for (const sc of ["busy", "idle", "offline", "refused", "old-node", "r1-node", "paused", "hostile", "many"]) {
     const d = await serve(sc);
     await overview(page, d, `overview-${sc}`);
+  }
+});
+
+test("screens: scheduler release 2's states (paused, resuming, held, borrower)", async ({ page, serve }) => {
+  test.setTimeout(240000);
+  const d = await serve("paused");
+  await openDash(page, d);
+  await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
+  await page.waitForTimeout(3000);
+  const pick = async (sel: string) => (await page.locator(sel).first().getAttribute("data-job"))!;
+  const ids: [string, string][] = [
+    ["paused", await page.locator('tr[data-job]:has([data-state="paused"])').first().getAttribute("data-job") as string],
+    ["resuming", await page.locator('tr[data-job]:has([data-state="resuming"])').first().getAttribute("data-job") as string],
+    ["held", await pick('tr[data-state="held"]')],
+  ];
+  for (const [name, id] of ids) {
+    await gotoJob(page, id);
+    await expect(page.getByTestId("job-detail")).toBeVisible();
+    await page.waitForTimeout(3000);
+    await shot(page, `job-${name}`);
+    await page.goto(`${d.url}/`);
+    await page.getByTestId("filter-from").getByRole("button", { name: "all workstations" }).click();
   }
 });
 

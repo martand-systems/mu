@@ -3,10 +3,14 @@
  "attention": [],
  "error": null,
  "features": [
-  "stats",
+  "sched",
   "usage",
+  "queue-control",
+  "update",
+  "stats",
   "watch",
-  "metrics"
+  "metrics",
+  "pause"
  ],
  "hello": {
   "autoupdate": {
@@ -118,6 +122,9 @@
    "mem_some10": 0.0
   },
   "queue": {
+   "express": 0,
+   "held": 0,
+   "paused": 0,
    "queued": 1,
    "running": 2
   },
