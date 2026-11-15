@@ -73,6 +73,7 @@ submitted from. It prints the snapshot it sends, then the job id and its state:
 | `--time DUR` | wall-time limit (`90s`, `30m`, `6h`, `2d`). Then it ends `timeout`. A realistic one lets the job start ahead of a waiting big job | 12 h |
 | `--quick` | a quick check: 1 core, 512 MB, 10 min, starts at once even on a full node (not with `--cores/--mem/--time`) | |
 | `--priority CLASS` / `--hold` | the job's band (`high`, `urgent` need `--others`) / submit it held (`mu release` starts it) | `normal` |
+| `--pausable` | the node may pause the job for up to 30 min for an urgent job (only solver runs without network, wall-clock timeouts of their own or timing measurements) | not pausable |
 | `--output GLOB` | an output to bring back, repeatable | `[compute] outputs` in `mu.toml` |
 | `--wait [--timeout S]` | then wait for the result, as `mu status ID --wait` | |
 | `--no-rerun` | do not re-run after an interrupted attempt | re-run once |
@@ -80,7 +81,19 @@ submitted from. It prints the snapshot it sends, then the job id and its state:
 | `--resume ID` | send a job again that was not accepted (same id, same snapshot) | |
 | `--json` | one JSON object (read `exit`, `error`, `next`) | |
 
-One job runs at a time on a node; the others queue, first in first out.
+Several jobs run at once, each on its grant; the others queue in the order `mu queue` shows.
+
+### Pause and resume
+
+```sh
+mu pause 20261114-101926-9yb3u4 --for 15m   # freeze it; its cores and unused memory are lent until then
+mu resume 20261114-101926-9yb3u4            # thaw it now (or after the job borrowing its cores ends)
+```
+
+A paused job keeps its memory in place and its processes, files and sockets; nothing in it runs. It resumes by itself
+at the end of `--for` (default 30 min, at most 2 h; at most min(4 h, `--time`) paused per run). Paused time does not
+count against `--time`. Do not pause jobs with wall-clock timeouts of their own, network peers or timing
+measurements. The result carries `run_s` (without the pauses) beside `wall_s`, and `paused_s`.
 
 ### Status
 

@@ -1684,3 +1684,66 @@ node under the lock; passing judged by position; unit properties built only from
 | linux-install 43647497051 | both images green on 3085fac (`bin/mu` and `install/` as final) |
 
 `tools/test-autoupdate/run.sh` (macOS, bash 3.2, run locally as CI keeps it): 292 passed, 0 failed.
+
+## 22. Release 2 as built (2026-11-15)
+
+Branch `scheduler-r2` from `main` b68dae2, built beside dashboard phase 1b under the integration contract of
+2026-11-15 (the contract's §2-§3 shapes are what the node emits). What this section says overrides §20.5-§20.8 and
+§20.13 where they differ. The probe (§12 items 10-13, `sched-probe-2`) passed on the office PC, so the designed path
+was built with no fallback: freeze and thaw, `MemoryMax` lowered on a frozen unit, the limit and dead-man timers.
+
+### 22.1 Built
+
+- **Node.** `src/mu/pausectl.py` (new): `freeze()`, `thaw()`, `stop_unit()`, the two transient timers per job
+  (`mu-limit-<id>`: `--time` on running time, a fixed `/bin/sh` command that writes `jobs/<id>/timelimit`, thaws and
+  stops; `mu-thaw-<id>`: the dead-man, `systemctl --user thaw` at `D + 120 s`), reconciliation with `FreezerState` (by
+  prefix, read only for an active unit: probe item 11 showed "frozen" on a stopped unit), the runner's pass after the
+  per-job loop (deadlines, deferred resumes, the end of an auto-pause once its urgent job ended, the valve at
+  `D + 60 s`, `MemoryMax` restored once no borrower lives), the auto-pause (§20.7, inside the start lock: checkout,
+  re-plan, freeze, start as a borrower in the same pass), the verbs `pause` and `resume`, and the freezer self-check.
+  `src/mu/sched.py`: lending by CPU-id sets (`lending()`), firm memory (`firm_mem()`), borrowers in `plan()` (the head
+  and later jobs; cores only from frozen lenders with `now + t + MARGIN ≤ D`; memory from those lenders' lent memory
+  first, the rest from free memory under the head test), `plan()["lent"]`, the new invariants, `choose_victims()`.
+  `src/mu/node.py`: the constants, `ARG_RULES["for"]`, `FreezerState` in `unit_props()`, paused time in end bounds,
+  `status`/`list`/`queue`/`hello` fields, `run_s`/`paused_s`/`pauses` in `result.json`, the `timelimit` branch of
+  `classify()`, every stop through `stop_unit()`, a re-queue drops the pause, the limit timer armed at start and
+  `RuntimeMaxSec = t + min(4 h, t)` for ordinary jobs.
+- **Workstation.** `mu pause JOB [--for D] [--others]`, `mu resume JOB [--timeout S] [--others]` (exit 10 when still
+  `resuming` after `--timeout`), `mu submit --pausable`, `mu queue` and `mu status` wording (PAUSED, RESUMING, borrowed
+  from, lent by paused jobs, auto-pause policy), `run_s`/`paused_s`/`pauses` in `runs/<id>.json`; `not-running` and
+  `pause-limit` map to exit 2, `pause-unavailable`/`pause-failed` (node 69) to 6.
+- **Shapes** (contract §2-§3): a paused job's `state` stays `running`; `paused` is `null` or
+  `{phase, since, until, by, why, for_job, held_mem_bytes, lent_to, resume_asked, resumes_by}`; `time`
+  `{limit_s, run_s, paused_s, budget_left_s}` for every running job; `note` built at answer time; `grant.class`
+  `borrowing` with `borrowed[{from, cpus, mem_bytes, until}]`; finished jobs carry top-level `run_s`, `paused_s`
+  (`pauses` too). `hello`: `pause` in `features` only while the freezer self-check of this boot passed,
+  `auto_pause`, `pause.mem_lend`, `queue.paused`. `queue`: `auto_pause`, `lent`.
+
+### 22.2 Deviations from the text above
+
+| Where | The text | As built, and why |
+|---|---|---|
+| §20.6 "busy" | a version switch never meets a frozen unit | superseded by §21.2 (a busy node switches between starts): the new runner adopts the pause from `state.json`; the auto-pause runs inside the start lock (contract §9 item 12) |
+| §20.7 cooldown | "15 min of running between two auto-pauses" | measured from the last thaw (`last_thaw_mono`); a job never paused has no cooldown |
+| §20.7 victims | smallest set, ties by latest `active_mono` | sets of up to 4 jobs are searched (combinations); tie key (jobs, extra cores, −latest `active_mono`, ids) |
+| §20.7 end | "when H ends, or fails to start" | also when H went back to the queue for more than 120 s (re-queued after an interrupted attempt) |
+| §20.5 step 5 | `held = min(grant, memory.current + LEND_MARGIN)` | as written; when `memory.current` cannot be read (no cgroup recorded yet), `held` = the grant: cores are lent, no memory |
+| §20.5 freezer check | the build checks the PC (§12) | the runner checks on each boot (`node.json freezer`), outside the queue lock, before its first pass; `mu node selftest` includes it. Under stubbed systemd (`MU_SYSTEMD_RUN` set: the unit tests) the runner skips it and the tests write the record |
+| §20.11 `--pausable` on an r1 node | refused or recorded | the r1 node keeps any spec key in `job.json` (`display_fields` copies the spec), so `--pausable` sent to a node with `queue-control` but without `pause` is recorded and takes effect once the node has release 2 (contract §9 item 15); without `queue-control` it is refused `node-too-old` with `--priority` and `--hold` |
+| §13 Q29 | `mu pause --for 60s`, then a `--time 20s` borrower | `--for 150s`: a borrower needs `now + t + MARGIN ≤ D` with MARGIN 70 s, so a 20 s job cannot borrow a 60 s pause |
+| §13 Q30-Q33, Q36 (part), Q37-Q39 | e2e rows on real systemd | **unit level** against a `systemctl` stub that keeps a `FreezerState` per unit (`tools/test-jobs/unit_sched.py`, section `sched-pause`, 42 checks, 23 faults); e2e rows QF, Q29, Q34, Q35, Q36 run on real systemd. Q31 (d) and Q32's restart with a version switch, Q28 extended and the 60 s fault-injected checkout of Q35 are not built |
+| §13 Q34 `cancel-without-thaw` | must-fail on real systemd | unit level only: systemd 255 thaws a frozen unit before stopping it (probe item 13), so on real systemd the fault cannot fail; the stub records that `stop_unit()` thaws before it stops |
+| faults `start-twice`, `held-in-walk`, `requeue-tier`, `partial-order-write` (simulation) | listed for release 2 | not built (the randomised simulation has no pauses yet) |
+| `tools/test-jobs/unit.py` | `SECTIONS` only (contract §1.2) | also one line of r1's `runner` check: its stub-call parser counts only `mu-job-` units, since an ordinary start now also makes a `mu-limit-` timer |
+
+### 22.3 Untested and known limits
+
+- **Nothing of release 2 has run on the office PC** except the probe's items 10-13 (by hand, in a probe job).
+- Real systemd covers only QF, Q29, Q34, Q35, Q36; the valve, the dead-man firing with the runner down (Q39), the
+  restart while paused (Q32), the VM stop while paused (Q33), races (Q31), log cap of a frozen unit (Q38) and the
+  auto-pause (Q37) are checked against stubs only.
+- The global OOM killer on a frozen job, a pause of 2 h or more, pausing under real memory pressure, MPI beyond the
+  probe's 4 ranks.
+- `--others` and the authorisation of `pause`/`resume` reuse the hold rule (`sched.authorise("hold", …)`); no check
+  of its own.
+- The dashboard's view of a paused job is dashboard-1b's; the post-merge row D40P joins the two.
