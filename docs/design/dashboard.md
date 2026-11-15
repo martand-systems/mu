@@ -1201,13 +1201,22 @@ expiry; anything against the real office PC, including the old-node mode on toda
 the sandbox (`open https://…`), not tried; whether Chrome sync keeps a `#t=` URL; the `bind-all` must-fail on this Mac
 (the application firewall is on; CI runs it).
 
-**§7.0 3.0a status: pending.** The verb-cost measurement needs `probe.py` running on the PC while `burst.py` makes its
-100 calls from the Mac, with someone present for both; the PC's queue was busy, so the job was not submitted. Until it
-is measured, the old-node step stays 15 s (§4.3). To run it: from a project folder,
-`mu submit --mem 512M --time 5m -- python tools/dashboard-3.0a/probe.py`, then, once it runs,
-`<toolchain>/env/bin/python -I -S tools/dashboard-3.0a/burst.py burst office-pc > window.json`, and after it ends
-`mu log JOB > probe.log; python3 tools/dashboard-3.0a/burst.py cost probe.log window.json`. The Keychain-from-launchd
-check of 3.0a is the first `mu dashboard on` on the owner's Mac.
+**§7.0 3.0a status: measured 2026-11-15 on office-pc (μ v2026.11.10), verb part done; old-node step stays 15 s.**
+Three runs, each a `--quick` job beside JATAYU's work, with `burst.py` making 50 `hello` + 50 `list limit=100` calls
+from the Mac through the relay:
+- `probe.py` (whole-machine /proc/stat minus a baseline) gave 771 and 2,519 ms per call. Both are wrong: a JATAYU job
+  started inside each window (bm8, a serial CFD run; then a short FE job), and machine-wide jiffies cannot separate
+  them. Kept only as the reason for the method below.
+- `probe_cg.py` (added) reads the CPU of the cgroups that hold the node's ssh side (`system.slice/mu-sshd.service`
+  and the mu user's session scope, which hold sshd and the gate) and divides by the lines added to
+  `/srv/mu/audit.log`: **72.6 ms of CPU per audited call during the burst (153 calls in 109 s), 63–66 ms before
+  and after it** (JATAYU's own status polls). Under the 150 ms bound, so the old-node step is 15 s: one `list`
+  every 15 s is about 5 ms of CPU per second, under 0.5 % of one of the 20 vCPUs.
+- Audit lines are 43–44 bytes: at one call every 15 s, about 10 kB an hour while the dashboard watches.
+- A call takes about 1.1 s end to end through the relay with the ssh master warm (100 calls in 109–112 s).
+
+The Keychain-from-launchd check of 3.0a is the first `mu dashboard on` on the owner's Mac (macOS may ask once to
+allow access to the relay credential).
 
 **Release:** merge `dashboard-1a` into `main` and tag; only the Mac needs the release (no node change); after updating,
 `mu dashboard on` once.
