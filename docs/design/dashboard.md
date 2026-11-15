@@ -1274,7 +1274,9 @@ SKIP here (no `pause`) and must PASS on the merged branch. Mac: Python sections 
 (item 8); "the loop stays at 1 s" is measured as samples 5 s apart. D25 is measured over 2 minutes, not 10, and holds
 the 2 % budget for what the tab adds: the same 2 minutes are measured first without the tab. μ's processes include
 release 1's runner, which passes every second with or without a tab; in all they used 2.90 CPU-s in 120 s with the tab
-in the first CI run, over the 2.4 CPU-s budget. D07 against
+in the first CI run, over the 2.4 CPU-s budget. The second measured 2.23 CPU-s without the tab and 0.04 more with it. D03 also
+requires `stats` with 2,000 job folders to be within 5 ms of `stats` without them: CI's runner scanned 2,000 folders
+in 62 ms, inside the 100 ms budget, so the budget alone did not catch the fault `stats-scan`. D07 against
 the real node stops the runner (the figures go stale) rather than cutting the link.
 
 **dash-probe on office-pc** (2026-11-15, job `20261115-122354-g4qd2c`, `--quick` beside JATAYU's 20-core job, since

@@ -77,13 +77,22 @@ while True: grow(); time.sleep(0.05)')"
     [ "$(jobstate "$t" usage.source)" = runner-sampled ] && lt 5 "$(jobstate "$t" usage.cpu_s)" && [ "$r" = cgroup ]
   qend $?
 }
-d03() {   # stats: the running job; idle; 2,000 finished jobs; stale with the runner stopped
-  qpre || return 1; local j a idle ms st
+stats_ms() {   # the median of 5 stats answers on the node, in ms
+  node_py 'from mu import nodestats; import time
+ts = []
+for i in range(5):
+    t = time.perf_counter(); nodestats.stats_answer(); ts.append((time.perf_counter() - t) * 1000)
+print("%.1f" % sorted(ts)[2])'
+}
+d03() {   # stats: the running job; idle; 2,000 finished jobs (under 100 ms, and no slower than without them: stats
+          # never scans the job folders, which a fast runner can do within 100 ms); stale with the runner stopped
+  qpre || return 1; local j a idle ms ms0 st
   j="$(submit --cores 1 --mem 256M --time 1m -- python3 -c 'import time; t = time.time()
 while time.time() - t < 20: pass')"
   wait_state "$j" running 60; sleep 11
   a="$(nodeverb stats)"; wait_state "$j" "succeeded failed" 60; sleep 7
   idle="$(nodeverb stats | jx running)"
+  ms0="$(stats_ms)"
   sudo python3 -I -S - <<'PY'
 import json, os
 for i in range(2000):
@@ -93,17 +102,14 @@ for i in range(2000):
         open(os.path.join(d, n), "w").write(json.dumps({"job_id": os.path.basename(d), "state": "succeeded"}))
 os.system("chown -R mu:mu /srv/mu/jobs")
 PY
-  ms="$(node_py 'from mu import nodestats; import time
-ts = []
-for i in range(5):
-    t = time.perf_counter(); nodestats.stats_answer(); ts.append((time.perf_counter() - t) * 1000)
-print("%.1f" % sorted(ts)[2])')"
+  ms="$(stats_ms)"
   sudo sh -c 'rm -rf /srv/mu/jobs/20250101-*-dashsy'
   asmu systemctl --user stop mu-node.service; sleep 21
   st="$(nodeverb stats)"; asmu systemctl --user start mu-node.service; sleep 6
-  M="running: $(printf '%s' "$a" | jx running.0.job_id | cut -c10-) cores $(printf '%s' "$a" | jx running.0.cpu_cores); idle: $idle; 2,000 jobs: ${ms} ms; runner stopped 21 s: stale $(printf '%s' "$st" | jx stale) age $(printf '%s' "$st" | jx age_s)"
+  M="running: $(printf '%s' "$a" | jx running.0.job_id | cut -c10-) cores $(printf '%s' "$a" | jx running.0.cpu_cores); idle: $idle; 2,000 jobs: ${ms} ms (without them ${ms0} ms); runner stopped 21 s: stale $(printf '%s' "$st" | jx stale) age $(printf '%s' "$st" | jx age_s)"
   [ "$(printf '%s' "$a" | jx running.0.job_id)" = "$j" ] && lt 0.6 "$(printf '%s' "$a" | jx running.0.cpu_cores)" && \
     lt "$(printf '%s' "$a" | jx running.0.cpu_cores)" 1.4 && [ "$idle" = "[]" ] && lt "$ms" 100 && \
+    lt "$ms" "$(awk -v a="$ms0" 'BEGIN { print a + 5 }')" && \
     [ "$(printf '%s' "$st" | jx stale)" = true ]
   qend $?
 }
