@@ -585,6 +585,18 @@ f_v3_off() { asmu systemctl --user unset-environment MU_DISPATCH_FAULT; use_node
 fz() { asmu systemctl --user show -p FreezerState "mu-job-$1.service" 2>/dev/null | sed 's/^FreezerState=//'; }
 cg_file() { local c; c="$(asmu systemctl --user show -p ControlGroup "mu-job-$1.service" | sed 's/^ControlGroup=//')"; sudo cat "/sys/fs/cgroup$c/$2" 2>/dev/null; }
 counter() { sudo cat "/srv/mu/jobs/$1/work/counter" 2>/dev/null; }
+# wsp: `mu pause` / `mu resume` as ws. The dispatcher of this branch (bin/mu, rev 12) routes queue|hold|release|move|
+# priority to the job layer but not pause|resume, and the integration contract (§1.3) keeps bin/mu unchanged on this
+# branch: the integrator adds them. Until the installed dispatcher routes them, these rows call the job layer exactly as
+# its infra() would (the default version's python -I -S on recipe/src/mu/cli.py, MU_HOME and MU_INFRA_VERSION set) and
+# say so once; after that, through `mu` itself.
+wsp() {
+  if sudo grep -q '|pause|resume)' "$WSH/bin/mu"; then ws "$@"; return; fi
+  local d; d="$(sudo cat "$WSH/default")"
+  [ -n "${WSP_SAID:-}" ] || { echo "   note: the installed bin/mu does not route pause|resume; calling the job layer of μ $d as infra() would" >&2; WSP_SAID=1; }
+  sudo -u ws -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_POLL_S=1 MU_JOBS_FAULT="$WSF" MU_HOME="$WSH" MU_INFRA_VERSION="$d" \
+    sh -c 'cd "$0" && exec "$@"' "$WCWD" "$WSH/toolchains/$d/env/bin/python" -I -S "$WSH/toolchains/$d/recipe/src/mu/cli.py" "$@"
+}
 pause_files() {
   cat > /tmp/mu-e2e-count.py <<'PYC'
 import os, signal, sys, time
@@ -620,7 +632,7 @@ q29() {
   a="$(submit --cores "$NC" --mem 1G --time 5m --name q29-lender -- python3 count.py)"
   wait_state "$a" running 60; poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$a/work/counter 2>/dev/null)\" ]"; sleep 2
   mm0="$(cg_file "$a" memory.max)"
-  p="$(ws pause "$a" --for 150s --json 2>&1)"
+  p="$(wsp pause "$a" --for 150s --json 2>&1)"
   f1="$(fz "$a")"; c0="$(counter "$a")"; cur="$(cg_file "$a" memory.current)"; sleep 5; c1="$(counter "$a")"
   mm1="$(cg_file "$a" memory.max)"
   b="$(submit --cores "$HC" --mem 256M --time 20s --name q29-borrower -- sleep 12)"
@@ -630,7 +642,7 @@ q29() {
   M="$M memory.max $mm0 -> $mm1 (current $cur); borrower $(jobstate "$b") class $(jobstate "$b" grant.class); 5-min job $(jobstate "$c");"
   [ "${f1#frozen}" != "$f1" ] && [ -n "$c0" ] && [ "$c0" = "$c1" ] && lt "$mm1" "$mm0" && \
     [ "$(jobstate "$b" grant.class)" = borrowing ] && [ "$(jobstate "$c")" = queued ] || { qend 1; return 1; }
-  rs="$(ws resume "$a" --json 2>&1)"
+  rs="$(wsp resume "$a" --json 2>&1)"
   wait_state "$b" "succeeded failed" 60
   poll 15 sh -c "[ \"\$(sudo -u mu -H env XDG_RUNTIME_DIR=/run/user/$MU_UID systemctl --user show -p FreezerState mu-job-$a.service)\" = FreezerState=running ]"
   sleep 2; c2="$(counter "$a")"; mm2="$(cg_file "$a" memory.max)"
@@ -643,7 +655,7 @@ q34() {
   qpre || return 1; pause_files; local a t0 t1 st
   a="$(submit --cores 1 --mem 1G --time 5m --name q34 -- python3 count.py)"
   wait_state "$a" running 60; poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$a/work/counter 2>/dev/null)\" ]"
-  ws pause "$a" --for 120s --json >/dev/null 2>&1
+  wsp pause "$a" --for 120s --json >/dev/null 2>&1
   local f; f="$(fz "$a")"; t0="$(date +%s)"
   ws cancel "$a" --json >/dev/null 2>&1; wait_state "$a" "cancelled failed timeout" 20; t1="$(date +%s)"; st="$(jobstate "$a")"
   M="paused ($f), cancelled: $st after $((t1 - t0)) s; SIGTERM file: $(sudo cat "/srv/mu/jobs/$a/work/sigterm" 2>/dev/null || echo none); unit $(asmu systemctl --user show -p ActiveState "mu-job-$a.service")"
@@ -654,7 +666,7 @@ q35() {
   qpre || return 1; local a t0 r w rs ps
   a="$(submit --cores 1 --mem 256M --time 20s --name q35 -- sleep 120)"
   wait_state "$a" running 60; t0="$(date +%s)"; sleep 3
-  ws pause "$a" --for 15s --json >/dev/null 2>&1
+  wsp pause "$a" --for 15s --json >/dev/null 2>&1
   wait_state "$a" "timeout failed succeeded cancelled interrupted" 90
   r="$(ws status "$a" --json 2>&1)"; w="$(printf '%s' "$r" | jget wall_s)"; rs="$(printf '%s' "$r" | jget run_s)"; ps="$(printf '%s' "$r" | jget paused_s)"
   [ -n "$w" ] || w="$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wall_s"))' "/srv/mu/jobs/$a/result.json" 2>/dev/null)"
@@ -666,10 +678,10 @@ q36() {
   qpre || return 1; local a f1 t0 t1 ok=1
   a="$(submit --cores 1 --mem 256M --time 5m --name q36 -- sleep 120)"
   wait_state "$a" running 60
-  ws pause "$a" --for 10s --json >/dev/null 2>&1; t0="$(date +%s)"; f1="$(fz "$a")"
+  wsp pause "$a" --for 10s --json >/dev/null 2>&1; t0="$(date +%s)"; f1="$(fz "$a")"
   poll 25 sh -c "[ \"\$(sudo -u mu -H env XDG_RUNTIME_DIR=/run/user/$MU_UID systemctl --user show -p FreezerState mu-job-$a.service)\" = FreezerState=running ]" || ok=0
   t1="$(date +%s)"
-  local big; big="$(ws pause "$a" --for 3h --json 2>&1)"
+  local big; big="$(wsp pause "$a" --for 3h --json 2>&1)"
   M="--for 10s: $f1, then running after $((t1 - t0)) s; --for 3h: exit $(printf '%s' "$big" | jget exit) $(printf '%s' "$big" | jget error); paused_s $(jobstate "$a" time.paused_s)"
   [ "$ok" = 1 ] && [ "${f1#frozen}" != "$f1" ] && [ $((t1 - t0)) -le 22 ] && [ "$(printf '%s' "$big" | jget error)" = pause-limit ]
   qend $?
