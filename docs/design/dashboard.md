@@ -1320,6 +1320,10 @@ per verb call of ~70 ms); the card's wording ("3 running · 2 paused" counts pau
 D10, D11, D21, D06 and D07 still skip the per-row invariant check; D02's OOM job shows `oom_kill 0` (a runner-sampled
 result cannot see the kill).
 
+**CI:** dashboard.yml run 43739003291 (Vitest, Playwright Chromium and WebKit, the page must-fails with
+`held-as-started`) green on 5edb387; job-layer's dash-node green in runs 43738999823 and 43744856889, D40P PASS with its
+must-fail on its own symptom.
+
 **Owner decision needed (design-cost (b)):** D25's 2 % budget now holds for what the dashboard adds (about 0.03 % of a
 core with the overview open, about 0.3 % with a running job's page open). μ's own processes on a node use 1.7-2.2 % of
 a core with no dashboard at all (release 1's runner scans every job folder every second, and no code removes old job

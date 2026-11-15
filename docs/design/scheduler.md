@@ -1816,6 +1816,13 @@ already fixed by the integration (§22.4).
   the repository).
 - Security 9 (a cap on concurrent `watch` sessions): not built; a key can already run any code as `mu`.
 
+**CI after the fixes:** job-layer run 43744856889 on 2bd7c21: the scheduler job green on real systemd, 48 rows PASS
+(QF and Q29-Q39 among them, each timer's own service seen to succeed in the journal), 55 must-fails each failing on its
+row's own symptom, 0 MISSED, Z1/Z2 PASS; e2e and dash-node green too. Its macOS fast tests were cancelled at their
+30-minute limit (run.sh plus the pairing suite now take 28-33 min there; the limit is 45 from 2026-11-16, see the run
+in the release notes). dashboard.yml 43739003291 and linux-install.yml 43739007253 green on 5edb387 (the later commits
+touch only e2e scripts, the workflow and docs).
+
 **Untested:** everything above on the office PC (§14 lists the checks to run after the release); the interrupted
 freeze and the dead-man re-arm on real systemd (unit level, stubbed systemd only); `PAUSE_COUNT_MAX` and the renewal
 limit through the workstation's wording (the node's refusal is `pause-limit`, which the CLI already maps to exit 2).
