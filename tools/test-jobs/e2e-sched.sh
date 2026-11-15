@@ -33,7 +33,7 @@ qorder() { sudo awk '$1 == "start" { print $2 }' "$QLOG" | tr '\n' ' '; }
 short() { local x; for x in "$@"; do printf '%s ' "${x: -6}"; done; }
 jq_() { python3 -c "$1" 2>/dev/null; }
 inv() { sudo cat /srv/mu/state/invariant-violation 2>/dev/null | tail -3 | tr '\n' ' '; }
-unfinished() { sudo sh -c 'for d in /srv/mu/jobs/*/; do [ -f "$d/result.json" ] || basename "$d"; done' 2>/dev/null; }
+unfinished() { sudo sh -c 'for d in /srv/mu/jobs/*/; do [ -d "$d" ] || continue; [ -f "$d/result.json" ] || basename "$d"; done' 2>/dev/null; }
 drain() {   # every unfinished job cancelled, the node idle, the order file and the violation record gone; fails when a
             # job is left (a row run on a node that is not idle would show nothing about its fault)
   local i n
