@@ -714,10 +714,12 @@ lender() {   # lender NAME [SECONDS]: a whole-node job that counts (count.py), 1
   submit --cores "$NC" --mem 1G --time 10m --name "$1" -- python3 count.py ${2:-}
 }
 timer_ran() {   # timer_ran UNIT: how the user manager logged a timer's service: "failed" (its systemctl did not take
-                # effect, as on CI before the timers named this user's bus), "ok", or "never" (review 2026-11-15)
-  local l; l="$(sudo journalctl _UID="$MU_UID" --no-pager -o cat 2>/dev/null | grep -F "$1.service:")"
-  if printf '%s' "$l" | grep -q "Failed with result"; then echo failed
-  elif printf '%s' "$l" | grep -Eq "Deactivated successfully|Succeeded|Finished"; then echo ok
+                # effect, as on CI before the timers named this user's bus), "ok", or "never" (review 2026-11-15).
+                # systemd 255's user manager logs "Started UNIT.service" and, only when it fails, "UNIT.service: Main
+                # process exited ..." and "Failed with result" (CI run 43738999823)
+  local l; l="$(sudo journalctl _UID="$MU_UID" --no-pager -o cat 2>/dev/null | grep -F "$1.service")"
+  if printf '%s' "$l" | grep -Eq "Failed with result|Main process exited, code=exited, status=[1-9]"; then echo failed
+  elif printf '%s' "$l" | grep -q "^Started $1.service"; then echo ok
   else echo never; fi
 }
 wait_counting() {   # running, counting, and its memory taken (count.py's 300 MiB): CI's Q39 paused a lender one second
@@ -827,8 +829,9 @@ q37() {   # auto-pause (policy "marked", the default)
   # that is never a victim (pausectl.eligible); with 10m none was, and no urgent job ever started
   v="$(submit --pausable --cores "$NC" --mem 512M --time 1h --name q37-victim -- sleep 900)"; wait_state "$v" running 60
   h2="$(submit --priority urgent --others --cores "$HC" --mem 1700M --time 20s --name q37-u2 -- sleep 5)"
-  sleep 32; m2="memory does not fit: auto-pauses $(sjget "$v" auto_pause_count), urgent $(jobstate "$h2")"
-  { [ -n "$h2" ] && [ -z "$(sjget "$v" auto_pause_count)" ] && [ "$(jobstate "$h2")" = queued ]; } || { ok=0; m2="$m2 ✗mem"; }
+  # pause_count, not auto_pause_count: a failed auto-pause is rolled back (§22.5), but the freeze it made is counted
+  sleep 32; m2="memory does not fit: pauses $(sjget "$v" pause_count), urgent $(jobstate "$h2")"
+  { [ -n "$h2" ] && [ -z "$(sjget "$v" pause_count)" ] && [ "$(jobstate "$h2")" = queued ]; } || { ok=0; m2="$m2 ✗mem"; }
   ws cancel "$h2" --json >/dev/null 2>&1; wait_state "$h2" cancelled 40
   # 3. the victim is frozen only after the urgent job's (20 s) checkout, the urgent job starts as a borrower, and the
   #    victim is thawed once it ends, long before the deadline
