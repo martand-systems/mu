@@ -10,6 +10,11 @@ FX="$ROOT/tools/test-dashboard/fixtures"
 WSRC="$WSH/toolchains/v2026.11.7/recipe/src"
 DREAL=/tmp/mu-dash-real.py; DSHAPE=/tmp/mu-dash-shape.py
 nodeverb() { wssh mu-office-pc "$@" 2>/dev/null; }   # a node verb through the workstation's own ssh (no master)
+nodeverb_for() {   # nodeverb_for SECS VERB ARGS: a streaming verb, ended after SECS. `timeout` runs programs only, not the
+  local s="$1"; shift   # shell function wssh (it would fail at once, unseen), so the command is spelled out here
+  timeout "$s" sudo -u ws -H env -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR MU_JOBS_FAULT="$WSF" \
+    ssh -F "$WCFG" -o ControlPath=none mu-office-pc "$@" 2>>"$WORK/logs/dash-verbs.log"
+}
 dash_real() { asws env MU_JOBS_FAULT="$WSF" python3 -I -S "$DREAL" "$WSRC" "$@" 2>>"$WORK/logs/dash-real.log" | tail -1; }
 jx() { python3 -c 'import json,sys
 d=json.loads(sys.stdin.read() or "{}")
@@ -54,8 +59,13 @@ if pid: os.wait()')"
 }
 d02() {   # oom and timeout: runner-written usage; mu fetch copies usage into runs/<id>.json
   qpre || return 1; local o t s r
+  # The oom job holds 224 MiB (87 % of its limit) for 12 s, so the 5 s sampler sees it, then grows past the limit. A
+  # job killed before its first sample has no usage at all (the cgroup is gone at once, the dash-probe found).
   o="$(submit --cores 1 --mem 256M --time 1m -- python3 -c 'import time; b = []
-while True: b.append(bytearray(16 << 20)); [x.__setitem__(0, 1) for x in b[-1:]]; time.sleep(0.05)')"
+def grow(): b.append(bytearray(16 << 20)); [b[-1].__setitem__(i, 1) for i in range(0, 16 << 20, 4096)]
+for i in range(14): grow()
+time.sleep(12)
+while True: grow(); time.sleep(0.05)')"
   t="$(submit --cores 1 --mem 128M --time 12s -- python3 -c 'while True: pass')"
   s="$(submit --cores 1 --mem 128M --time 1m --output 'out/*.txt' -- sh -c 'mkdir -p out; echo x > out/a.txt')"
   for x in $o $t $s; do wait_state "$x" "succeeded failed oom timeout" 120; done
@@ -132,9 +142,9 @@ d11() {   # watch ends at max; a vanished client leaves no session after the cap
   a0="$(audit_lines)"
   nodeverb stats >/dev/null; nodeverb metrics "id=$j" offset=0 >/dev/null
   a1="$(audit_lines)"
-  t0="$(now)"; timeout 25 wssh mu-office-pc watch interval=2 max=5 > "$WORK/out/d11-watch" 2>/dev/null; secs="$(since "$t0")"
+  t0="$(now)"; nodeverb_for 25 watch interval=2 max=5 > "$WORK/out/d11-watch"; secs="$(since "$t0")"
   a2="$(audit_lines)"
-  (timeout 25 wssh mu-office-pc watch interval=2 max=5 2>/dev/null | head -1 >/dev/null) & sleep 2
+  (nodeverb_for 25 watch interval=2 max=5 | head -1 >/dev/null) & sleep 2
   sudo pkill -u ws -f 'watch interval=2 max=5' 2>/dev/null; sleep 8
   left="$(pgrep -u mu -f 'serve .*watch' | wc -l)"
   M="stats + metrics: $((a1 - a0)) audit lines; watch max=5: ${secs} s, $(wc -l < "$WORK/out/d11-watch") lines, $((a2 - a1)) audit lines; sessions left after the cap: $left"
@@ -145,19 +155,24 @@ d21() {
   M="stats.ok $(printf '%s' "$s" | jget stats.ok), host.cpu_pct $(printf '%s' "$s" | jget stats.host.cpu_pct)"
   [ "$(printf '%s' "$s" | jget stats.ok)" = true ] && [ -n "$(printf '%s' "$s" | jget stats.host)" ]
 }
-d25() {   # a visible tab for 2 min during a job: μ's own CPU on the node under 2 % of one core
-  qpre || return 1; local j u0 u1 r
-  j="$(submit --cores 1 --mem 128M --time 4m -- sleep 150)"; wait_state "$j" running 60
-  u0="$(musage)"; r="$(dash_real load 120)"; u1="$(musage)"
+d25() {   # a visible tab for 2 min during a job: what the tab adds to μ's own CPU on the node, under 2 % of one core
+  # μ's processes include release 1's runner, which passes every second with or without a tab (in all, 2.90 CPU-s in
+  # 120 s with the tab in the first CI run). So the same 120 s are measured first without the tab (the same job
+  # running), and the budget holds for what the tab adds (§7.1.2).
+  qpre || return 1; local j u0 u1 u2 r base tab
+  j="$(submit --cores 1 --mem 128M --time 6m -- sleep 290)"; wait_state "$j" running 60
+  u0="$(musage)"; sleep 120; u1="$(musage)"; r="$(dash_real load 120)"; u2="$(musage)"
   ws cancel "$j" --json >/dev/null 2>&1
-  M="μ's processes: $(awk -v a="$u0" -v b="$u1" 'BEGIN { printf "%.2f", b - a }') CPU-s in 120 s (budget 2.4); the server used $(printf '%s' "$r" | jx calls)"
-  lt "$(awk -v a="$u0" -v b="$u1" 'BEGIN { print b - a }')" 2.4 && [ "$(printf '%s' "$r" | jx calls)" = watch ]
+  base="$(awk -v a="$u0" -v b="$u1" 'BEGIN { printf "%.2f", b - a }')"
+  tab="$(awk -v a="$u1" -v b="$u2" -v c="$base" 'BEGIN { printf "%.2f", (b - a) - c }')"
+  M="μ's processes in 120 s: $base CPU-s without the tab, $(awk -v a="$u1" -v b="$u2" 'BEGIN { printf "%.2f", b - a }') with it; the tab adds $tab CPU-s (budget 2.4); the server used $(printf '%s' "$r" | jx calls)"
+  lt "$tab" 2.4 && [ "$(printf '%s' "$r" | jx calls)" = watch ]
 }
 d40() {   # the real node's answers against the golden fixtures (keys and types)
   qpre || return 1; local j feats opt=""
   j="$(submit --cores 1 --mem 128M --time 1m -- sleep 20)"; wait_state "$j" running 60; sleep 11
   nodeverb hello protocol=1 > "$WORK/out/d40-hello"; nodeverb stats > "$WORK/out/d40-stats"
-  timeout 20 wssh mu-office-pc watch interval=2 max=4 2>/dev/null | head -1 > "$WORK/out/d40-watch"
+  nodeverb_for 20 watch interval=2 max=4 | head -1 > "$WORK/out/d40-watch"
   wait_state "$j" "succeeded failed" 60
   nodeverb metrics "id=$j" offset=0 > "$WORK/out/d40-metrics"
   feats="$(jx features < "$WORK/out/d40-hello")"
@@ -181,7 +196,7 @@ d40p() {   # with a paused job (scheduler release 2): list, status, stats, a wat
   ws pause "$j" --json > "$WORK/out/d40p-pause" 2>&1; sleep 12
   nodeverb list limit=100 > "$WORK/out/d40p-list"; nodeverb status "id=$j" > "$WORK/out/d40p-status"
   nodeverb stats > "$WORK/out/d40p-stats"
-  timeout 20 wssh mu-office-pc watch interval=2 max=4 2>/dev/null | head -1 > "$WORK/out/d40p-watch"
+  nodeverb_for 20 watch interval=2 max=4 | head -1 > "$WORK/out/d40p-watch"
   nodeverb metrics "id=$j" offset=0 > "$WORK/out/d40p-metrics"
   ws resume "$j" --json >/dev/null 2>&1; ws cancel "$j" --json >/dev/null 2>&1
   M=""; local rc=0

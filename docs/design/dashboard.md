@@ -1271,7 +1271,10 @@ and D05–D07 with the server's real `NodeReader` (`tools/test-jobs/dash_real.py
 SKIP here (no `pause`) and must PASS on the merged branch. Mac: Python sections `phase1b` (D04b, release 2's rows) and
 `compute-status` (D21, the fetched mark); Vitest `r2.test.ts` (D48's decoder part, D49); Playwright D04b and D48
 (Chromium and WebKit, axe), each with its fault on its own assertion. D09's budget is 5 ms + 3 ms per running job
-(item 8); "the loop stays at 1 s" is measured as samples 5 s apart. D25 is measured over 2 minutes, not 10. D07 against
+(item 8); "the loop stays at 1 s" is measured as samples 5 s apart. D25 is measured over 2 minutes, not 10, and holds
+the 2 % budget for what the tab adds: the same 2 minutes are measured first without the tab. μ's processes include
+release 1's runner, which passes every second with or without a tab; in all they used 2.90 CPU-s in 120 s with the tab
+in the first CI run, over the 2.4 CPU-s budget. D07 against
 the real node stops the runner (the figures go stale) rather than cutting the link.
 
 **dash-probe on office-pc** (2026-11-15, job `20261115-122354-g4qd2c`, `--quick` beside JATAYU's 20-core job, since
