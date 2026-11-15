@@ -1183,7 +1183,13 @@ without "✕ failed" (§5.3); D46's lazy-chunk case not applicable (no lazy chun
   the message of the assertion it targets; skipped Python checks are counted and reported in CI; D28's git check uses
   `--ignored` and has its must-fails; `.npmrc`'s `ignore-scripts` is tested without the flag.
 
-**CI on the final commit:** RUNS_PENDING
+**CI.** `dashboard.yml` run 43655661375 on `7fc2a2c` (the last code commit): all six jobs green: server tests on
+Linux (385 passed, 0 failed, 6 skipped) and macOS (383 passed, 8 skipped; each skip is listed in the run's summary),
+front (lint, types, 178 Vitest tests, the Vitest must-fails, the build, D28 with its must-fails), supply, e2e
+(Playwright in Chromium and WebKit, and the screenshots), e2e must-fails (29 of 29, each on its own assertion). On the
+Mac (sandboxed): the same D-tests in both engines (27 passed, the rest skipped by design), `tools/dashboard-npm
+selftest` and `selftest-faults` (6 of 6). This document's own commit is run again by `dashboard.yml`, and
+`job-layer.yml` and `linux-install.yml` are dispatched on it (`src/` changed).
 
 **Untested, stated plainly:** the real LaunchAgent under launchd and its Keychain access (`launchctl` is stubbed); real
 Safari (Playwright's WebKit stands in; its clipboard rule is emulated); real ssh: D20 end to end and D24's master
