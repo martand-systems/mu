@@ -235,8 +235,8 @@ print(next(("%.1f" % (a - t) for a, s in d["seen"] if s == want), "never"))' suc
 d06() {   # the card's figures are the node's (the same sample)
   local r; r="$(dash_real figures 12)"
   M="card mem $(printf '%s' "$r" | jx card.mem) · node mem $(printf '%s' "$r" | jx raw_mem) · t $(printf '%s' "$r" | jx raw_t) / $(printf '%s' "$r" | jx card_t_node)"
-  [ "$(printf '%s' "$r" | jx raw_t)" = "$(printf '%s' "$r" | jx card_t_node)" ] || { sleep 1; r="$(dash_real figures 12)"; }
-  [ "$(printf '%s' "$r" | jx card.mem.avail)" = "$(printf '%s' "$r" | jx raw_mem.avail)" ] && \
+  [ -n "$(printf '%s' "$r" | jx raw_t)" ] && [ "$(printf '%s' "$r" | jx raw_t)" = "$(printf '%s' "$r" | jx card_t_node)" ] && \
+    [ "$(printf '%s' "$r" | jx card.mem.avail)" = "$(printf '%s' "$r" | jx raw_mem.avail)" ] && \
     [ "$(printf '%s' "$r" | jx card.mem.total)" = "$(printf '%s' "$r" | jx raw_mem.total)" ] && \
     [ -n "$(printf '%s' "$r" | jx card.mem.avail)" ]
 }

@@ -46,10 +46,16 @@ try:
         out["seen"] = seen
         out["rows_node"] = sorted({r["node"] for r in app.rows()})
     elif cmd == "figures":
+        # The card and a stats answer of the same sample: the server sees a new 5 s sample only at its next watch
+        # check, so a stats call can land on the next sample. Tick until the card shows the answer's sample (a newer
+        # sample meanwhile: ask again), at most 4 tries.
         run(float(sys.argv[3]))
-        time.sleep(0.2)
+        for _ in range(4):
+            raw = w.r.call("stats")
+            run(8, lambda: ((w.stats or {}).get("t") or 0) >= (raw.get("t") or 0), step=0.25)
+            if (w.stats or {}).get("t") == raw.get("t"):
+                break
         card = w.card()
-        raw = w.r.call("stats")
         out["card"] = card.get("stats")
         out["raw_mem"] = (raw.get("host") or {}).get("mem")
         out["raw_t"], out["card_t_node"] = raw.get("t"), (w.stats or {}).get("t")
