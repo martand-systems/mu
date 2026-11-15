@@ -1,6 +1,6 @@
 """D40 / D40P: does a real node's answer have the golden fixture's shape (tools/test-dashboard/fixtures)? Every key the
 fixture has, with the same JSON type (numbers are one type; null on either side matches anything); a list is checked
-item by item against the fixture's first item; extra keys in the answer are allowed (other fields of today's node).
+item by item against the fixture's first item (a job entry: the fixture's job in the same state, paused or not); extra keys in the answer are allowed (other fields of today's node).
 OPTIONAL keys may be absent (scheduler release 2's, on a node without `pause`; a metrics line's "paused").
 
     python3 -I -S dash_shape.py FIXTURE ANSWER.json [OPTIONAL,KEYS]     -> "ok" or the differences; exit 0 or 1
@@ -15,6 +15,17 @@ def kind(v):
     if isinstance(v, (int, float)):
         return "number"
     return type(v).__name__
+
+
+def like(x, f):
+    """The fixture item to hold X against: a job entry against the fixture's job in the same state (and paused or
+    not, a borrower or not), since a running job and a finished one carry different fields; else the first item."""
+    if not isinstance(x, dict) or "state" not in x:
+        return f[0]
+    cls = lambda d: (d.get("state"), bool(d.get("paused")), ((d.get("grant") or {}).get("class") == "borrowing"))  # noqa: E731
+    same = [y for y in f if isinstance(y, dict) and y.get("state") == x.get("state")]
+    best = [y for y in same if cls(y) == cls(x)]
+    return (best or same or f)[0]
 
 
 def diff(a, f, path, optional):
@@ -32,7 +43,7 @@ def diff(a, f, path, optional):
             out += diff(a[k], v, "%s.%s" % (path, k), optional)
     elif isinstance(f, list) and f:
         for i, x in enumerate(a[:50]):
-            out += diff(x, f[0], "%s[%d]" % (path, i), optional)
+            out += diff(x, like(x, f), "%s[%d]" % (path, i), optional)
     return out
 
 

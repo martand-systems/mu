@@ -199,19 +199,25 @@ d40p() {   # with a paused job (scheduler release 2): list, status, stats, a wat
   esac
   qpre || return 1; local j
   j="$(submit --cores 1 --mem 256M --time 2m --pausable -- sleep 60)"; wait_state "$j" running 60; sleep 6
-  ws pause "$j" --json > "$WORK/out/d40p-pause" 2>&1; sleep 12
+  # --for: the default pause (30 min) is past this 2-minute job's budget, min(4 h, --time), and is refused pause-limit
+  ws pause "$j" --for 90s --json > "$WORK/out/d40p-pause" 2>&1; sleep 12
   nodeverb list limit=100 > "$WORK/out/d40p-list"; nodeverb status "id=$j" > "$WORK/out/d40p-status"
   nodeverb stats > "$WORK/out/d40p-stats"
   nodeverb_for 20 watch interval=2 max=4 | head -1 > "$WORK/out/d40p-watch"
   nodeverb metrics "id=$j" offset=0 > "$WORK/out/d40p-metrics"
   ws resume "$j" --json >/dev/null 2>&1; ws cancel "$j" --json >/dev/null 2>&1
   M=""; local rc=0
+  # the shapes below let null match anything, so first: the job really is paused, in every answer
+  M="pause: $(jx ok < "$WORK/out/d40p-pause") $(jx error < "$WORK/out/d40p-pause"); status paused.phase '$(jx paused.phase < "$WORK/out/d40p-status")'"
+  [ "$(jx paused.phase < "$WORK/out/d40p-status")" = frozen ] || rc=1
   shape node-status-paused.json "$WORK/out/d40p-status" || rc=1
   shape node-list-r2.json "$WORK/out/d40p-list" || rc=1
   shape node-stats-r2.json "$WORK/out/d40p-stats" || rc=1
   shape node-stats-r2.json "$WORK/out/d40p-watch" || rc=1
-  grep -q '"paused":1' "$WORK/out/d40p-metrics" || { M="$M · no metrics line with \"paused\": 1"; rc=1; }
-  grep -q '"paused":true' "$WORK/out/d40p-stats" || { M="$M · stats: no running entry with paused true"; rc=1; }
+  python3 -c 'import json,sys; sys.exit(0 if any(json.loads(l).get("paused") == 1 for l in open(sys.argv[1]) if l.strip()) else 1)' \
+    "$WORK/out/d40p-metrics" || { M="$M · no metrics line with \"paused\": 1"; rc=1; }
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if any(r.get("paused") is True for r in d.get("running", [])) and d["queue"]["paused"] >= 1 else 1)' \
+    "$WORK/out/d40p-stats" || { M="$M · stats: no running entry with paused true, or queue.paused 0"; rc=1; }
   qend $rc
 }
 
