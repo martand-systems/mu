@@ -1189,7 +1189,10 @@ front (lint, types, 178 Vitest tests, the Vitest must-fails, the build, D28 with
 (Playwright in Chromium and WebKit, and the screenshots), e2e must-fails (29 of 29, each on its own assertion). On the
 Mac (sandboxed): the same D-tests in both engines (27 passed, the rest skipped by design), `tools/dashboard-npm
 selftest` and `selftest-faults` (6 of 6). This document's own commit is run again by `dashboard.yml`, and
-`job-layer.yml` and `linux-install.yml` are dispatched on it (`src/` changed).
+`job-layer.yml` and `linux-install.yml` are dispatched on it (`src/` changed). D28 earned its keep once: this
+checkout sits in an iCloud-synced Desktop folder, which made "index 2.html"-style copies of the build's files; they
+were committed by mistake and D28 failed the run (43656747473); they are removed and ignored. Build and commit the
+dashboard from a folder that is not synced.
 
 **Untested, stated plainly:** the real LaunchAgent under launchd and its Keychain access (`launchctl` is stubbed); real
 Safari (Playwright's WebKit stands in; its clipboard rule is emulated); real ssh: D20 end to end and D24's master
