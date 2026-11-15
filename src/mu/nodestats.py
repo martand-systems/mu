@@ -25,6 +25,9 @@ Test hooks: MU_NODE_PROC (a folder standing in for /proc: stat, meminfo, loadavg
   cores-avg-by-wall    cores_avg divides by wall time, paused time included (D01, unit)
   rename-field-node-paused  a paused job's running[] entry sends "frozen" instead of "paused" (D40P)
   rev-after-scan       list reads the state rev after its scan (node.verb_list; review 2026-11-15)
+  sample-ms-partial    now.json's sample_ms leaves out the host sample and the write (D09; review 2026-11-15)
+  watch-ignores-epipe  a watch whose client is gone lives on to its cap (review 2026-11-15)
+  fingerprint-parses-dates  the rev's fingerprint parses every finished job's ended_at each pass (review 2026-11-15)
  and phase 1b's in node.py's hunks (B2, B7, B8; listed here so node.py's own list stays scheduler release 2's):
   sample-under-lock    the sampler's pass holds the queue lock (D09)
   usage-from-shim      a shim-written result's usage is the shim's own rusage, not the job's cgroup (D01)
@@ -134,12 +137,20 @@ def fingerprint(jobs, order, now=None):
     now = time.time() if now is None else now
     N = _N()
     rows = []
+    # ISO times compare as strings: no time.strptime per finished job per pass (review 2026-11-15: 9 ms a pass with
+    # 2,000 finished jobs)
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - RECENT_S))
     for j in jobs:
         st, res = j.get("state") or {}, j.get("result")
         if res:
-            t = epoch_of(res.get("ended_at"))
-            if t is None or now - t > RECENT_S:
-                continue
+            if fault("fingerprint-parses-dates"):
+                t = epoch_of(res.get("ended_at"))
+                if t is None or now - t > RECENT_S:
+                    continue
+            else:
+                e = res.get("ended_at")
+                if not isinstance(e, str) or len(e) != 20 or e < cutoff:
+                    continue
         pz = st.get("pause") if isinstance(st.get("pause"), dict) else {}
         g = st.get("grant") if isinstance(st.get("grant"), dict) else {}
         try:
@@ -317,13 +328,18 @@ def job_line(j, st, u, prev):
     return row
 
 
-def write_now(rows, sample_ms=None):
-    """metrics/now.json; SAMPLE_MS: what this pass of the sampler cost (D09 reads it; stats does not send it)."""
+def write_now(rows, t0=None):
+    """metrics/now.json; sample_ms: what this pass of the sampler cost from T0 (perf_counter at its start) to the
+    write, the host sample included (D09 reads it; stats does not send it). Review 2026-11-15: it was taken before the
+    host sample, so a slow host sample did not show."""
     N = _N()
     q = dict(QUEUE) or {"running": len(rows), "queued": 0, "held": 0, "paused": 0, "express": 0}
+    t_host = time.perf_counter()
+    host = host_sample()
+    end = t_host if fault("sample-ms-partial") else time.perf_counter()
     write_view(os.path.join(mdir(), "now.json"), {"t": round(time.time(), 1), "node": N.node_info().get("name"),
-                                                  "host": host_sample(), "running": rows, "queue": q,
-                                                  "sample_ms": sample_ms})
+                                                  "host": host, "running": rows, "queue": q,
+                                                  "sample_ms": None if t0 is None else round((end - t0) * 1000, 2)})
 
 
 # ------------------------------------------------------------------------------------------------ the verbs
@@ -374,6 +390,13 @@ def verb_watch(key, args):
                 break
             time.sleep(min(iv, left))
     except (BrokenPipeError, ConnectionResetError, OSError) as e:
+        if fault("watch-ignores-epipe") and isinstance(e, (BrokenPipeError, ConnectionResetError)):
+            try:
+                fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(fd, sys.stdout.fileno())
+            except OSError:
+                pass
+            time.sleep(max(0.0, cap - (time.monotonic() - t0)))   # the session lives on to its cap
         why = "client gone" if isinstance(e, (BrokenPipeError, ConnectionResetError)) or getattr(e, "errno", 0) == 32 \
             else "error: %s" % e
         try:   # the interpreter's own flush at exit must not meet the broken pipe again

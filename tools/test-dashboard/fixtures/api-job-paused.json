@@ -41,15 +41,15 @@
    "time_s": 21600
   },
   "live": {
-   "anon": 9691037010,
+   "anon": 9729564770,
    "class": "normal",
    "cpu_cores": 0.0,
    "file": 2100000000,
    "grant_cores": 20,
    "log_size": 109824,
-   "max": 12434857750,
+   "max": 12841043008,
    "paused": true,
-   "peak": 12678678490,
+   "peak": 12718747360,
    "pids": 44,
    "shmem": 400000000,
    "stale": false,
@@ -64,7 +64,7 @@
   "paused": {
    "by": "avi-mac",
    "for_job": null,
-   "held_mem_bytes": 5880000000,
+   "held_mem_bytes": 12841043008,
    "lent_to": [
     "20261114-094800-lyms3c"
    ],

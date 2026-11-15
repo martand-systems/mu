@@ -13,7 +13,7 @@ import random
 import shutil
 import time
 
-from mu import durable, sched
+from mu import durable, proto, sched
 
 check = None   # set by unit.py
 G = 1 << 30
@@ -1355,7 +1355,7 @@ def t_sched_pause(base):
             cc = calls()[n0:]
             fi = [i for i, c in enumerate(cc) if c.startswith("freeze ")]
             check("auto-pause: a --pausable job is frozen for an urgent job, which starts on its lent cores in the same "
-                  "pass" + flag("pause-unmarked"), pz(J).get("why") == "auto" and pz(J).get("for_job") == U and
+                  "pass", pz(J).get("why") == "auto" and pz(J).get("for_job") == U and
                   ug.get("class") == "borrowing", (pz(J), ug))
             check("auto-pause: the urgent job's checkout comes before the freeze" + flag("freeze-before-checkout"),
                   [o[:2] for o in order[:1]] == [("checkout", U)] and fi and fi[0] + n0 >= order[0][2],
@@ -1650,3 +1650,63 @@ def t_sched_pause(base):
     check("the limit command quotes the job's folder (a node root with a space: one argument)" +
           flag("limit-command-unquoted"), words[-1] == os.path.join(node.job_dir(J), "timelimit") and
           " " in node.ROOT, (words, node.ROOT))
+
+    # the freezer's fallbacks (review 2026-11-15, tests 8): a failed self-check, and MemoryMax that cannot be lowered
+    fresh("rv-noselftest")
+    durable.write_record(os.path.join(node.ROOT, "node.json"), dict(
+        durable.read_record(os.path.join(node.ROOT, "node.json")), freezer={"ok": False, "mem_lend": False,
+                                                                           "boot_id": node.boot_id()}))
+    mkjob(J, 4, 1 * G, 3600)
+    node.step(first=True)
+    node.step()
+    h = node.hello_answer("ci-owner", node.node_info())
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "60"})
+    check("a failed freezer self-check: no pause in hello.features, and mu pause is refused pause-unavailable (node "
+          "exit %d, the workstation's 6)" % proto.NODE_UNAVAILABLE + flag("pause-without-selftest"),
+          "pause" not in h["features"] and a.get("error") == "pause-unavailable" and a.get("rc") ==
+          proto.NODE_UNAVAILABLE and fz(J) == "running", (h["features"], a))
+    fresh("rv-nomemlend")
+    mkjob(J, 4, 1 * G, 3600)
+    node.step(first=True)
+    node.step()
+    memcur(J, 300 * MI)
+    open(os.path.join(st["stub"], "setprop-fails"), "w").close()
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "300"})
+    os.unlink(os.path.join(st["stub"], "setprop-fails"))
+    check("MemoryMax cannot be lowered on the frozen unit: the pause holds, it keeps its whole grant and lends cores "
+          "only (lent memory 0)" + flag("lend-unlowered-mem"),
+          a.get("ok") and pz(J).get("held_mem_bytes") == G and (a.get("lent") or {}).get("mem_bytes") == 0 and
+          (a.get("lent") or {}).get("cores") == 4, (a.get("lent"), pz(J)))
+    # auto-pauses per attempt: at most AUTO_PAUSE_MAX, however long since the last thaw (tests review, 9)
+    fresh("rv-auto-max")
+    mkjob(J, 4, 1 * G, 3600, pausable=True)
+    node.step(first=True)
+    node.step()
+    memcur(J, 300 * MI)
+    setst(J, auto_pause_count=node.AUTO_PAUSE_MAX, last_thaw_mono=time.monotonic() - 2 * node.AUTO_COOLDOWN_S)
+    mkjob(U, 2, 256 * MI, 60, band="urgent")
+    node.step()
+    check("auto-pause: a job auto-paused %d times in this attempt is not paused again, the cooldown long past" %
+          node.AUTO_PAUSE_MAX + flag("no-cooldown"), not pz(J) and not (job(U)["state"] or {}).get("grant"),
+          (pz(J), job(U)["state"]))
+    # an auto-pause charges the victim's budget with its own length, not the 30-minute most (CI, Q37: a 10-minute
+    # job could never be auto-paused)
+    fresh("rv-auto-budget")
+    mkjob(J, 4, 1 * G, 600, pausable=True)
+    node.step(first=True)
+    node.step()
+    memcur(J, 300 * MI)
+    mkjob(U, 2, 256 * MI, 60, band="urgent")
+    node.step()
+    check("auto-pause: a --pausable 10-minute job (budget 600 s) is paused for a 60 s urgent job (its pause: 160 s)" +
+          flag("auto-charges-max"), pz(J).get("for_job") == U and
+          ((job(U)["state"] or {}).get("grant") or {}).get("class") == "borrowing", (pz(J), job(U)["state"]))
+    # a job paused before the runner recorded its cgroup: memory.current read from the unit's ControlGroup
+    fresh("rv-early-pause")
+    mkjob(J, 4, 1 * G, 3600)
+    node.step(first=True)
+    setst(J, cgroup=None)
+    memcur(J, 300 * MI)
+    a = tryverb(pausectl.verb_pause, {"id": J, "for": "300"})
+    check("a pause before the runner recorded the job's cgroup still lowers MemoryMax (the cgroup from systemd)" +
+          flag("cgroup-from-record-only"), a.get("ok") and pz(J).get("held_mem_bytes") == 812 * MI, (a.get("lent"), pz(J)))

@@ -720,7 +720,11 @@ timer_ran() {   # timer_ran UNIT: how the user manager logged a timer's service:
   elif printf '%s' "$l" | grep -Eq "Deactivated successfully|Succeeded|Finished"; then echo ok
   else echo never; fi
 }
-wait_counting() { wait_state "$1" running 60 && poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$1/work/counter 2>/dev/null)\" ]"; }
+wait_counting() {   # running, counting, and its memory taken (count.py's 300 MiB): CI's Q39 paused a lender one second
+                   # after its start, before it held anything to keep
+  wait_state "$1" running 60 && poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$1/work/counter 2>/dev/null)\" ]" && \
+    poll 30 sh -c "[ \"\$(sudo cat /sys/fs/cgroup\$(sudo -u mu -H env XDG_RUNTIME_DIR=/run/user/$MU_UID systemctl --user show -p ControlGroup --value mu-job-$1.service)/memory.current 2>/dev/null || echo 0)\" -ge 268435456 ]"
+}
 
 q30() {   # resume waits for the borrower; a re-pause is raised to the borrower's end (Q36's re-pause)
   qpre || return 1; pause_files; local a b rs rc rp f1 f2 t0 ok=1

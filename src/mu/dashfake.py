@@ -188,19 +188,30 @@ class FakeJob:
             self._log = (n, ("\n".join(lines) + "\n").encode(), st == self.final)
         return self._log[1]
 
-    def sample(self, t, node_t):
-        """One metrics.jsonl line at T (Mac time) in the node's time NODE_T."""
+    def mem_at(self, t):
         e = max(0.0, t - (self.start or t))
         ramp = min(1.0, e / 300.0)
         anon = int(self.mem_gb * GB * (0.35 + 0.65 * ramp) * (0.97 + 0.03 * _h(self.id, "a", int(e // 5))))
-        file_ = int(2.1 * GB * ramp)
-        shmem = int(0.4 * GB * ramp)
+        return anon, int(2.1 * GB * ramp), int(0.4 * GB * ramp)
+
+    def held_at(self, t):
+        """What a frozen job keeps (pausectl.lower_mem): min(grant, memory.current at the freeze + max(512 MiB, 5 %)).
+        Never below what it holds (review 2026-11-15: the fake kept 0.6 x its memory, under its working set)."""
+        pz = self.pause_at(t)
+        cur = sum(self.mem_at(pz[0] if pz else t))
+        return int(min(self.limit_gb * GB, cur + max(512 << 20, 0.05 * cur)))
+
+    def sample(self, t, node_t):
+        """One metrics.jsonl line at T (Mac time) in the node's time NODE_T."""
+        e = max(0.0, t - (self.start or t))
+        pz = self.pause_at(t)
+        anon, file_, shmem = self.mem_at(pz[0] if pz else t)   # frozen: its memory stays as it was at the freeze
         cur = anon + file_ + shmem
         cpu = round(self.cores * (0.9 + 0.1 * _h(self.id, "c", int(e // 5))), 2)
         out = {"t": round(node_t, 1), "cpu": cpu, "anon": anon, "file": file_, "shmem": shmem, "cur": cur,
                "peak": int(cur * 1.04), "max": int(self.limit_gb * GB), "pids": 44, "psi_mem": 0.0}
-        if self.pause_at(t):           # frozen: memory stays, cpu about 0, the limit lowered to what it holds
-            out.update(cpu=0.0, max=int(cur * 1.02), paused=1)
+        if pz:                         # frozen: cpu about 0, the limit lowered to what it keeps
+            out.update(cpu=0.0, max=self.held_at(t), paused=1)
         return out
 
     def usage(self):
@@ -365,7 +376,7 @@ class FakeNode:
             out["pausable"] = j.pausable
             out["paused"] = None if pz is None else {
                 "phase": "frozen", "since": proto.iso(pz[0] + self.skew), "until": proto.iso(pz[1] + self.skew),
-                "by": pz[2], "why": pz[3], "for_job": pz[4], "held_mem_bytes": int(j.mem_gb * 0.6 * GB),
+                "by": pz[2], "why": pz[3], "for_job": pz[4], "held_mem_bytes": j.held_at(t),
                 "lent_to": list(j.lent_to),
                 "resume_asked": {"by": "avi-mac", "at": proto.iso(j.resume_asked + self.skew)} if asked else None,
                 "resumes_by": proto.iso(pz[1] - 240 + self.skew) if asked else None}
@@ -541,8 +552,9 @@ class FakeNode:
             return 66, "", None, False
         data = self.metrics_bytes(j, self.now())
         off = int(args.get("offset", "0") or 0)
+        end = off + int(args["max"]) if args.get("max") else len(data)   # max= as the node's send_range
         if off < len(data):
-            on_data(data[off:])
+            on_data(data[off:end])
         return 0, "", None, False
 
     def _stream_watch(self, args, on_data, stop):

@@ -276,9 +276,12 @@ stats_must_fail journal-each-call verbs
 stats_must_fail no-cap verbs
 stats_must_fail sampler-scan-all sampler
 stats_must_fail sample-under-lock sampler
+stats_must_fail sample-ms-partial sampler
+stats_must_fail watch-ignores-epipe verbs
 stats_must_fail cores-avg-by-wall runtime
 stats_must_fail read-cgroup-after-exit runtime
 stats_must_fail stats-scan cost
+stats_must_fail fingerprint-parses-dates cost
 section "the same checks, each with its fault put in"
 must_fail "torn records (a changed record with the old sum)" no-checksum "$PY1" durable
 must_fail "atomic write" in-place "$PY1" atomic 120
@@ -332,7 +335,8 @@ for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-me
          lender-ends-ids-freed timer-env-inherited \
          freezing-left refreeze-keeps-limit replan-sees-started pause-ignores-drain borrower-ignores-shadow \
          no-dead-man-rearm pause-not-sticky audit-terse-pause open-pause-uncapped backstop-no-room \
-         ignore-mem-restore-failure renewal-over-2h no-pause-count-cap limit-command-unquoted limit-check-each-pass; do
+         ignore-mem-restore-failure renewal-over-2h no-pause-count-cap limit-command-unquoted limit-check-each-pass \
+         pause-without-selftest lend-unlowered-mem auto-charges-max cgroup-from-record-only; do
   must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
 done
 # the dashboard's release 2 fixtures against the real node's answers (tools/test-jobs/r2_answers.py; the integration)

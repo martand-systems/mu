@@ -107,6 +107,7 @@ else
   must_fail D04b chromium "D04b: the r1 node's card asks for an update"     server=features-any
   must_fail D48 chromium "D48: the frozen lender shows paused, not running" page=paused-as-running
   must_fail D48 webkit   "D48: the frozen lender shows paused, not running" page=paused-as-running
+  must_fail D48 chromium "D48: a held job's page says held, no log or chart" page=held-as-started
   must_fail D39 chromium "D39: running within 20 s"                         env=MU_DASH_OLD_STEP=60
   must_fail D05 chromium "D05: lab-pc's jobs are listed under lab-pc"       server=node-from-config
   must_fail D06 chromium "D06: the card shows the node's memory"            server=swap-mem-fields

@@ -235,7 +235,7 @@ function Resources({ d }: { d: Detail }) {
       </div>
     );
   }
-  if (j.state === "queued") return <p className="px-3 py-6 text-sm text-text-muted">The job is queued: the chart starts when it runs.</p>;
+  if (j.state === "queued" || (j.state === "held" && !__FAULT_HELD_AS_STARTED__)) return <p className="px-3 py-6 text-sm text-text-muted">The job is {j.state}: the chart starts when it runs.</p>;
   if (!d.node.metrics) return <p className="px-3 py-6 text-sm text-text-muted">This node does not record job metrics.</p>;
   if (m.isPending) return <div className="px-3 py-3"><Skeleton lines={4} label="reading the job's metrics" /></div>;
   if (m.data && !m.data.available && samples.length === 0) {
@@ -365,15 +365,23 @@ export function JobDetailView({ id }: { id: string }) {
     <div className="flex flex-col gap-4" data-testid="job-detail" data-job={d.job.job_id} data-state={d.job.state}>
       <Header d={d} now={now} />
       <NodeBanner d={d} />
-      {d.job.state === "queued" ? (
+      {d.job.state === "queued" || (d.job.state === "held" && !__FAULT_HELD_AS_STARTED__) ? (
         <Card label="log and resources">
           <p className="flex items-center gap-2 px-3 py-6 text-sm text-text-muted" data-testid="queued-note">
             <Clock3 aria-hidden="true" size={14} className="shrink-0" />
-            <span>
-              Queued{d.job.position !== null ? <>, <span className="text-text">#{d.job.position}</span></> : ""} on {d.node.name}
-              {d.job.queued_at !== null && <>, waiting <span className="tabular-nums text-text">{shortDuration(now - d.job.queued_at)}</span></>}. The log and the
-              chart start when it runs.
-            </span>
+            {d.job.state === "held" ? (
+              <span>
+                Held{d.job.held?.by ? <> by <span className="text-text">{d.job.held.by}</span></> : ""}
+                {d.job.place !== null && <>, keeps place <span className="tabular-nums text-text">{d.job.place}</span></>} on {d.node.name}. The log
+                and the chart start when it runs.
+              </span>
+            ) : (
+              <span>
+                Queued{d.job.position !== null ? <>, <span className="text-text">#{d.job.position}</span></> : ""} on {d.node.name}
+                {d.job.queued_at !== null && <>, waiting <span className="tabular-nums text-text">{shortDuration(now - d.job.queued_at)}</span></>}. The log and the
+                chart start when it runs.
+              </span>
+            )}
           </p>
         </Card>
       ) : (

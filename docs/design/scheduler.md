@@ -1731,7 +1731,7 @@ was built with no fallback: freeze and thaw, `MemoryMax` lowered on a frozen uni
 | §20.5 freezer check | the build checks the PC (§12) | the runner checks on each boot (`node.json freezer`), outside the queue lock, before its first pass; `mu node selftest` includes it. Under stubbed systemd (`MU_SYSTEMD_RUN` set: the unit tests) the runner skips it and the tests write the record |
 | §20.11 `--pausable` on an r1 node | refused or recorded | the r1 node keeps any spec key in `job.json` (`display_fields` copies the spec), so `--pausable` sent to a node with `queue-control` but without `pause` is recorded and takes effect once the node has release 2 (contract §9 item 15); without `queue-control` it is refused `node-too-old` with `--priority` and `--hold` |
 | §13 Q29 | `mu pause --for 60s`, then a `--time 20s` borrower | `--for 150s`: a borrower needs `now + t + MARGIN ≤ D` with MARGIN 70 s, so a 20 s job cannot borrow a 60 s pause |
-| §13 Q30-Q39 | e2e rows on real systemd | e2e rows on real systemd for Q29-Q39 (`e2e.sh sched`), each with its fault; Q35's 60 s checkout is row Q35B, an unpaused `--time 20s` job timed by its unit's end (a result the runner writes after a 60 s pass has `wall_s` to that moment, as in release 1); Q39 pauses `--for 100s` (a 20 s borrower needs `t + MARGIN ≤ D`). Three test injectors set up the races and slow steps: `shim-lingers-after-result` (Q31 b, with the verb's own `pausectl.freeze()` run under the queue lock after the result), `slow-checkout` (only a job named `e2e-slow-checkout`), `auto-checkout-slow` (Q37). At unit level only (stub of `systemctl`, section `sched-pause`): the valve (a borrower cannot outlive its limit on real systemd unless its stop hangs), Q31 (d) and its fault `start-twice` (not built: the queue lock already keeps a hold out of a checkout), Q32's restart by a version switch, Q28 extended, and `lend-whole-grant` |
+| §13 Q30-Q39 | e2e rows on real systemd | e2e rows on real systemd for Q29-Q39 (`e2e.sh sched`), each with its fault; Q35's 60 s checkout is row Q35B, an unpaused `--time 20s` job timed by its unit's end (a result the runner writes after a 60 s pass has `wall_s` to that moment, as in release 1); Q39 pauses `--for 100s` (a 20 s borrower needs `t + MARGIN ≤ D`). Three test injectors set up the races and slow steps: `shim-lingers-after-result` (Q31 b, with the verb's own `pausectl.freeze()` run under the queue lock after the result), `slow-checkout` (only a job named `e2e-slow-checkout`), `auto-checkout-slow` (Q37). At unit level only (stub of `systemctl`, section `sched-pause`): the valve (a borrower cannot outlive its limit on real systemd unless its stop hangs) and `lend-whole-grant`. **Not tested at all** (the review of 2026-11-15 found no such checks, §22.5): Q31 (d) and its fault `start-twice` (not built: the queue lock already keeps a hold out of a checkout), Q32's restart by a version switch, Q28 extended |
 | §13 Q34 `cancel-without-thaw`, Q38 `stop-without-thaw` | must-fail on real systemd | unit level only: systemd 255 thaws a frozen unit before stopping it (probe item 13), so on real systemd these faults cannot fail (Q38 on real systemd fails with `no-log-cap` instead); the stub records that `stop_unit()` thaws before it stops |
 | faults `start-twice`, `held-in-walk`, `requeue-tier`, `partial-order-write` (simulation) | listed for release 2 | not built (the randomised simulation has no pauses yet) |
 | §20.9 `mu pause`, `mu resume` | workstation commands | **the dispatcher does not route them yet.** `bin/mu` (rev 12) sends `queue\|hold\|release\|move\|priority` to the job layer and anything else to the toolchain, so `mu pause JOB` on a workstation with today's dispatcher does not reach `cli.py`. The integration contract (§1.3) keeps `bin/mu` unchanged on this branch, so the change is the integrator's: add `pause\|resume` to that `case` line and to `mu help`, and bump `MU_DISPATCHER_REV` to 13. Until a workstation has that dispatcher, `"$MU_HOME/toolchains/<default>/env/bin/python" -I -S .../recipe/src/mu/cli.py pause JOB` is the same call. The e2e rows call the job layer that way while the installed `bin/mu` lacks the two words (`wsp` in `e2e-sched.sh`), and through `mu` once it has them |
@@ -1742,8 +1742,10 @@ was built with no fallback: freeze and thaw, `MemoryMax` lowered on a frozen uni
 - **Nothing of release 2 has run on the office PC** except the probe's items 10-13 (by hand, in a probe job).
 - `mu pause` and `mu resume` through the dispatcher: not routed until the integrator's `bin/mu` change (§22.2); CI
   reaches the job layer directly.
-- Real systemd covers QF and Q29-Q39 on GitHub's Ubuntu 24.04 runner (systemd 255, cgroup v2), not WSL. The valve,
-  Q31 (d), Q32's version-switch restart and Q28 extended are checked against stubs only or not at all.
+- Real systemd covers QF and Q29-Q39 on GitHub's Ubuntu 24.04 runner (systemd 255, cgroup v2), not WSL. **Correction
+  (review 2026-11-15):** on `scheduler-r2`'s last run (43720383126) Q35B, Q37 and Q39 failed, and Q37 had never run
+  its auto-pause; see §22.4-§22.5 for the fixes and the runs after them. The valve is checked against stubs only;
+  Q31 (d), Q32's version-switch restart and Q28 extended are not checked at all.
 - The global OOM killer on a frozen job, a pause of 2 h or more, pausing under real memory pressure, MPI beyond the
   probe's 4 ranks.
 - `--others` and the authorisation of `pause`/`resume` reuse the hold rule (`sched.authorise("hold", …)`); no check
@@ -1772,3 +1774,49 @@ was built with no fallback: freeze and thaw, `MemoryMax` lowered on a frozen uni
   `fixture-drift`), and Vitest D48R decodes the real answers (`tools/test-dashboard/fixtures/real-r2/`). Two
   differences were fixed in dashfake: a resuming job's note (the node says "resuming: waits for … (ends by …)") and a
   finished job's `grant` and `pausable`.
+
+### 22.5 Review of 2026-11-15 (correctness, security, tests, design and cost) and what was done
+
+Four reviews read the merged tree (`scheduler-r2` then `dashboard-1b` on `main` b68dae2) before this branch existed;
+their repros are in the session's `review-11-11/` folder. Each finding was first reproduced against this branch; each
+fix has a unit check that a named fault makes fail on that check (`run.sh`'s `must_fail_tagged`), and the e2e rows
+were changed where the review showed they proved nothing. Findings 1 (the timers' bus) and Q37's `--others` were
+already fixed by the integration (§22.4).
+
+| Finding (review) | What was wrong | Done | Fault |
+|---|---|---|---|
+| Interrupted freeze (correctness 3) | killed between `systemctl freeze` and writing `frozen`: the record stays `freezing`, nothing thaws it at its deadline, the paused time later counts as run time; a re-done freeze left the limit timer armed | `reconcile` finishes it (`finish_freeze`: limit timer stopped, dead-man armed, `MemoryMax` lowered, its start kept), so the deadline thaws it; a dropped `freezing` record restores `MemoryMax` and stops the dead-man; `freeze()` always stops the limit timer | `freezing-left`, `refreeze-keeps-limit` |
+| Two urgent jobs (correctness 4) | the auto-pause's re-plan saw an urgent job started earlier in the pass both running and queued, gave it the lent cores, and the failed attempt still counted (15-min cooldown) | the re-plan takes only jobs still queued or held; a failed auto-pause rolls back `auto_pause_count` and `last_thaw_mono` (§20.7) | `replan-sees-started` |
+| Borrower vs S (correctness 5) | a borrower admitted for ending before the head's start S was not checked against S again after a slow checkout | `plan()` gives a borrower's start `S` only when it was admitted that way; `start_job()` checks it as it checks a backfilled job | `borrower-ignores-shadow` |
+| Drain (correctness 6) | release 2's paths ignored release 1's drain rule (a job with a result holds its grant until its unit ended) | the auto-pause's re-plan gets the pass's drain set; `borrowers_of()` counts a borrower whose unit still runs; an auto-pause ends when the urgent job's unit ended | `pause-ignores-drain` |
+| Dead-man (correctness 7) | a renewal whose re-arm failed left a frozen job with no dead-man timer, answered `ok` | the renewal is refused `pause-failed`, the old deadline and its timer kept; each pass re-arms a frozen job's missing dead-man (asked of systemd once per deadline) | `no-dead-man-rearm` |
+| Owner's pause (correctness 8, security 3) | the job's own workstation could resume an owner's pause or shorten it to 1 s | §20.4's sticky rule for `pause.by`: a non-owner key may not resume or renew it (checked again under the lock) | `pause-not-sticky` |
+| Accounting (correctness 9) | a job thawed by the dead-man that ended before the runner returned counted everything after D as paused | a frozen record's open pause ends at most at `D + 120 s` (`pausectl.open_end`, also in `nodestats.run_seconds`) | `open-pause-uncapped` |
+| Backstop (correctness 10) | `RuntimeMaxSec = t + min(4 h, t)` killed a whole-budget pause thawed late before its `--time` | `RuntimeMaxSec = t + min(4 h, t) + 180 s` (`BACKSTOP_ROOM_S`: the dead-man's 120 s and a minute) | `backstop-no-room` |
+| Memory restore (correctness 11) | a failed `set-property MemoryMax=<grant>` at a thaw was ignored | `mem_restore_pending`, retried each pass until it works | `ignore-mem-restore-failure` |
+| Renewal over 2 h (security 5) | renewing at 1 h 58 min with `--for 2h` made one pause of 4 h | a renewal may not make the open pause longer than 2 h (unless raised to a borrower's end) | `renewal-over-2h` |
+| Audit (security 6) | pause/resume lines lacked `(owner)`, `from=`, `others=1` | the arranging verbs' format | `audit-terse-pause` |
+| Churn (security 7) | 200 pause/resume cycles: 4,200 systemd calls under the queue lock | at most 20 pauses per attempt (`PAUSE_COUNT_MAX`; renewals not counted) | `no-pause-count-cap` |
+| Quoting (security 8) | the limit command put paths into `/bin/sh -c` unquoted | `shlex.quote` | `limit-command-unquoted` |
+| Cost (design-cost 3) | `check_limit()` ran `systemctl is-active` for every running job every second | asked once per runner process and after each thaw (`LIMIT_SEEN`) | `limit-check-each-pass` |
+| Fallbacks (tests 8) | a failed freezer self-check, `pause-unavailable`, and a frozen unit whose `MemoryMax` cannot be lowered were untested | unit checks | `pause-without-selftest`, `lend-unlowered-mem` |
+| e2e must-fails (tests 2-3, security 2) | `must_fail` counted any failure, so Q35B, Q37 (5 faults) and Q39 "proved" their faults while broken; `submit()` returned the id of a refused job | a must-fail counts only when its row passed earlier in the same run, and, with a pattern, only on its targeted symptom (Q35B, Q37 with a mark per part, Q39, D25, D40P); `submit()` returns nothing for a refusal | (harness) |
+| Timers on real systemd (tests 1) | Q35, Q38 passed with both timers broken (the runner redid their work; Q38 ran the command by hand in `asmu`'s environment) | Q35, Q35B, Q38 and Q39 require the timer's own service to have succeeded in the user manager's journal; Q38 arms the real timer (`pausectl.run_timer`) | (rows) |
+| Auto-pause budget (CI run 43734083438, Q37) | with `--others` the urgent jobs were accepted, and still nothing was auto-paused: a victim needed 30 min of pause budget left, so no job with a `--time` under 30 min could ever be auto-paused | the victim's budget is charged with this auto-pause's own length (`30 s + t + MARGIN`) | `auto-charges-max` |
+| Early pause (CI run 43734083438, Q39) | a job paused a second after its start, before the runner recorded its cgroup, lent no memory | `freeze()` reads `memory.current` through the unit's `ControlGroup` as systemd reports it; Q32-Q39's lender is paused only once it holds its memory | `cgroup-from-record-only` |
+| Auto-pause count (tests 9) | the 2 auto-pauses per attempt were untested | unit check | `no-cooldown` |
+
+**Not done, and why:**
+- Correctness 3's "frozen and thawed by the dead-man while the runner was down, before the record said frozen": the
+  record cannot tell whether the unit ever froze, so that pause is dropped without being counted (as before); the
+  case needs the runner and the freeze's process to die together with the dead-man firing in between.
+- Tests 9: Q32's version-switch restart, Q28 extended, the policies `any` and `off`, "`--quick` never pauses" and
+  Q36's refusals on real systemd remain untested; the randomised simulation still has no pauses (the review's
+  `sim_pause.py`, about 2,600 starts with pauses and no violation, ran again on this branch with none; it is not in
+  the repository).
+- Security 9 (a cap on concurrent `watch` sessions): not built; a key can already run any code as `mu`.
+
+**Untested:** everything above on the office PC (§14 lists the checks to run after the release); the interrupted
+freeze and the dead-man re-arm on real systemd (unit level, stubbed systemd only); `PAUSE_COUNT_MAX` and the renewal
+limit through the workstation's wording (the node's refusal is `pause-limit`, which the CLI already maps to exit 2).
+

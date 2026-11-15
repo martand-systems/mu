@@ -171,7 +171,7 @@ d25() {   # a visible tab for 2 min during a job: what the tab adds to μ's own 
   ws cancel "$j" --json >/dev/null 2>&1
   base="$(awk -v a="$u0" -v b="$u1" 'BEGIN { printf "%.2f", b - a }')"
   tab="$(awk -v a="$u1" -v b="$u2" -v c="$base" 'BEGIN { printf "%.2f", (b - a) - c }')"
-  M="μ's processes in 120 s: $base CPU-s without the tab, $(awk -v a="$u1" -v b="$u2" 'BEGIN { printf "%.2f", b - a }') with it; the tab adds $tab CPU-s (budget 2.4); the server used $(printf '%s' "$r" | jx calls)"
+  M="μ's processes in 120 s: $base CPU-s without the tab, $(awk -v a="$u1" -v b="$u2" 'BEGIN { printf "%.2f", b - a }') with it; the tab adds $tab CPU-s (budget 2.4); the server used $(printf '%s' "$r" | jx calls) (sent $(printf '%s' "$r" | jx sent))"
   lt "$tab" 2.4 && [ "$(printf '%s' "$r" | jx calls)" = watch ]
 }
 d40() {   # the real node's answers against the golden fixtures (keys and types)
@@ -285,12 +285,12 @@ dash_faults() {
   must_fail D11 no-cap 'nfault no-cap' nfault d11
   must_fail D11 journal-each-call 'nfault journal-each-call' nfault d11
   must_fail D21 drop-stats 'WSF=drop-stats' 'WSF=""' d21
-  must_fail D25 poll-stats-1s 'WSF=poll-stats-1s' 'WSF=""' d25
+  must_fail D25 poll-stats-1s 'WSF=poll-stats-1s' 'WSF=""' d25 'used stats x' 
   must_fail D40 rename-field-node 'nfault rename-field-node' nfault d40
   must_fail D05 rev-frozen 'nfault rev-frozen' nfault d05
   must_fail D06 swap-mem-fields 'WSF=swap-mem-fields' 'WSF=""' d06
   must_fail D07 serve-last-as-live 'WSF=serve-last-as-live' 'WSF=""' d07
-  if node_pauses; then must_fail D40P rename-field-node-paused 'nfault rename-field-node-paused' nfault d40p; fi
+  if node_pauses; then must_fail D40P rename-field-node-paused 'nfault rename-field-node-paused' nfault d40p 'paused: missing|no running entry with paused true'; fi
 }
 DASH_ROWS="DS D01 D02 D03 D09 D10 D11 D21 D25 D40 D05 D06 D07"
 DASH_FAULTS="D01 D02 D03 D03 D09 D10 D11 D11 D21 D25 D40 D05 D06 D07"

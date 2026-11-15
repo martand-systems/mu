@@ -109,6 +109,9 @@ test("D48 scheduler release 2 on the page: paused, resuming, held, borrower and 
   const heldId = await page.locator('tr[data-state="held"]').getAttribute("data-job");
   await gotoJob(page, heldId);
   await expect(page.getByTestId("commands").getByText(/^mu release \S+$/), "D48: the held job's command is mu release").toBeVisible();
+  // a held job has not started: no log session, no chart (review 2026-11-15: it showed "following" and a skeleton)
+  await expect(page.getByTestId("queued-note"), "D48: a held job's page says held, no log or chart").toContainText(/^Held by avi-mac, keeps place \d+ on office-pc\. The log and the chart start when it runs\.$/);
+  await expect(page.getByTestId("log-status")).toHaveCount(0);
 });
 
 test("D39 old-node budget, the page: each state change of the job is shown within 20 s", async ({ page, serve }) => {

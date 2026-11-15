@@ -69,7 +69,7 @@
     "budget_left_s": 0,
     "limit_s": 600,
     "paused_s": 0,
-    "run_s": 290
+    "run_s": 292
    },
    "usage": null
   },
@@ -98,15 +98,15 @@
     "time_s": 14400
    },
    "live": {
-    "anon": 1178082107,
+    "anon": 1193989340,
     "class": "normal",
     "cpu_cores": 0.0,
     "file": 2100000000,
     "grant_cores": 2,
     "log_size": 79074,
-    "max": 3751643749,
+    "max": 4000000000,
     "paused": true,
-    "peak": 3825205391,
+    "peak": 3841748913,
     "pids": 44,
     "shmem": 400000000,
     "stale": false,
@@ -121,7 +121,7 @@
    "paused": {
     "by": "avi-mac",
     "for_job": "20261114-094800-lyms3c",
-    "held_mem_bytes": 720000000,
+    "held_mem_bytes": 4000000000,
     "lent_to": [
      "20261114-094800-lyms3c"
     ],
@@ -179,15 +179,15 @@
     "time_s": 21600
    },
    "live": {
-    "anon": 9691037010,
+    "anon": 9729564770,
     "class": "normal",
     "cpu_cores": 0.0,
     "file": 2100000000,
     "grant_cores": 20,
     "log_size": 109824,
-    "max": 12434857750,
+    "max": 12841043008,
     "paused": true,
-    "peak": 12678678490,
+    "peak": 12718747360,
     "pids": 44,
     "shmem": 400000000,
     "stale": false,
@@ -202,7 +202,7 @@
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 5880000000,
+    "held_mem_bytes": 12841043008,
     "lent_to": [
      "20261114-094800-lyms3c"
     ],
@@ -659,11 +659,11 @@
      19.8
     ],
     "mem": {
-     "avail": 4760341918,
+     "avail": 4705906925,
      "cached": 2100000000,
      "shmem": 400000000,
      "total": 25769803776,
-     "used": 21009461858
+     "used": 21063896851
     },
     "node_stale": false,
     "per_core": [

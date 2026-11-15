@@ -1293,6 +1293,39 @@ stopped and reset; no unit was left.
 job before the merge (fixtures only, D40P after it); D25 over 10 minutes and with 20 single-core jobs; a `watch` session
 outliving its installed version (item 18, a known limit).
 
+**Integration and review (branch `release-2026.11.11`, 2026-11-15).** D40P ran for the first time on the merged
+branch and failed: its `mu pause` asked for the default 30 minutes, past the 2-minute job's budget, so nothing was
+paused, and `dash_shape` held every list item against the fixture's first job (a finished one). It now pauses
+`--for 90s`, checks that status says frozen before anything else, and holds each job against the fixture's job in the
+same state. Four reviews then read the merged tree; what concerned 1b, and what was done (each fix with a check and a
+fault that makes that check fail):
+
+| Finding (review) | What was wrong | Done | Fault |
+|---|---|---|---|
+| Clock (design-cost 1) | with `watch`, `list` comes only when the state rev moves (or every 5 min), and release 2 sends `time.run_s` for every running job, so a running job's Time column, header and time bar stood still | the server moves a running, unpaused job's `run_s` on from the list's time to now, capped at its limit (2 s steps, the page's poll) | `run-s-static` (`phase1b`) |
+| Rev race (design-cost 2) | `list` read the rev after its scan: a pass in between stamped old states with the new rev, taken as current for up to 5 min | the rev is read before the scan | `rev-after-scan` (`unit_stats rev`) |
+| Held page (design-cost 4) | a held job's page opened a `log follow` session on the node, showed "following" in orange and a chart skeleton forever | the server treats `held` like `queued` (no log session, no metrics); the page says "Held by …, keeps place N on … The log and the chart start when it runs." | `held-log-session` (`phase1b`), page `held-as-started` (D48) |
+| Metrics past 16 MiB (security 4) | `metrics` was read whole: past ~108k samples (6.3 days) every read pulled 16 MiB and failed, the offset never moved | read `max=` 1 MiB at a time (up to 32 a read), the offset moved per piece; the fake node honours `max=` as the node does | `metrics-unchunked` (`phase1b`) |
+| D25 (design-cost 5) | "the server used watch" came from the node's feature list, not from what was sent | `dash_real.py` counts the verbs the reader sent; the must-fail requires "stats xN" | (row) |
+| D09's figure (tests 6) | `sample_ms` was taken before the host sample and the write | measured to after the host sample | `sample-ms-partial` (`unit_stats sampler`) |
+| A vanished `watch` client (tests 7) | only the `max=5` cap was tested, which ends a session whether or not the broken pipe is noticed | a `max=600` session must end within 22 s of its client leaving | `watch-ignores-epipe` (`unit_stats verbs`) |
+| Fingerprint cost (design-cost 7) | `time.strptime` on every finished job's `ended_at` on every 1 s pass (9 ms with 2,000) | ISO strings compared against a cutoff | `fingerprint-parses-dates` (`unit_stats cost`) |
+| Fake paused data (design-cost 8) | the fake kept 0.6 × a paused job's memory, below its working set (the screenshots showed an impossible job) | the fake keeps what the node would: `min(grant, memory at the freeze + max(512 MiB, 5 %))`; fixtures regenerated | (D38) |
+| e2e must-fails (tests 3) | a row broken without its fault "proved" the fault | a must-fail counts only after its row passed in the same run, and D40P's and D25's only on their own symptom | (harness) |
+
+**Not done, and why:** the 30 s `metrics` re-read while a running job's page is open (design-cost 6; about 0.24 % of a
+core per open page; the chart's whole-run points come only from it); a lazy import of `pausectl` in `node.py` (+4 ms
+per verb call of ~70 ms); the card's wording ("3 running · 2 paused" counts paused jobs as running too), job names as
+"name (short id)" everywhere, and a paused row saying which job uses its cores (design-cost 8: wording for the owner);
+D10, D11, D21, D06 and D07 still skip the per-row invariant check; D02's OOM job shows `oom_kill 0` (a runner-sampled
+result cannot see the kill).
+
+**Owner decision needed (design-cost (b)):** D25's 2 % budget now holds for what the dashboard adds (about 0.03 % of a
+core with the overview open, about 0.3 % with a running job's page open). μ's own processes on a node use 1.7-2.2 % of
+a core with no dashboard at all (release 1's runner scans every job folder every second, and no code removes old job
+folders), so "μ's processes under 2 %" as §7.1 first wrote it does not hold today. Keep the budget for the dashboard's
+share, or set one for μ in total (then the runner's scan needs work).
+
 ### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 
 **Scope.**

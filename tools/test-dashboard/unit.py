@@ -1242,6 +1242,40 @@ def t_phase1b():
           any(x.get("paused") for x in m["samples"]) and not all(x.get("paused") for x in m["samples"]),
           len(m["samples"]))
     p.stop()
+    # the review of 2026-11-15: a running job's clock moves between lists; a held job opens no log session; a
+    # metrics file past 16 MiB is read in pieces
+    clock = dashfake.ManualClock(dashfake.FIXED_T0)
+    p = InProc("paused", clock=clock)
+    p.ticks(10)
+    bor = [r for r in p.app.rows() if r["name"] == "sched-probe" and r["state"] == "running"][0]
+    w = p.app.workers["office-pc"]
+    n_list = len(calls(p.sc.nodes["office-pc"], "list"))
+    p.ticks(20)
+    bor2 = [r for r in p.app.rows() if r["job_id"] == bor["job_id"]][0]
+    lender2 = [r for r in p.app.rows() if r["name"] == "frame-fea" and r["state"] == "running"][0]
+    moved = (bor2["time"] or {}).get("run_s", 0) - (bor["time"] or {}).get("run_s", 0)
+    check(tag("phase 1b: a running job's run_s moves on between two lists (20 s later, no new list: +18..22 s); a "
+              "paused one's stays", "run-s-static"),
+          len(calls(p.sc.nodes["office-pc"], "list")) == n_list and 18 <= moved <= 22 and
+          (lender2["time"] or {}).get("run_s") == (lender["time"] or {}).get("run_s"),
+          (moved, len(calls(p.sc.nodes["office-pc"], "list")) - n_list, lender2["time"], lender["time"]))
+    held = [r for r in p.app.rows() if r["state"] == "held"][0]
+    lg = p.app.api_log(held["job_id"], {})
+    check(tag("phase 1b: a held job's log is not followed: no log session on the node", "held-log-session"),
+          lg["following"] is False and lg["size"] == 0 and held["job_id"] not in getattr(p.app, "logs", {}) and
+          not [c for c in calls(p.sc.nodes["office-pc"], "log") if held["job_id"] in str(c)],
+          (lg, calls(p.sc.nodes["office-pc"], "log")))
+    fake = p.sc.nodes["office-pc"]
+    line = json.dumps({"t": dashfake.FIXED_T0, "cpu": 1.0, "anon": 1, "file": 1, "shmem": 1, "cur": 1, "peak": 1,
+                       "max": 2, "pids": 1, "psi_mem": 0.0}, separators=(",", ":")).encode() + b"\n"
+    big = line * ((17 << 20) // len(line) + 1)
+    fake.metrics_bytes = lambda j, t: big
+    a1 = p.app.api_metrics(bor["job_id"])
+    off = p.app.metrics[bor["job_id"]]["offset"]
+    check(tag("phase 1b: a metrics file past 16 MiB is read max= 1 MiB at a time, to its end, the offset moved",
+              "metrics-unchunked"), a1.get("reason") is None and off == len(big) and len(a1["samples"]) == 20000,
+          (a1.get("reason"), a1.get("error"), off, len(big)))
+    p.stop()
     # a watch line that repeats a sample (only the rev moved) adds no point to the series
     clock = dashfake.ManualClock(dashfake.FIXED_T0)
     p = InProc("idle", clock=clock)

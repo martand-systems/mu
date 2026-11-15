@@ -2536,7 +2536,7 @@ def _sample():
                         durable.write_record(os.path.join(j["dir"], "state.json"), s2)
                 event(j["dir"], "affinity widened by %s: %s (granted %s)" % (comm[:64], lst, sched.fmt_cpus(g["cpus"])))
                 break
-    nodestats.write_now(rows, round((time.perf_counter() - t0) * 1000, 2))
+    nodestats.write_now(rows, t0)
 
 
 def set_busy(busy):

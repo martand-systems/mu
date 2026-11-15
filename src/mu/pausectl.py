@@ -46,6 +46,10 @@ and those of the review of 2026-11-15 (scheduler.md §22.5; each makes a sched-p
   no-pause-count-cap        hand pauses per attempt are not counted
   limit-check-each-pass     the runner asks systemd for every running job's limit timer on every pass
   limit-command-unquoted    the limit timer's /bin/sh command does not quote the job's folder
+  cgroup-from-record-only   a job paused before the runner recorded its cgroup lends no memory
+  auto-charges-max          an auto-pause needs 30 min of the victim's pause budget, whatever the urgent job's --time
+  pause-without-selftest    pause is offered (hello, the verb) though the freezer self-check of this boot failed
+  lend-unlowered-mem        a frozen job whose MemoryMax could not be lowered still lends memory
   borrower-ignores-shadow   a borrower admitted for ending before the head's start S is not checked against S again
                             after its checkout (node.start_job)
 A test injector (sets up a slow step for an e2e row; not a check):
@@ -284,8 +288,8 @@ def stop_unit(unit, why=""):
     return n.systemctl("stop", unit, timeout=30)
 
 
-def mem_current(st):
-    cg = st.get("cgroup")
+def mem_current(st, cg=None):
+    cg = st.get("cgroup") or cg
     if not cg:
         return None
     try:
@@ -329,6 +333,7 @@ def freeze(j, D, by, why, for_job=None):
         return undo("its time-limit timer could not be stopped")
     if not arm_dead_man(j, D + n.DEAD_MAN_S) and not fault("no-dead-man"):
         return undo("the dead-man timer could not be armed")
+    cg = None
     if not fault("pause-noop"):
         n.systemctl("freeze", unit, timeout=n.FREEZE_WAIT_S)
         fs = "unknown"
@@ -339,7 +344,8 @@ def freeze(j, D, by, why, for_job=None):
             time.sleep(0.25)
         if fs != "frozen":
             return undo("the unit did not freeze within %d s (FreezerState %s)" % (n.FREEZE_WAIT_S, fs))
-    held = lower_mem(st, unit)
+        cg = _p.get("ControlGroup") or None
+    held = lower_mem(st, unit, cg)
     st = dict(j["state"])
     st["pause"] = dict(st["pause"], phase="frozen", since_mono=mono_now(), held_mem_bytes=held)
     if prev:   # a re-pause keeps the open pause's start
@@ -357,18 +363,20 @@ def freeze(j, D, by, why, for_job=None):
     return True, None
 
 
-def lower_mem(st, unit):
+def lower_mem(st, unit, cg=None):
     """§20.5 step 5 on a frozen unit: MemoryMax = min(grant, memory.current + margin). -> held (the grant when
-    memory.current cannot be read or set-property fails: cores are lent, no memory)."""
+    memory.current cannot be read or set-property fails: cores are lent, no memory). CG: the unit's ControlGroup as
+    systemd just said, for a job paused before the runner recorded it (CI's Q39 paused one a second after its start)."""
     n = N()
-    cur = mem_current(st)
+    cur = mem_current(st, None if fault("cgroup-from-record-only") else cg)
     grant = (st.get("grant") or {}).get("mem_bytes") or 0
     held = grant
     if cur is not None:
         held = min(grant, cur + lend_margin(cur))
         if held < grant and not set_mem(unit, held):
             n.journal_once("mem-lend", "pause: set-property MemoryMax on a frozen unit failed: cores are lent, no memory")
-            held = grant
+            if not fault("lend-unlowered-mem"):
+                held = grant
     return held
 
 
@@ -670,10 +678,13 @@ def auto_candidate(pl, by_id, running, cap, node):
     return {"H": H, "req": req, "policy": policy}
 
 
-def eligible(running, policy, now=None):
-    """Condition 3 of §20.7: running jobs that may be auto-paused, with their estimated lent memory."""
+def eligible(running, policy, now=None, need_s=None):
+    """Condition 3 of §20.7: running jobs that may be auto-paused, with their estimated lent memory. NEED_S: how long
+    this auto-pause lasts (30 s + the urgent job's t + MARGIN); its budget must hold that, not the 30-minute most
+    (review 2026-11-15, CI: a 10-minute job, budget 600 s, could never be auto-paused for a 20 s urgent job)."""
     n = N()
     now = mono_now() if now is None else now
+    need_s = n.AUTO_PAUSE_S if need_s is None or fault("auto-charges-max") else need_s
     out = []
     for j in running:
         st, job = j["state"] or {}, j["job"]
@@ -690,7 +701,7 @@ def eligible(running, policy, now=None):
             last = st.get("last_thaw_mono")
             if isinstance(last, (int, float)) and now - last < n.AUTO_COOLDOWN_S:
                 continue
-        if float(st.get("paused_total_s") or 0) + n.AUTO_PAUSE_S > budget_of(g):
+        if float(st.get("paused_total_s") or 0) + need_s > budget_of(g):
             continue
         cur = mem_current(st)
         est = (g.get("mem_bytes") or 0) - (cur + lend_margin(cur)) if cur is not None else 0
@@ -721,7 +732,8 @@ def auto_pause(ap, jobs, running, cap, walk, disk, drain=()):
         pl = plan_now()
         if any(x["id"] == H["id"] for x in pl["starts"]):
             return pl, None
-        return pl, sched.choose_victims(eligible(running, policy), req["cores"], req["mem_bytes"],
+        need_s = n.FREEZE_WAIT_S + req["time_s"] + sched.MARGIN_S
+        return pl, sched.choose_victims(eligible(running, policy, need_s=need_s), req["cores"], req["mem_bytes"],
                                         (pl.get("free") or {}).get("mem_bytes") or 0)
     pl, vs = victims()
     if vs is None and not any(x["id"] == H["id"] for x in pl["starts"]):
@@ -857,6 +869,8 @@ def available(node=None):
     n = N()
     node = n.node_info() if node is None else node
     fz = node.get("freezer") or {}
+    if fault("pause-without-selftest"):
+        return True
     return fz.get("ok") is True and fz.get("boot_id") == n.boot_id()
 
 

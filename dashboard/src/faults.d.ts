@@ -24,3 +24,4 @@ declare const __FAULT_PUSH_FRAGMENT__: boolean;
 declare const __FAULT_PAUSED_AS_RUNNING__: boolean;
 declare const __FAULT_COUNT_PAUSED_IN_RUN__: boolean;
 declare const __FAULT_PAUSED_CPU_ZERO__: boolean;
+declare const __FAULT_HELD_AS_STARTED__: boolean;

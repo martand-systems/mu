@@ -18,6 +18,12 @@ from mu import dashboard, dashfake, dashnode, jobs  # noqa: E402
 cmd = sys.argv[2]
 app = dashboard.App(dev=False, mac=dashfake.FakeMac(dashboard._RealClock()), readers={"office-pc": dashnode.NodeReader.real(jobs.load_node("office-pc"))})
 w = app.workers["office-pc"]
+SENT = {}   # the verbs this server really sent the node (review 2026-11-15: D25 reported the node's feature instead)
+for _name in ("call", "stream"):
+    def _counting(verb, *a, _f=getattr(w.r, _name), **k):
+        SENT[verb] = SENT.get(verb, 0) + 1
+        return _f(verb, *a, **k)
+    setattr(w.r, _name, _counting)
 
 
 def run(seconds, each=None, step=0.5):
@@ -82,7 +88,10 @@ try:
         out["available"] = m.get("available")
     elif cmd == "load":
         run(float(sys.argv[3]))
-        out["calls"] = "watch" if w.has("watch") else "list"
+        out["sent"] = dict(SENT)
+        # one watch stream (reopened at most every 600 s), no stats polling: "watch"; else what it did
+        out["calls"] = "watch" if SENT.get("watch", 0) >= 1 and SENT.get("stats", 0) <= 5 else \
+            "stats x%d" % SENT.get("stats", 0) if SENT.get("stats") else "list"
     out["features"] = w.features
     out["state"] = w.state
     out["error"] = w.error

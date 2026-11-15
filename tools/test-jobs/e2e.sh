@@ -23,7 +23,9 @@ row() {   # row RESULT ID WHAT MEASURED
   printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$(printf '%s' "$4" | tr '\t\n' '  ' | cut -c1-400)" >> "$WORK/results.tsv"
   printf '%-10s %-4s %s: %s\n' "$1" "$2" "$3" "$(printf '%s' "$4" | tr '\n' ' ' | cut -c1-300)"
   case "$1" in FAIL|MISSED) N_FAIL=$((N_FAIL + 1)) ;; esac
+  case "$1" in PASS) CLEAN_PASS="$CLEAN_PASS $2 " ;; FAIL) CLEAN_FAIL="$CLEAN_FAIL $2 " ;; esac
 }
+CLEAN_PASS=" "; CLEAN_FAIL=" "   # the rows' own runs in this run (a must-fail counts only when its row passed)
 want() { [ -z "${ONLY:-}" ] && return 0; case " $ONLY " in *" $1 "*) return 0 ;; esac; return 1; }
 M=""   # what a row measured
 run_row() {   # run_row ID WHAT FUNCTION
@@ -31,14 +33,21 @@ run_row() {   # run_row ID WHAT FUNCTION
   printf '\n-- %s %s\n' "$1" "$2"
   M=""; if "$3"; then row PASS "$1" "$2" "$M"; else row FAIL "$1" "$2" "$M"; fi
 }
-must_fail() {   # must_fail ID FAULT ON OFF FUNCTION: with the fault on, the row has to fail (ON and OFF: shell words)
+must_fail() {   # must_fail ID FAULT ON OFF FUNCTION [PATTERN]: with the fault on, the row has to fail (ON and OFF:
+                # shell words). It counts only when the row itself PASSED earlier in this run (review 2026-11-15: a
+                # row broken without its fault "proved" every fault), and, with PATTERN (grep -E), only when what the
+                # row measured shows that fault's own symptom (a row that checks several things: its targeted part)
   want "$1" || return 0
   printf '\n-- %s with fault %s\n' "$1" "$2"
+  case "$CLEAN_FAIL" in *" $1 "*) row MISSED "$1" "with fault $2: the row failed without it in this run, so its failure now shows nothing" ""; return 0 ;; esac
+  case "$CLEAN_PASS" in *" $1 "*) ;; *) row MISSED "$1" "with fault $2: the row did not pass without it in this run, so its failure now shows nothing" ""; return 0 ;; esac
   eval "$3"; M=""
   if "$5"; then row MISSED "$1" "with fault $2 the row still passed (the test does not test it)" "$M"
   else case "$M" in   # a row that could not even start shows nothing about the fault
     "invite failed"*|"drain failed"*) row MISSED "$1" "with fault $2 the row could not run, so it shows nothing" "$M" ;;
-    *) row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M" ;; esac; fi
+    *) if [ -n "${6:-}" ] && ! printf '%s' "$M" | grep -Eq -- "$6"; then
+         row MISSED "$1" "with fault $2 it failed, but not on its targeted check (/$6/)" "$M"
+       else row FAILS-OK "$1" "with fault $2 it fails, as it must" "$M"; fi ;; esac; fi
   eval "$4"
 }
 jget() { python3 -c 'import json,sys
@@ -78,7 +87,12 @@ wait_state() {   # wait_state JOB "STATES" SECONDS -> 0 when the job is in one o
     s="$(jobstate "$1")"; case " $2 " in *" $s "*) return 0 ;; esac; sleep 1
   done; return 1
 }
-submit() { ws submit --json "$@" 2>&1 | tee -a "$WORK/logs/submits.log" | jget job_id; }
+submit() {   # the new job's id, or nothing when the node refused it (a refusal's JSON carries a job_id too: review
+             # 2026-11-15, Q37's urgent jobs were all refused and the row went on with ids of jobs that never existed)
+  local o; o="$(ws submit --json "$@" 2>&1)"; printf '%s\n' "$o" >> "$WORK/logs/submits.log"
+  [ "$(printf '%s' "$o" | jget ok)" = true ] || { echo "submit refused: $(printf '%s' "$o" | jget error)" >&2; return 1; }
+  printf '%s' "$o" | jget job_id
+}
 nodelog() { sudo cat "/srv/mu/jobs/$1/log" 2>/dev/null; }
 relay_ctr() { docker ps -aq --filter label=com.docker.compose.project=mu-relay-ci0001 --filter label=com.docker.compose.service=mu-relay | head -1; }
 wait_up() {   # until the node answers through the relay (the tunnel reconnects every 15 s at most)

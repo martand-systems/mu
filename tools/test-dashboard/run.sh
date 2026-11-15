@@ -107,6 +107,9 @@ must_fail stale-build         "$PY1" build
 # phase 1b (docs/design/dashboard.md §7.1.2): each on the check it targets
 must_fail_tagged features-any      "$PY1" phase1b
 must_fail_tagged drop-sched-fields "$PY1" phase1b
+must_fail_tagged run-s-static      "$PY1" phase1b
+must_fail_tagged held-log-session  "$PY1" phase1b
+must_fail_tagged metrics-unchunked "$PY1" phase1b
 must_fail_tagged drop-stats        "$PY1" compute-status
 must_fail_tagged no-fetched-mark   "$PY1" compute-status
 [ -n "$SLOW" ] && must_fail no-lock "$PY1" lifecycle

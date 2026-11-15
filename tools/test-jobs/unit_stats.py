@@ -255,6 +255,21 @@ def t_verbs():
         pr.kill()
         gone = False
     check(tag("verbs: a watch whose client disappeared leaves no session after the cap (5 s)", "no-cap"), gone)
+    # ... and well before the cap (600 s): at its next line, WATCH_EVERY_S at most (review 2026-11-15: the 5 s cap above
+    # ended the session whether or not a vanished client was noticed)
+    pr = subprocess.Popen([sys.executable, "-I", "-S", "-c", code, "serve", "--key=k", "watch", "interval=2", "max=600"],
+                          env=e, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    pr.stdout.readline()
+    t_gone = time.monotonic()
+    pr.stdout.close()
+    try:
+        pr.wait(timeout=nodestats.WATCH_EVERY_S + 2 + 5)
+        left = round(time.monotonic() - t_gone, 1)
+    except subprocess.TimeoutExpired:
+        pr.kill()
+        left = None
+    check(tag("verbs: a watch whose client disappeared ends at its next line (within %ds), not at max=600" %
+              (nodestats.WATCH_EVERY_S + 7), "watch-ignores-epipe"), left is not None, left)
     h = node.hello_answer("k", node.node_info())
     check("verbs: hello.features names stats, watch and metrics",
           {"stats", "watch", "metrics"} <= set(h["features"]) and "pause" not in h["features"], h["features"])
@@ -294,6 +309,19 @@ def t_sampler():
     finally:
         node.Lock = real_lock
     check(tag("sampler: a pass never takes the queue lock (D09)", "sample-under-lock"), locks[0] == 0, locks[0])
+    real_host = nodestats.host_sample
+
+    def slow_host():
+        time.sleep(0.05)
+        return real_host()
+    nodestats.host_sample = slow_host
+    try:
+        node.sample()
+    finally:
+        nodestats.host_sample = real_host
+    ms = json.load(open(node.p("metrics", "now.json"))).get("sample_ms")
+    check(tag("sampler: sample_ms is the whole pass, the host sample included (a 50 ms host "
+              "sample shows)", "sample-ms-partial"), isinstance(ms, (int, float)) and ms >= 50, ms)
     nw = json.load(open(node.p("metrics", "now.json")))
     check("sampler: now.json is written each pass, with the queue counts",
           nw.get("queue", {}).get("running") == 1 and "host" in nw and isinstance(nw.get("t"), float), nw.get("queue"))
@@ -348,6 +376,28 @@ def t_cost():
     check(tag("cost: stats never calls scan_jobs()", "stats-scan"), calls[0] == 0, calls[0])
     check("cost: stats with 2,000 finished job folders answers in under 100 ms (in process)", dt < 0.1 and a["ok"],
           "%.1f ms" % (dt * 1000))
+    # the rev's fingerprint, each runner pass: finished jobs filtered by comparing ISO strings, no date parsing
+    now = time.time()
+    fin = [{"id": "20261101-%06d-hhhhhh" % i, "state": {"state": "running"},
+            "result": {"state": "succeeded", "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(
+                now - (30 if i % 100 == 0 else 7200)))}} for i in range(2000)]
+    parsed = [0]
+    real_epoch = nodestats.epoch_of
+
+    def counting_epoch(x):
+        parsed[0] += 1
+        return real_epoch(x)
+    nodestats.epoch_of = counting_epoch
+    try:
+        fp = nodestats.fingerprint(fin, {}, now)
+        fp_old = nodestats.fingerprint(fin[1:100], {}, now)   # none recent among these
+        fp_none = nodestats.fingerprint([], {}, now)
+    finally:
+        nodestats.epoch_of = real_epoch
+    check(tag("cost: the rev's fingerprint parses no dates (2,000 finished jobs, 20 of them recent)",
+              "fingerprint-parses-dates"), parsed[0] == 0, parsed[0])
+    check("cost: ... and still counts only results of the last 10 minutes", fp != fp_none and fp_old == fp_none,
+          (fp, fp_old, fp_none))
 
 
 SECTIONS = {"rev": t_rev, "host": t_host, "line": t_line, "verbs": t_verbs, "sampler": t_sampler,

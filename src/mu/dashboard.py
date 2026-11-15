@@ -35,6 +35,10 @@ Test hooks: MU_LAUNCHCTL, MU_LAUNCH_AGENTS_DIR, MU_OPENER (the program that open
   poll-stats-1s       a node with stats is polled with `stats` every second instead of one `watch` (D25)
   mac-samples-only    the whole-run chart is never read from the node's metrics.jsonl (D09: gaps while away)
   drop-sched-fields   rows lack the scheduler's fields (band, held, paused, time, run_s, ...)
+ the review of 2026-11-15 (§7.1.2):
+  run-s-static        a running job's run_s is the node's list-time figure, not moved on to now (the clock stood still)
+  metrics-unchunked   metrics is read whole (no max=): past 16 MiB it fails every 30 s and never moves on
+  held-log-session    a held job's log is followed on the node as if it had started
 A real (non-dev) `serve` refuses to start with any fault that weakens its security (UNSAFE_FAULTS); open-url-argv
 works only with MU_OPENER (a test's stub opener).
 """
@@ -70,6 +74,8 @@ LOG_KEEP = 2 << 20        # the server keeps the last 2 MB of a followed log (th
 LOG_PIECE = 256 << 10     # one /log answer carries at most this many bytes
 LOG_SESSIONS = 8          # open `log follow=1` sessions at most (one per job whose log is being read)
 METRICS_CAP = 16 << 20
+METRICS_CHUNK = 1 << 20       # metrics is read max= this at a time, the offset moved after each (review 2026-11-15:
+METRICS_CHUNKS = 32           # a file past METRICS_CAP was pulled whole every 30 s and failed); at most this many a read
 SERIES_S = 3600           # host series kept in memory (1 h)
 CARD_SERIES_S = 600       # the machine cards' sparklines (10 min)
 MAC_STEP = 2.0            # the Mac sampler's step
@@ -995,7 +1001,7 @@ class App:
                      "mem_events": {"max": num(ev.get("max"), 0), "oom_kill": num(ev.get("oom_kill"), 0)},
                      "source": u.get("source") if u.get("source") in ("cgroup", "runner-sampled") else None}
         node = names[0] if fault("node-from-config") and names else w.name
-        extra = self.row_sched(w, {} if fault("drop-sched-fields") else s, st)
+        extra = self.row_sched(w, {} if fault("drop-sched-fields") else s, st, now)
         return {**extra, "job_id": jid, "short": jid[-6:], "node": node, "name": text(s.get("name"), 200),
                 "project": text((idx or {}).get("project"), 80), "project_id": text(s.get("project_id"), 80),
                 "mine": bool(idx), "state": st, "position": num(s.get("position"), 0),
@@ -1009,9 +1015,11 @@ class App:
                                                     "cores": num(lim.get("cores"), 0)},
                 "as_of": rnd(list_t, 1), "stale": list_t is None or now - list_t > w.list_stale_after()}
 
-    def row_sched(self, w, s, st):
+    def row_sched(self, w, s, st, now=None):
         """The scheduler's fields of a row (release 1's band, held, place, grant; release 2's paused, time, run_s,
-        paused_s; contract §3.1). Absent on an older node: null."""
+        paused_s; contract §3.1). Absent on an older node: null. A running job that is not paused gets its run time
+        moved on from the list's time to NOW (review 2026-11-15: with `watch`, list comes only when the state rev
+        moves, so the node's run_s alone stood still for up to 5 minutes)."""
         def who(x):
             return {"by": text(x.get("by"), 64), "at": w.node_epoch(x.get("at"))} if isinstance(x, dict) else None
         g = s.get("grant") if isinstance(s.get("grant"), dict) else None
@@ -1043,9 +1051,17 @@ class App:
                 "grant": grant, "ends_by": w.node_epoch(s.get("ends_by")),
                 "pausable": s.get("pausable") if isinstance(s.get("pausable"), bool) else None,
                 "paused": paused,
-                "time": None if tm is None else {k: num(tm.get(k), 0) for k in
-                                                 ("limit_s", "run_s", "paused_s", "budget_left_s")},
+                "time": None if tm is None else self.time_now(w, tm, paused, now),
                 "run_s": num(s.get("run_s"), 0), "paused_s": num(s.get("paused_s"), 0)}
+
+    @staticmethod
+    def time_now(w, tm, paused, now):
+        out = {k: num(tm.get(k), 0) for k in ("limit_s", "run_s", "paused_s", "budget_left_s")}
+        if paused is None and out["run_s"] is not None and w.list_t is not None and now is not None and \
+                not fault("run-s-static"):
+            run = out["run_s"] + max(0.0, now - w.list_t)
+            out["run_s"] = int(min(run, out["limit_s"]) if out["limit_s"] is not None else run)
+        return out
 
     def find(self, job_id):
         for w in self.workers.values():
@@ -1171,7 +1187,8 @@ class App:
         w, s = self.find(job_id)
         if w is None:
             raise ApiError(404, "no-such-job", "no node listed this job")
-        if s.get("state") == "queued":
+        if s.get("state") == "queued" or (s.get("state") == "held" and not fault("held-log-session")):
+            # not started: no log session on the node (review 2026-11-15: a held job's page followed its log)
             return {"job_id": job_id, "offset": 0, "next": 0, "start": 0, "size": 0, "truncated_before": False,
                     "text": "", "following": False, "eof": False, "error": None, "t": rnd(self.clock.wall(), 3)}
         lb = self.logbuf(w, job_id, s.get("log_size"))
@@ -1193,7 +1210,7 @@ class App:
             base.update(available=False, reason="old-node" if w.hello is not None else "unknown", samples=[],
                         complete=False)
             return base
-        if s.get("state") == "queued":
+        if s.get("state") in ("queued", "held"):
             base.update(available=True, reason=None, samples=[], complete=False)
             return base
         with self.lock:
@@ -1206,37 +1223,50 @@ class App:
             m["at"] = now_m
         elif now_m - m["at"] > 30.0 or (not running and m["at"] < 0):
             m["at"] = now_m                                   # failures wait 30 s too
-            got = bytearray()
+            chunked = not fault("metrics-unchunked")
+            for _ in range(METRICS_CHUNKS if chunked else 1):
+                got = bytearray()
 
-            def on_data(b):
-                got.extend(b)
-                if len(got) > METRICS_CAP:
-                    raise MuError(proto.EXIT_ERROR, "too-large", "metrics too large", "")
-            try:
-                w.r.stream("metrics", on_data, id=job_id, offset=str(m["offset"]))
-            except MuError as e:
-                base.update(available=True, reason="error", error=dashnode.error_info(e), samples=m["samples"],
-                            complete=False)
-                return base
-            data = bytes(got)
-            cut = data.rfind(b"\n") + 1                      # a final line without \n is not yet written
-            m["offset"] += cut
-            for line in data[:cut].splitlines():
+                def on_data(b):
+                    got.extend(b)
+                    if len(got) > METRICS_CAP:
+                        raise MuError(proto.EXIT_ERROR, "too-large", "metrics too large", "")
                 try:
-                    d = json.loads(line.decode("utf-8"))
-                except (ValueError, UnicodeDecodeError):
-                    continue
-                if not isinstance(d, dict) or num(d.get("t")) is None:
-                    continue
-                m["samples"].append({"t": round(d["t"] - w.offset_s, 1), "cpu": num(d.get("cpu"), 0, 4096),
-                                     "anon": num(d.get("anon"), 0), "file": num(d.get("file"), 0),
-                                     "shmem": num(d.get("shmem"), 0), "cur": num(d.get("cur"), 0),
-                                     "peak": num(d.get("peak"), 0), "max": num(d.get("max"), 0),
-                                     "pids": num(d.get("pids"), 0), "psi_mem": num(d.get("psi_mem"), 0, 100),
-                                     "paused": d.get("paused") == 1})
-            del m["samples"][:-20000]
+                    if chunked:
+                        w.r.stream("metrics", on_data, id=job_id, offset=str(m["offset"]), max=str(METRICS_CHUNK))
+                    else:
+                        w.r.stream("metrics", on_data, id=job_id, offset=str(m["offset"]))
+                except MuError as e:
+                    base.update(available=True, reason="error", error=dashnode.error_info(e), samples=m["samples"],
+                                complete=False)
+                    return base
+                data = bytes(got)
+                cut = data.rfind(b"\n") + 1                  # a final line without \n is not yet written
+                if cut == 0 and len(data) >= METRICS_CHUNK:  # one line longer than a chunk: skipped, never re-read
+                    cut = len(data)
+                self.add_samples(w, m, data[:cut])
+                m["offset"] += cut
+                if not chunked or len(data) < METRICS_CHUNK:
+                    break
         base.update(available=True, reason=None, samples=list(m["samples"]), complete=not running)
         return base
+
+    @staticmethod
+    def add_samples(w, m, data):
+        for line in data.splitlines():
+            try:
+                d = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(d, dict) or num(d.get("t")) is None:
+                continue
+            m["samples"].append({"t": round(d["t"] - w.offset_s, 1), "cpu": num(d.get("cpu"), 0, 4096),
+                                 "anon": num(d.get("anon"), 0), "file": num(d.get("file"), 0),
+                                 "shmem": num(d.get("shmem"), 0), "cur": num(d.get("cur"), 0),
+                                 "peak": num(d.get("peak"), 0), "max": num(d.get("max"), 0),
+                                 "pids": num(d.get("pids"), 0), "psi_mem": num(d.get("psi_mem"), 0, 100),
+                                 "paused": d.get("paused") == 1})
+        del m["samples"][:-20000]
 
     def api_node(self, name):
         w = self.workers.get(name)

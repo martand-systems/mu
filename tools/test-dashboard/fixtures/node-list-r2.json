@@ -150,7 +150,7 @@
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 5880000000,
+    "held_mem_bytes": 12841043008,
     "lent_to": [
      "20261114-094800-lyms3c"
     ],
@@ -198,7 +198,7 @@
    "paused": {
     "by": "avi-mac",
     "for_job": "20261114-094800-lyms3c",
-    "held_mem_bytes": 720000000,
+    "held_mem_bytes": 4000000000,
     "lent_to": [
      "20261114-094800-lyms3c"
     ],

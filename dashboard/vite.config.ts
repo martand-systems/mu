@@ -20,7 +20,7 @@ export const FAULTS = ["assume-features", "keep-fragment", "inner-html", "div-bu
   "radix-scrollarea", "inner-html-lib", "theme-in-bundle", "chart-fixed-colours", "boundary-shows-error",
   "server-down-as-offline", "copy-after-await", "interpolate-gap", "network-mode-default", "refused-as-offline",
   "mac-swap-mem", "faint-series", "copy-no-fallback", "violation-offline", "push-fragment",
-  "paused-as-running", "count-paused-in-run", "paused-cpu-zero"] as const;
+  "paused-as-running", "count-paused-in-run", "paused-cpu-zero", "held-as-started"] as const;
 const activeFaults = (process.env.MU_DASH_FAULT ?? "").split(",").filter(Boolean);
 for (const f of activeFaults) {
   if (!(FAULTS as readonly string[]).includes(f)) throw new Error(`MU_DASH_FAULT: unknown fault ${f}`);
