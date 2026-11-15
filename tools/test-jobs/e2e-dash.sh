@@ -264,7 +264,11 @@ dash_rows() {
   run_row D07 "the server against the real node: the runner stopped, the figures stale within 25 s" d07
   printf '\n-- D40P\n'; M=""; d40p; case $? in 0) row PASS D40P "with a paused job, the answers against the release 2 fixtures" "$M" ;;
     2) ;; *) row FAIL D40P "with a paused job, the answers against the release 2 fixtures" "$M" ;; esac
+  # On a node with `pause` (the merged branch) D40P is an expected row (Z1: it must have run) and its fault an
+  # expected must-fail (Z2); here it reports SKIP and neither is expected.
+  if node_pauses; then DASH_ROWS="$DASH_ROWS D40P"; DASH_FAULTS="$DASH_FAULTS D40P"; fi
 }
+node_pauses() { case "$(ws compute status office-pc --json | jget hello.features)" in *'"pause"'*) return 0 ;; esac; return 1; }
 dash_faults() {
   must_fail D01 usage-from-shim 'nfault usage-from-shim' nfault d01
   must_fail D02 read-cgroup-after-exit 'nfault read-cgroup-after-exit' nfault d02
@@ -280,6 +284,7 @@ dash_faults() {
   must_fail D05 rev-frozen 'nfault rev-frozen' nfault d05
   must_fail D06 swap-mem-fields 'WSF=swap-mem-fields' 'WSF=""' d06
   must_fail D07 serve-last-as-live 'WSF=serve-last-as-live' 'WSF=""' d07
+  if node_pauses; then must_fail D40P rename-field-node-paused 'nfault rename-field-node-paused' nfault d40p; fi
 }
 DASH_ROWS="DS D01 D02 D03 D09 D10 D11 D21 D25 D40 D05 D06 D07"
 DASH_FAULTS="D01 D02 D03 D03 D09 D10 D11 D11 D21 D25 D40 D05 D06 D07"

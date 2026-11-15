@@ -1268,7 +1268,8 @@ from canned `/proc` files, `job_line` with the paused flag, the quiet journal an
 only `LAST_RUNNING` and never taking the lock, run time and `cores_avg`, `stats` with 2,000 job folders; each check
 with its fault and a tagged must-fail. Real node (`e2e.sh dash`, CI job `dash-node`): D01–D03, D09–D11, D21, D25, D40,
 and D05–D07 with the server's real `NodeReader` (`tools/test-jobs/dash_real.py`), each with its fault; D40P reports
-SKIP here (no `pause`) and must PASS on the merged branch. Mac: Python sections `phase1b` (D04b, release 2's rows) and
+SKIP here (no `pause`); on a node with `pause` it becomes an expected row that must PASS, with its fault
+`rename-field-node-paused` an expected must-fail. Mac: Python sections `phase1b` (D04b, release 2's rows) and
 `compute-status` (D21, the fetched mark); Vitest `r2.test.ts` (D48's decoder part, D49); Playwright D04b and D48
 (Chromium and WebKit, axe), each with its fault on its own assertion. D09's budget is 5 ms + 3 ms per running job
 (item 8); "the loop stays at 1 s" is measured as samples 5 s apart. D25 is measured over 2 minutes, not 10, and holds
