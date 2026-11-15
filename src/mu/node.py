@@ -80,6 +80,8 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   grant-after-systemd-run the grant reaches state.json only after systemd-run (a unit can exist without it)
   unconfirmed-as-interrupted  a start whose unit never came counts as an interrupted attempt (not a failed start)
   no-note-active          the runner never records a unit's activation (end bound, cgroup, start_unconfirmed)
+release 2 (pause, resume, lending, the timers, auto-pause): the faults are listed in src/mu/pausectl.py and
+src/mu/sched.py
 """
 import fcntl
 import hashlib
@@ -98,6 +100,7 @@ import traceback
 
 from mu import durable, proto, sched
 from mu.durable import fault
+from mu import pausectl
 
 ROOT = os.environ.get("MU_NODE_ROOT") or "/srv/mu"
 DEFAULT_MIN_FREE_GB = 20
@@ -121,6 +124,18 @@ FEATURES = ("sched", "usage", "queue-control", "update")
 LOCK_WAIT_S = 120             # a verb waits this long for the queue lock (the runner holds it through checkouts)
 SAMPLE_EVERY = 5              # ticks between two samples of the running jobs (§7.1)
 STARTED_HERE = set()          # fault grant-in-memory-only: the jobs this runner process started
+# release 2 (scheduler.md §20.5-§20.7, §22): pause limits are constants, not node.json settings
+PAUSE_DEFAULT_S = 30 * 60     # mu pause without --for
+PAUSE_HAND_MAX_S = 2 * 3600   # one hand pause at most
+PAUSE_BUDGET_S = 4 * 3600     # paused in all per attempt, and never more than the job's own --time
+AUTO_PAUSE_S = 30 * 60        # one auto-pause at most (the urgent job's t + MARGIN + 30 s must fit in it)
+AUTO_PAUSE_MAX = 2            # auto-pauses per attempt
+AUTO_COOLDOWN_S = 15 * 60     # running between two auto-pauses of one job
+LEND_MARGIN_MIN = 512 << 20   # held = min(grant, memory.current + max(512 MiB, 5 %))
+FREEZE_WAIT_S = 30            # systemctl freeze must reach "frozen" within this
+DEAD_MAN_S = 120              # the dead-man timer thaws a frozen job at its deadline + this
+VALVE_AFTER_S = 60            # a borrower still alive this long past its lender's deadline is killed
+ARG_RULES["for"] = re.compile(r"^[0-9]{1,5}$")
 
 
 class NodeError(Exception):
@@ -229,7 +244,8 @@ def systemctl(*args, timeout=60):
 
 def unit_props(unit):
     r = systemctl("show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "Result",
-                  "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ActiveEnterTimestampMonotonic", "-p", "ControlGroup")
+                  "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ActiveEnterTimestampMonotonic", "-p", "ControlGroup",
+                  "-p", "FreezerState")
     props = {}
     for line in r.stdout.splitlines():
         if "=" in line:
@@ -531,8 +547,8 @@ def running_info(jobs, here_only=False, drain=()):
         if here_only and j["id"] not in STARTED_HERE:
             continue
         g = grant_of(j)
-        out.append({"id": j["id"], "grant": g, "end": sched.end_bound(g) if g else None,
-                    "started_epoch": st.get("started_epoch"), "held": False})
+        out.append({"id": j["id"], "grant": g, "end": pausectl.end_bound(st) if g else None,
+                    "started_epoch": st.get("started_epoch"), "held": False, "pause": pausectl.pause_item(st)})
     return out
 
 
@@ -635,6 +651,9 @@ def status_of(j, v=None):
         if not fault("no-usage"):
             out["usage"] = res.get("usage")
         out["grant"] = res.get("grant")
+        out["run_s"], out["paused_s"] = res.get("run_s"), res.get("paused_s")
+        out["pauses"] = res.get("pauses")
+        out["pausable"] = job.get("pausable") is True
         if res.get("affinity_widened"):
             out["affinity_widened"] = res["affinity_widened"]
         return out
@@ -655,9 +674,12 @@ def status_of(j, v=None):
         g = grant_of(j)
         out["grant"] = public_grant(g)
         out["class"] = (g or {}).get("class")
-        out["ends_by"] = wall_of(v, sched.end_bound(g)) if g and v else None
+        out["ends_by"] = wall_of(v, pausectl.end_bound(st)) if g and v else None
         if st.get("affinity_widened"):
             out["affinity_widened"] = st["affinity_widened"]
+        pausectl.job_fields(j, v, v["jobs"] if v else [j], out)
+    else:
+        out["pausable"] = job.get("pausable") is True
     return out
 
 
@@ -734,6 +756,12 @@ def write_result(j, state, written_by, unit_result=None, note=None, **extra):
            "written_by": written_by, "note": note, "job": job_summary(j["job"])}
     if st.get("grant"):
         res["grant"] = public_grant(st["grant"])
+    # release 2 (§20.6): running time without the pauses, the pauses themselves
+    res["run_s"] = round(pausectl.run_seconds(st, res["wall_s"]), 1) if res["wall_s"] is not None else None
+    res["paused_s"] = round(pausectl.paused_s(st), 1) if started else 0
+    res["pauses"] = list(st.get("pauses") or [])
+    if st.get("pauses_more"):
+        res["pauses_more"] = st["pauses_more"]
     if st.get("affinity_widened"):
         res["affinity_widened"] = st["affinity_widened"]
     usage = extra.pop("usage", None)
@@ -791,6 +819,20 @@ def verb_hello(key, args):
     return hello_answer(key, node)
 
 
+def auto_policy(node=None):
+    """node.json sched.auto_pause: "marked" (default: only jobs submitted --pausable), "any" or "off" (§20.7)."""
+    a = ((node if node is not None else node_info()).get("sched") or {}).get("auto_pause")
+    return a if a in ("marked", "any", "off") else "marked"
+
+
+def lent_view(pl):
+    lt = pl.get("lent") or {"cores": 0, "cpus": [], "mem_bytes": 0, "borrowed": {"cores": 0, "cpus": [], "mem_bytes": 0}}
+    b = lt.get("borrowed") or {}
+    return {"cores": lt["cores"], "cpus": sched.fmt_cpus(lt["cpus"]), "mem_bytes": lt["mem_bytes"],
+            "borrowed": {"cores": b.get("cores", 0), "cpus": sched.fmt_cpus(b.get("cpus") or []),
+                         "mem_bytes": b.get("mem_bytes", 0)}}
+
+
 def hello_answer(key, node):
     v = view(node=node)
     jobs = v["jobs"]
@@ -806,10 +848,13 @@ def hello_answer(key, node):
            "limits": {"memory": limits_ok(node) or fault("skip-limits-check"), "pids": True, "selftest_at": st.get("at"),
                       "selftest_detail": st.get("detail"), "cpu": cpu_limit()},
            "queue": {"running": len(running), "queued": len([x for x in v["walk"] if not x["held"]]),
-                     "held": len([x for x in v["walk"] if x["held"]]), "express": express},
+                     "held": len([x for x in v["walk"] if x["held"]]), "express": express,
+                     "paused": len([j for j in running if pausectl.pause_item(j["state"] or {})])},
            "last_stop": last_stop(), "runner": runner_state(), "autoupdate": autoupdate_info(), "time": proto.iso(),
            # the scheduler (scheduler.md §7.1, §20.12): new fields only, protocol unchanged
-           "features": [f for f in FEATURES if not (f == "usage" and fault("no-usage"))],
+           "features": [f for f in FEATURES if not (f == "usage" and fault("no-usage"))] + (
+               ["pause"] if pausectl.available(node) else []),
+           "auto_pause": auto_policy(node), "pause": {"mem_lend": (node.get("freezer") or {}).get("mem_lend") is True},
            "capacity": {"cores": cap["cores"], "cpus": sched.fmt_cpus(cap["cpus"]), "mem_bytes": cap["mem_bytes"],
                         "reserve_system": cap["reserve_system"], "reserve_express": cap["reserve_express"],
                         "express_max": cap["express_max"]},
@@ -1319,7 +1364,7 @@ def verb_cancel(key, args):
             return {"ok": True, "job_id": j["id"], "state": "cancelled"}
     unit = (j["state"] or {}).get("unit")
     if unit and unit != "session":
-        systemctl("stop", unit, timeout=30)
+        pausectl.stop_unit(unit)   # thaws a paused job first, so it gets its SIGTERM (§20.5)
     for _ in range(40):
         r = job_result(d)
         if r:
@@ -1370,6 +1415,7 @@ def verb_queue(key, args):
                     [c for c in cap["cpus"] if c not in pl["allocated"]["cpus"]]),
                 "mem_bytes": max(0, cap["mem_bytes"] - pl["allocated"]["mem_bytes"])},
             "express": {"running": pl.get("express", 0), "max": cap["express_max"]},
+            "auto_pause": auto_policy(), "lent": lent_view(pl),
             "head": pl.get("head"), "starts_by_why": START_UNKNOWN.get(pl.get("S_why")) if pl.get("head") else None,
             "jobs": jobs}
 
@@ -1569,7 +1615,8 @@ def verb_update(key, args):
 
 VERBS = {"hello": verb_hello, "receive-pack": verb_receive_pack, "submit": verb_submit, "status": verb_status,
          "list": verb_list, "log": verb_log, "fetch": verb_fetch, "cancel": verb_cancel, "queue": verb_queue,
-         "hold": verb_hold, "release": verb_release, "move": verb_move, "priority": verb_priority, "update": verb_update}
+         "hold": verb_hold, "release": verb_release, "move": verb_move, "priority": verb_priority, "update": verb_update,
+         "pause": pausectl.verb_pause, "resume": pausectl.verb_resume}
 
 
 def serve(argv):
@@ -1659,7 +1706,7 @@ def job_env(j, grant):
     return env
 
 
-def start_job(j, grant, S=None):
+def start_job(j, grant, S=None, prepared=False):
     """Start one job with GRANT (from the plan): the checkout first, then for a backfilled job the re-check against the
     head's start S (§3.3), then grant, start time and start_unconfirmed in state.json in one write, then systemd-run
     (§9: the grant is on disk before the unit can exist). -> True if a unit was asked for."""
@@ -1667,7 +1714,9 @@ def start_job(j, grant, S=None):
     st = dict(j["state"] or {"attempt": 1})
     attempt = st.get("attempt", 1)
     unit = "mu-job-%s.service" % j["id"]
-    g = {k: grant[k] for k in ("cores", "cpus", "mem_bytes", "time_s", "class", "env_cores") if k in grant}
+    g = {k: grant[k] for k in ("cores", "cpus", "mem_bytes", "time_s", "class", "env_cores", "borrowed") if k in grant}
+    # release 2 (§20.6): an ordinary job's --time is enforced on running time by a timer; RuntimeMaxSec is the backstop
+    g["limit_timer"] = g.get("class") in ("normal", "backfilled")
     limits = {"mem_bytes": g["mem_bytes"], "time_s": g["time_s"], "cores": g.get("env_cores") or g["cores"]}
 
     def stamp():
@@ -1681,7 +1730,8 @@ def start_job(j, grant, S=None):
         durable.write_record(os.path.join(d, "state.json"), st)
     j["state"] = st
     try:
-        prepare_work(j)
+        if not prepared:
+            prepare_work(j)
         wd = os.path.join(d, "work", job.get("cwd") or "")
         if not os.path.isdir(wd):
             raise RuntimeError("the working folder %s is not in the snapshot" % (job.get("cwd") or "."))
@@ -1697,9 +1747,18 @@ def start_job(j, grant, S=None):
         if late > 0:   # the checkout took too long: it would now end after the head's start (§3.3); nothing written
             event(d, "not started: after its checkout it would end %ds after the head's start; stays queued" % late)
             return False
+    if g.get("class") == "borrowing" and not (fault("lend-without-deadline") or fault("borrow-past-deadline")):
+        for b in g.get("borrowed") or []:   # after the checkout: each lender still frozen, its deadline still ahead
+            L = durable.read_record(os.path.join(job_dir(b["from"]), "state.json")) or {}
+            pz = L.get("pause") or {}
+            if pz.get("phase") != "frozen" or time.monotonic() + g["time_s"] + sched.MARGIN_S > (pz.get("deadline_mono") or 0):
+                event(d, "not started: the cores lent by %s are no longer lent for its time; stays queued" % b["from"])
+                return False
     if not fault("stamp-before-checkout"):
         stamp()
     os.makedirs(os.path.join(d, "tmp"), mode=0o700, exist_ok=True)   # removed with the result and before a re-run
+    if os.path.exists(os.path.join(d, "timelimit")):   # an earlier attempt's marker
+        os.unlink(os.path.join(d, "timelimit"))
     st["start_unconfirmed"] = True   # until systemd-run says it started the unit
     if not fault("grant-after-systemd-run"):   # the grant on disk before the unit can exist (§9, e2e Q16)
         durable.write_record(os.path.join(d, "state.json"), st)
@@ -1715,7 +1774,8 @@ def start_job(j, grant, S=None):
         props += ["-p", "MemoryMax=%d" % mm, "-p", "MemorySwapMax=0"]
     if g.get("class") == "express" and not fault("no-express-quota"):
         props += ["-p", "CPUQuota=100%"]
-    props += ["-p", "RuntimeMaxSec=%d" % g["time_s"], "-p", "TasksMax=4096",
+    backstop = g["time_s"] + (min(PAUSE_BUDGET_S, g["time_s"]) if g.get("limit_timer") and not fault("count-paused-time") else 0)
+    props += ["-p", "RuntimeMaxSec=%d" % backstop, "-p", "TasksMax=4096",
               "-p", "KillMode=%s" % ("process" if fault("killmode-process") else "control-group"),
               "-p", "TimeoutStopSec=5", "-p", "OOMPolicy=kill", "-p", "LimitCORE=0", "-p", "Restart=no",
               "-p", "StandardOutput=append:%s" % os.path.join(d, "log"),
@@ -1736,7 +1796,11 @@ def start_job(j, grant, S=None):
         durable.write_record(os.path.join(d, "state.json"), st)
     if rc == 0:
         st.pop("start_unconfirmed", None)
+        if g.get("limit_timer"):
+            st["timers"] = True
         durable.write_record(os.path.join(d, "state.json"), st)
+        if g.get("limit_timer"):
+            pausectl.arm_limit(j, g["time_s"])   # §20.6: --time on running time (re-armed each pass if this fails)
         journal("job %s started (attempt %d, %s)" % (j["id"], attempt, g.get("class")))
         return True
     journal("job %s: systemd-run failed: %s" % (j["id"], err.strip()[:300]))
@@ -1807,6 +1871,10 @@ def interrupted(j, why):
             st["requeued_ns"] = time.time_ns()
         for k in ("unit", "started_at", "started_epoch", "pid", "start_unconfirmed", "grant", "cgroup", "affinity_widened"):
             st.pop(k, None)
+        st = pausectl.drop_for_requeue(st)   # the attempt's pause and its history go with it (§20.8, Q33)
+        for x in ("timelimit",):
+            if os.path.exists(os.path.join(j["dir"], x)):
+                os.unlink(os.path.join(j["dir"], x))
         durable.write_record(os.path.join(j["dir"], "state.json"), st)
         j["state"] = st
         event(j["dir"], "re-queued as attempt 2: %s; previous-stop=%s" % (why, prev))
@@ -1868,10 +1936,18 @@ def classify(j, props):
     if os.path.exists(os.path.join(j["dir"], "logcap")):
         write_result(j, "failed", "runner", unit_result=res or None, note=read_text(os.path.join(j["dir"], "logcap")).strip()
                      or "the log grew past its limit")
+    elif os.path.exists(os.path.join(j["dir"], "timelimit")) and not os.path.exists(os.path.join(j["dir"], "cancel")):
+        t = (st.get("grant") or {}).get("time_s") or 0
+        ps = pausectl.paused_s(st)
+        write_result(j, "timeout", "runner", unit_result=res or None, note="ran %s, its --time%s" % (
+            sched.human_dur(t), ", not counting %s paused" % sched.human_dur(int(ps)) if ps >= 1 else ""))
     elif os.path.exists(os.path.join(j["dir"], "cancel")):
         write_result(j, "cancelled", "runner", unit_result=res or None, note="cancelled while running")
     elif res == "oom-kill":
-        write_result(j, "oom", "runner", unit_result=res, note="the job used more memory than its limit")
+        pz = st.get("pause") or {}
+        write_result(j, "oom", "runner", unit_result=res, note="the job used more memory than its limit" + (
+            " while paused" if pz.get("phase") in pausectl.PHASES else " while its memory was lent" if
+            st.get("mem_restore_pending") else ""))
     elif res == "timeout":
         write_result(j, "timeout", "runner", unit_result=res, note="the job ran longer than its time limit")
     elif props.get("LoadState") == "not-found" or res in ("success", ""):
@@ -1882,6 +1958,9 @@ def classify(j, props):
             res, " (the log's last line from μ: %s)" % last if last else ""))
     if unit and unit != "session":
         systemctl("reset-failed", unit, timeout=15)
+        if st.get("timers") or st.get("pause"):
+            pausectl.stop_timer(pausectl.limit_unit(j["id"]))
+            pausectl.stop_timer(pausectl.thaw_unit(j["id"]))
 
 
 def session_alive(st):
@@ -1950,12 +2029,14 @@ def check_running(j, first, cap):
             event(j["dir"], "systemctl show failed (%s): taken as still running" % (props.get("error") or "")[:200])
         elif props.get("ActiveState") == "active":
             note_active(j, props)
+            pausectl.reconcile(j, props)   # systemd's FreezerState wins (§20.8)
+            pausectl.check_limit(j)
         if first and fault("no-adopt"):   # a runner that does not adopt: it stops the job and runs it again
-            systemctl("stop", st["unit"], timeout=30)
+            pausectl.stop_unit(st["unit"])
             interrupted(j, "the runner restarted (test fault: not adopted)")
             return False
         if os.path.exists(os.path.join(j["dir"], "cancel")):
-            systemctl("stop", st["unit"], timeout=30)
+            pausectl.stop_unit(st["unit"])
         elif not fault("no-log-cap"):
             try:
                 size = os.path.getsize(os.path.join(j["dir"], "log"))
@@ -1965,7 +2046,7 @@ def check_running(j, first, cap):
                 durable.write_durable(os.path.join(j["dir"], "logcap"), "the log grew past %s: the job was stopped\n"
                                       % proto.human_size(cap))
                 event(j["dir"], "log over %d bytes: stopping %s" % (cap, st["unit"]))
-                systemctl("stop", st["unit"], timeout=30)
+                pausectl.stop_unit(st["unit"])
         return True
     j["result"] = job_result(j["dir"])   # the shim may have written it since the scan
     classify(j, props)
@@ -2004,6 +2085,8 @@ def step(first=False, stop=None, started=None):
     4). Once STOP[0] is set (SIGTERM), no job is started. What starts is decided by sched.plan() from the grants in
     the running jobs' state.json, rebuilt every pass (scheduler.md §3.2, §9). STARTED: the default this runner
     started with; once the default is another (an update moved it), nothing more starts until the runner restarts."""
+    if first and not pausectl.available() and not os.environ.get("MU_SYSTEMD_RUN"):   # (stubbed systemd: the tests set it)
+        pausectl.freezer_check()   # §12 item 10 on this boot (outside the lock): the pause feature only when it passes
     with Lock():
         jobs = scan_jobs()
         node = node_info()
@@ -2013,6 +2096,8 @@ def step(first=False, stop=None, started=None):
             try:
                 rebuild_state(j)
                 st = j["state"] or {}
+                if j["result"]:
+                    pausectl.finish_with_result(j)   # a job with a result is never kept frozen; its timers go
                 if j["result"] and draining(j):
                     drain.add(j["id"])
                     continue
@@ -2026,6 +2111,12 @@ def step(first=False, stop=None, started=None):
                 journal("runner: job %s: %s" % (j["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
                 if (j["state"] or {}).get("state") == "running":
                     running.append(j)   # unknown: it keeps its grant, or holds the whole node without one
+        try:   # release 2: deadlines, deferred resumes, the end of auto-pauses, the valve, memory restored (§20.6)
+            pausectl.runner_pass(running, jobs)
+        except Exception:  # noqa
+            if fault("runner-pass-aborts"):
+                raise
+            journal("runner: pauses: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
         if os.path.exists(p("queue.json")) and not durable.read_record(p("queue.json")):
             order_lost(node)
         order = read_order()
@@ -2070,7 +2161,8 @@ def step(first=False, stop=None, started=None):
                              error=kind)
             except Exception:  # noqa
                 journal("runner: job %s: %s" % (jid, traceback.format_exc().replace("\n", " | ")[-800:]))
-        if pl["starts"]:
+        ap = pausectl.auto_candidate(pl, by_id, running, cap, node) if not disk else None
+        if pl["starts"] or ap:
             if not take_start_lock():
                 journal_once("start-lock", "runner: an update holds %s: no job starts until the default has moved"
                              % start_lock_path())
@@ -2092,6 +2184,14 @@ def step(first=False, stop=None, started=None):
                         if fault("runner-pass-aborts"):
                             raise
                         journal("runner: starting job %s: %s" % (x["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
+                if ap and not (stop and stop[0]):
+                    try:   # §20.7, inside the start lock: checkout, re-plan, freeze the victims, start the urgent job
+                        if pausectl.auto_pause(ap, jobs, running, cap, w, disk):
+                            busy = True
+                    except Exception:  # noqa
+                        if fault("runner-pass-aborts"):
+                            raise
+                        journal("runner: auto-pause: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
             finally:
                 drop_start_lock()
         if checking(node):
@@ -2133,7 +2233,8 @@ def check_invariants(cap):
         st = j["state"] or {}
         if not j["result"] and st.get("state") == "running":
             run.append({"id": j["id"], "grant": grant_of(j), "started_epoch": st.get("started_epoch"),
-                        "held": bool(st.get("held"))})
+                        "held": bool(st.get("held")), "pause": pausectl.pause_item(st),
+                        "end": pausectl.end_bound(st) if grant_of(j) else None})
     bad = sched.invariants(cap, run)
     if bad:
         os.makedirs(p("state"), exist_ok=True)
@@ -2604,7 +2705,8 @@ def selftest(verbose=False):
             out["large"]["result"], " after finishing" if out["large"]["completed"] else "")
     if fault("selftest-fail"):
         ok, detail = False, "forced to fail (test fault selftest-fail); really: " + detail
-    rec = {"ok": ok, "at": proto.iso(), "boot_id": boot_id(), "detail": detail, "units": out}
+    rec = {"ok": ok, "at": proto.iso(), "boot_id": boot_id(), "detail": detail, "units": out,
+           "freezer": pausectl.freezer_check()}   # release 2: the pause feature only when this passes
     if os.path.isdir(ROOT) and os.access(ROOT, os.W_OK):
         update_node_info(selftest=rec)
     journal("selftest: %s (%s)" % ("PASS" if ok else "FAIL", detail))

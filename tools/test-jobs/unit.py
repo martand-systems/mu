@@ -644,7 +644,7 @@ def t_runner():
 
     def started():
         try:
-            return [ln.split()[1] for ln in open(os.path.join(st["stub"], "calls")) if ln.startswith("start ")]
+            return [ln.split()[1] for ln in open(os.path.join(st["stub"], "calls")) if ln.startswith("start mu-job-")]
         except OSError:
             return []
     A, B = "20261114-100000-aaaaaa", "20261114-100001-bbbbbb"
@@ -1002,7 +1002,7 @@ SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs"
             "untrusted-node": t_untrusted_node, "runner": t_runner,
             "snapshot-alone": t_snapshot_alone, "snapshot-content": t_snapshot_content,
             "snapshot-report": t_snapshot_report, "sched": unit_sched.t_sched, "sched-sim": unit_sched.t_sched_sim,
-            "sched-runner": t_sched_runner}
+            "sched-runner": t_sched_runner, "sched-pause": lambda: unit_sched.t_sched_pause(tmpdir("sched-pause"))}
 
 if __name__ == "__main__":
     sec = sys.argv[1]

@@ -722,10 +722,17 @@ NODE_REFUSALS = {
     "reference-not-queued": ("the job named by --before/--after is not queued or held", "mu queue (pick a queued "
                              "job), or --front / --back"),
     "already-finished": ("job {j} has already finished", "mu status {j}"),
+    # release 2 (scheduler.md §20.9)
+    "not-running": ("job {j} is not running: only a running job is paused", "mu hold {j} keeps a queued job waiting"),
+    "pause-limit": ("{n} refused the pause: over a limit (2 h per pause, min(4 h, --time) per run), or a job that is "
+                    "never paused (express, a borrower, started before pause existed)", "mu queue --json (the figures "
+                    "are in the answer); do not retry unchanged"),
+    "pause-unavailable": ("{n} cannot pause jobs (its freezer self-check did not pass)", "nothing; the job runs on"),
+    "pause-failed": ("{n} could not freeze the job (nothing was left frozen)", "retry once; mu queue --json"),
     "busy": ("{n}'s queue lock was not free within 2 minutes (a checkout); nothing was changed", "retry in a minute"),
     "update-failed": ("{n} could not start its update", "mu compute status {n}; the node's journal has the details"),
 }
-NODE_EXTRA_KEYS = ("installed", "largest", "field", "node_protocol", "node_mu", "argument", "verb", "state", "capacity",
+NODE_EXTRA_KEYS = ("limit_s", "budget_s", "paused_s", "installed", "largest", "field", "node_protocol", "node_mu", "argument", "verb", "state", "capacity",
                    "would_touch")
 ERROR_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
@@ -1457,7 +1464,8 @@ def cmd_submit(a, command):
                 "outputs": outputs, "limits": limits, "rerun": not a.no_rerun,
                 "submitted": {"at": proto.iso(), "host": socket.gethostname().split(".")[0], "user": getpass.getuser(),
                               "mu": os.environ.get("MU_INFRA_VERSION", "?"), "path": "relay"}}
-        for k, v in (("priority", a.priority), ("hold", a.hold or None), ("others", a.others or None)):
+        for k, v in (("priority", a.priority), ("hold", a.hold or None), ("others", a.others or None),
+                     ("pausable", getattr(a, "pausable", False) or None)):
             if v:
                 spec[k] = v
         rec = {"schema": 1, "job_id": job_id, "node": node_name, "state": "sending", "spec": spec,
@@ -1496,8 +1504,8 @@ def check_sizes(a, ans, node_name, limits):
                 node_name, "; ".join(big)), "the node takes at most --cores %s --mem %dM; do not retry unchanged" % (
                 cap.get("cores"), (cap.get("mem_bytes") or 0) >> 20), capacity=cap)
         return None
-    if a.priority or a.hold:
-        raise MuError(proto.EXIT_NODE_CANNOT, "node-too-old", "%s's μ has no queue control: --priority and --hold "
+    if a.priority or a.hold or getattr(a, "pausable", False):
+        raise MuError(proto.EXIT_NODE_CANNOT, "node-too-old", "%s's μ has no queue control: --priority, --hold and --pausable "
                       "would be ignored, so nothing was sent" % node_name, "submit without them, or wait for %s's "
                       "auto-update (mu compute status %s)" % (node_name, node_name))
     if limits.pop("quick", None):
@@ -2048,7 +2056,8 @@ def run_record(res, node, prj):
             "wall_s": res.get("wall_s"), "limits": res.get("limits"), "outputs": res.get("outputs"),
             "outputs_missing": res.get("outputs_missing"), "log": res.get("log"), "toolchain": res.get("toolchain"),
             "node": res.get("node"), "unit": res.get("unit"), "path": "relay", "usage": res.get("usage"),
-            "grant": res.get("grant"),
+            "grant": res.get("grant"), "run_s": res.get("run_s"), "paused_s": res.get("paused_s"),
+            "pauses": res.get("pauses"),
             "archive": "%s:/srv/mu/jobs/%s/work" % (node, res["job_id"]), "fetched_at": proto.iso(),
             "result_sha256": res.get("sha256")}
 
@@ -2189,6 +2198,8 @@ def main(cmd, args):
         p.add_argument("--priority", choices=("urgent", "high", "normal", "low"), help="the job's band (default "
                        "normal; high and urgent need --others; urgent: the owner's key only)")
         p.add_argument("--hold", action="store_true", help="submit held: it keeps its place, starts after mu release")
+        p.add_argument("--pausable", action="store_true", help="the job may be paused for an urgent job (only long "
+                       "solver runs without wall-clock timeouts, network or timing measurements)")
         p.add_argument("--others", action="store_true", help="with --priority high|urgent: it may pass other "
                        "projects' jobs (only when the owner asked)")
         p.add_argument("--output", action="append", default=[], metavar="GLOB", help="output glob, repeatable "

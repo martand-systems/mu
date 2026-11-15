@@ -1,4 +1,4 @@
-"""μ node scheduler, release 1 (docs/design/scheduler.md §3, §4, §20.3, §20.4): the pure part. Capacity, sizing of a
+"""μ node scheduler, releases 1 and 2 (docs/design/scheduler.md §3, §4, §20.3, §20.4, §20.6, §20.7): the pure part. Capacity, sizing of a
 request (resolve), the queue's walk (bands, explicit order, held jobs), the plan of one runner pass (admission by cores
 and memory, a reservation for the head with EASY backfill, the express lane), the invariants every pass must keep, and
 the authorisation rule for arranging jobs. No file, clock or systemd access here: node.py reads the state files and
@@ -28,7 +28,16 @@ Test faults (durable.fault; each must make a unit test or an e2e row fail, sched
   owner-acts-not-sticky   a job's own workstation may undo an owner's hold or band
   no-others-guard         jobs of other projects may be arranged without others=1
   no-size-bounds          a request's sizes are not bounded (MAX_*): a huge --time overflows the plan
+release 2 (§20.6, §20.7):
+  lend-without-deadline   a borrower may take a frozen job's cores whatever its time (no test against the deadline D)
+  lend-whole-grant        a frozen job lends its whole memory grant, not grant - held
+  borrow-past-deadline    the same as lend-without-deadline, as the simulation names it
+  borrower-mem-unchecked  a borrower's memory beyond what its lenders lend is not checked against free memory
+  lender-ends-ids-freed   a borrower whose lender ended holds no ids of its own (they are handed out again)
+  pause-without-mem-check the auto-pause chooses victims by cores only (the urgent job's memory is not checked)
 """
+import itertools
+
 from mu.durable import fault
 
 BANDS = ("urgent", "high", "normal", "low")
@@ -217,6 +226,8 @@ def plan(now, cap, running, queue, disk=None):
         free: {cores, cpus, mem_bytes}, allocated: {...}, express: n}"""
     M, ids_all = cap["mem_bytes"], list(cap["cpus"])
     occupied, used_mem, ex_n, ex_mem, grantless, ends = set(), 0, 0, 0, [], []
+    lenders, lent0 = lending(running), {"cores": set(), "mem_bytes": 0, "b_cores": set(), "b_mem": 0}
+    alive = {r["id"] for r in running}
     for r in running:
         g = r.get("grant")
         if not g:
@@ -227,16 +238,33 @@ def plan(now, cap, running, queue, disk=None):
             ex_mem += g.get("mem_bytes") or 0
             continue
         cpus = set(g.get("cpus") or [])
+        if fault("lender-ends-ids-freed") and g.get("class") == "borrowing" and not any(
+                b.get("from") in alive for b in g.get("borrowed") or []):
+            cpus = set()
         occupied |= cpus
-        used_mem += g.get("mem_bytes") or 0
-        ends.append((r.get("end"), len(cpus) or g.get("cores") or 0, g.get("mem_bytes") or 0))
+        mem, cores = firm_mem(g, alive), len(cpus) or g.get("cores") or 0
+        if g.get("class") == "borrowing":
+            for b in g.get("borrowed") or []:
+                if b.get("from") in alive:
+                    lent0["b_cores"] |= set(b.get("cpus") or [])
+                    lent0["b_mem"] += b.get("mem_bytes") or 0
+            cores = len([c for c in cpus if not any(c in (b.get("cpus") or []) and b.get("from") in alive
+                                                    for b in g.get("borrowed") or [])])
+        used_mem += mem
+        ends.append((r.get("end"), cores, mem))
+    for lid, L in lenders.items():
+        lent0["cores"] |= L["all_ids"]
+        lent0["mem_bytes"] += L["lent_mem"]
     free_ids = [c for c in ids_all if c not in occupied]
     free_mem = M - used_mem
     if grantless and not fault("grantless-counts-zero"):
         free_ids, free_mem = [], 0
     out = {"starts": [], "fail": [], "waiting": {}, "head": None, "S": None, "S_why": None, "starts_by": {},
            "position": {}, "place": {}, "express": ex_n,
-           "allocated": {"cores": len(occupied), "cpus": sorted(occupied), "mem_bytes": used_mem}}
+           "allocated": {"cores": len(occupied), "cpus": sorted(occupied), "mem_bytes": used_mem},
+           "lent": {"cores": len(lent0["cores"]), "cpus": sorted(lent0["cores"]), "mem_bytes": lent0["mem_bytes"],
+                    "borrowed": {"cores": len(lent0["b_cores"]), "cpus": sorted(lent0["b_cores"]),
+                                 "mem_bytes": lent0["b_mem"]}}}
     no_admit_c, no_admit_m = fault("no-core-admission"), fault("no-mem-admission")
     reuse = fault("cpus-reused") or fault("cpus-from-plan-cache")
     one = fault("one-at-a-time")
@@ -262,6 +290,41 @@ def plan(now, cap, running, queue, disk=None):
         ends.append((now + START_WAIT_S + req["time_s"] + SLACK_S, n, req["mem_bytes"]))   # its bound once started
         return {"cores": n, "cpus": ids, "mem_bytes": req["mem_bytes"], "time_s": req["time_s"], "class": cls,
                 "env_cores": req.get("env_cores", n)}
+
+    def borrow(req, rest_ok):
+        """§20.6: REQ's cores all from frozen lenders whose deadline D leaves room for its time (now + t + MARGIN <=
+        D); its memory from those lenders' lent memory first, the rest from free memory if REST_OK(rest). -> a grant
+        of class "borrowing", or None. Express-sized and whole-node requests borrow like any other."""
+        n, t = req["cores"], req["time_s"]
+        no_d = fault("lend-without-deadline") or fault("borrow-past-deadline")
+        cands = sorted(((lid, L) for lid, L in lenders.items() if L["ids"] and (no_d or now + t + margin <= L["D"])),
+                       key=lambda x: (-len(x[1]["ids"]), x[0]))
+        took, left = [], n
+        for lid, L in cands:
+            if left <= 0:
+                break
+            ids = sorted(L["ids"])[:left]
+            took.append((lid, ids))
+            left -= len(ids)
+        if left > 0 or not took:
+            return None
+        need_m, parts = req["mem_bytes"], []
+        for lid, ids in took:
+            m = min(need_m, max(0, lenders[lid]["mem"]))
+            parts.append(m)
+            need_m -= m
+        if need_m > 0 and not fault("borrower-mem-unchecked") and not no_admit_m and (
+                need_m > state["mem"] or not rest_ok(need_m, t)):
+            return None
+        bl = []
+        for (lid, ids), m in zip(took, parts):
+            lenders[lid]["ids"] -= set(ids)
+            lenders[lid]["mem"] -= m
+            bl.append({"from": lid, "cpus": ids, "mem_bytes": m, "until_mono": lenders[lid]["D"]})
+        state["mem"] -= max(0, need_m)
+        ends.append((now + START_WAIT_S + t + SLACK_S, 0, max(0, need_m)))
+        return {"cores": n, "cpus": sorted(c for _, ids in took for c in ids), "mem_bytes": req["mem_bytes"],
+                "time_s": t, "class": "borrowing", "env_cores": req.get("env_cores", n), "borrowed": bl}
 
     # place (in the walk, held jobs counted) and position (among jobs that can start)
     pos = 0
@@ -306,11 +369,17 @@ def plan(now, cap, running, queue, disk=None):
         rest.append((q, req))
     out["express"] = ex_n
 
-    # 3: the head starts while it fits
+    # 3: the head starts while it fits, on free cores or (§20.6) on cores lent by frozen jobs
     i = 0
-    while i < len(rest) and fits(rest[i][1]):
+    while i < len(rest):
         q, req = rest[i]
-        out["starts"].append({"id": q["id"], "grant": take(req, "normal"), "S": None})
+        if fits(req):
+            out["starts"].append({"id": q["id"], "grant": take(req, "normal"), "S": None})
+        else:
+            g = borrow(req, lambda m, t: True) if lenders else None
+            if g is None:
+                break
+            out["starts"].append({"id": q["id"], "grant": g, "S": None})
         i += 1
     if fault("no-head-reservation"):
         for q, req in rest[i:]:
@@ -347,6 +416,19 @@ def plan(now, cap, running, queue, disk=None):
         out["starts_by"][hq["id"]] = S_time
         out["waiting"][hq["id"]] = {"resources": need(hreq, state, cap)}
         # 5: later jobs
+        def borrow_later(q, req):
+            def rest_ok(m, t):   # memory beyond what is lent: within extra, or ends before S (step 5 of §3.3)
+                nonlocal extra_m
+                if m <= extra_m:
+                    extra_m -= m
+                    return True
+                return S_time is not None and now + t + margin <= S_time
+            g = borrow(req, rest_ok)
+            if g is None:
+                return False
+            out["starts"].append({"id": q["id"], "grant": g, "S": S_time})
+            return True
+
         for q, req in rest[i + 1:]:
             fits_now = fits(req)
             if fits_now and req["cores"] <= extra_c and req["mem_bytes"] <= extra_m:
@@ -357,6 +439,8 @@ def plan(now, cap, running, queue, disk=None):
             elif fits_now and (fault("backfill-ignores-shadow") or (
                     S_time is not None and now + req["time_s"] + margin <= S_time)):
                 out["starts"].append({"id": q["id"], "grant": take(req, "backfilled"), "S": S_time})
+            elif lenders and borrow_later(q, req):
+                pass
             elif not fits_now:
                 out["waiting"][q["id"]] = {"resources": dict(need(req, state, cap), behind=hq["id"])}
             else:
@@ -366,6 +450,61 @@ def plan(now, cap, running, queue, disk=None):
                 out["waiting"][q["id"]] = {"reservation": res}
     out["free"] = {"cores": len(state["ids"]), "cpus": list(state["ids"]), "mem_bytes": max(0, state["mem"])}
     return out
+
+
+def firm_mem(g, alive):
+    """The memory a running ordinary job's grant counts in firm memory (§20.6): its whole grant (a frozen job's too),
+    less what a borrower borrowed from a lender that still runs (that part is the lender's)."""
+    m = g.get("mem_bytes") or 0
+    if g.get("class") == "borrowing":
+        m -= sum(b.get("mem_bytes") or 0 for b in g.get("borrowed") or [] if b.get("from") in alive)
+    return max(0, m)
+
+
+def lending(running):
+    """§20.6, by CPU-id sets: {lender id: {ids (lendable now), all_ids, D, mem (lendable now), lent_mem}} for each
+    running ordinary job whose pause phase is "frozen" (only then is anything lent). RUNNING items carry
+    pause = {phase, deadline, held_mem} (deadline on this boot's monotonic clock)."""
+    out = {}
+    for r in running:
+        g, pz = r.get("grant") or {}, r.get("pause") or {}
+        if pz.get("phase") != "frozen" or g.get("class") not in ("normal", "backfilled") or \
+                not isinstance(pz.get("deadline"), (int, float)):
+            continue
+        held = pz.get("held_mem") if isinstance(pz.get("held_mem"), int) else (g.get("mem_bytes") or 0)
+        lent = (g.get("mem_bytes") or 0) if fault("lend-whole-grant") else max(0, (g.get("mem_bytes") or 0) - held)
+        ids = set(g.get("cpus") or [])
+        out[r["id"]] = {"ids": set(ids), "all_ids": ids, "D": pz["deadline"], "mem": lent, "lent_mem": lent}
+    for r in running:
+        g = r.get("grant") or {}
+        if g.get("class") != "borrowing":
+            continue
+        for b in g.get("borrowed") or []:
+            L = out.get(b.get("from"))
+            if L:
+                L["ids"] -= set(b.get("cpus") or [])
+                L["mem"] -= b.get("mem_bytes") or 0
+    return out
+
+
+def choose_victims(cands, need_cores, need_mem, free_mem, max_set=4):
+    """§20.7 "which jobs": CANDS = eligible running jobs [{id, cores, est_lent, active_mono}]. The smallest set by
+    (number of jobs, cores beyond the need), ties by the latest active_mono, then job id, whose cores cover NEED_CORES
+    and whose estimated lent memory plus FREE_MEM covers NEED_MEM. -> [ids] or None."""
+    best = None
+    for n in range(1, min(max_set, len(cands)) + 1):
+        for combo in itertools.combinations(cands, n):
+            c = sum(x["cores"] for x in combo)
+            if c < need_cores:
+                continue
+            if not fault("pause-without-mem-check") and free_mem + sum(max(0, x["est_lent"]) for x in combo) < need_mem:
+                continue
+            key = (n, c - need_cores, -max(x.get("active_mono") or 0 for x in combo), sorted(x["id"] for x in combo))
+            if best is None or key < best[0]:
+                best = (key, [x["id"] for x in combo])
+        if best:
+            break
+    return sorted(best[1]) if best else None
 
 
 def need(req, state, cap):
@@ -381,6 +520,10 @@ def invariants(cap, running):
     cores = mem = ex = ex_mem = 0
     seen = {}
     grantless = [r for r in running if not r.get("grant")]
+    by_id = {r["id"]: r for r in running}
+    alive = set(by_id)
+    lenders = lending(running)
+    occ = set()
     for r in running:
         if r.get("held"):
             bad.append("held job %s is running" % r["id"])
@@ -391,9 +534,27 @@ def invariants(cap, running):
             ex += 1
             ex_mem += g.get("mem_bytes") or 0
             continue
-        cores += len(g.get("cpus") or [])
-        mem += g.get("mem_bytes") or 0
+        mem += firm_mem(g, alive)
+        shared = set()
+        if g.get("class") == "borrowing":   # §20.6: a borrower's ids lie inside frozen lenders' ids, until its D
+            for b in g.get("borrowed") or []:
+                L = by_id.get(b.get("from"))
+                if L is None:
+                    continue
+                lg, lp = L.get("grant") or {}, L.get("pause") or {}
+                for c in b.get("cpus") or []:
+                    if c not in (lg.get("cpus") or []):
+                        bad.append("CPU %d borrowed by %s is not %s's" % (c, r["id"], b.get("from")))
+                    elif lp.get("phase") != "frozen":
+                        bad.append("CPU %d of %s shared with %s, which is not frozen" % (c, r["id"], b.get("from")))
+                    shared.add(c)
+                end, D = r.get("end"), b.get("until_mono")
+                if isinstance(end, (int, float)) and isinstance(D, (int, float)) and end > D + 0.5:
+                    bad.append("borrower %s ends at %.0f, after %s's deadline %.0f" % (r["id"], end, b.get("from"), D))
         for c in g.get("cpus") or []:
+            occ.add(c)
+            if c in shared:
+                continue
             if c in seen:
                 bad.append("CPU %d granted to %s and %s" % (c, seen[c], r["id"]))
             seen[c] = r["id"]
@@ -402,6 +563,10 @@ def invariants(cap, running):
         for gl in grantless:
             if (r.get("started_epoch") or 0) > (gl.get("started_epoch") or 0):
                 bad.append("%s started beside %s, which has no grant" % (r["id"], gl["id"]))
+    cores = len(occ)
+    for lid, L in lenders.items():
+        if L["mem"] < 0:
+            bad.append("%s lends %d bytes, %d borrowed" % (lid, L["lent_mem"], L["lent_mem"] - L["mem"]))
     if cores > C:
         bad.append("%d cores granted > %d" % (cores, C))
     if mem > M:

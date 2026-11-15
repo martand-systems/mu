@@ -72,6 +72,25 @@ def run_words(s):
     g = s.get("grant") or {}
     if not g:
         return "whole node (started by an older runner)" if s.get("state") == "running" else ""
+    pz = s.get("paused") if isinstance(s.get("paused"), dict) else None
+    if pz:   # release 2 (§20.9): a paused job's state stays running
+        tm = s.get("time") or {}
+        if pz.get("resume_asked"):
+            t = "RESUMING: waits for %s (by %s)" % (" ".join(str(x)[-6:] for x in pz.get("lent_to") or []),
+                                                   hhmm(pz.get("resumes_by")))
+        elif pz.get("why") == "auto":
+            t = "PAUSED for %s until %s" % (str(pz.get("for_job") or "")[-6:], hhmm(pz.get("until")))
+        else:
+            t = "PAUSED by %s until %s" % (proto.one_line(pz.get("by")), hhmm(pz.get("until")))
+        t += " (keeps %s) · %s cores, %s granted" % (gb(pz.get("held_mem_bytes")), g.get("cores"), gb(g.get("mem_bytes")))
+        if isinstance(tm.get("run_s"), (int, float)) and isinstance(tm.get("limit_s"), (int, float)):
+            t += " · %s run, %s left" % (dur(tm["run_s"]), dur(max(0, tm["limit_s"] - tm["run_s"])))
+        return t + (" · pausable" if s.get("pausable") else "")
+    if g.get("class") == "borrowing":
+        b = g.get("borrowed") or []
+        t = "%s cores (%s) · %s · borrowed from %s" % (g.get("cores"), g.get("cpus"), gb(g.get("mem_bytes")),
+                                                       " ".join(str(x.get("from"))[-6:] for x in b if isinstance(x, dict)))
+        return t + (" · ends by %s" % hhmm(s["ends_by"]) if s.get("ends_by") else "")
     if g.get("class") == "express":
         t = "express · 1 CPU (quota) · %s" % gb(g.get("mem_bytes"))
     else:
@@ -94,6 +113,8 @@ def state_words(s):
     if st == "running":
         return run_words(s)
     u = s.get("usage") or {}
+    if isinstance(s.get("paused_s"), (int, float)) and s["paused_s"] > 0 and isinstance(s.get("run_s"), (int, float)):
+        return "ran %s, paused %s (run_s, not wall_s, for timings)" % (dur(s["run_s"]), dur(s["paused_s"]))
     if u and isinstance(u.get("cpu_s"), (int, float)):
         return "used %s cores on average, %s peak%s" % (
             u.get("cores_avg"), gb(u.get("mem_peak_bytes")),
@@ -221,9 +242,15 @@ def cmd_queue(a):
             print("  %s  %-10s %s" % (j["job_id"][-6:], j.get("state"), j.get("name") or ""))
         return 0
     c, al, fr = ans.get("capacity") or {}, ans.get("allocated") or {}, ans.get("free") or {}
-    print("%s · %s cores, %s for jobs · %s cores, %s granted · %s cores, %s free" % (
+    lt = ans.get("lent") if isinstance(ans.get("lent"), dict) else {}
+    print("%s · %s cores, %s for jobs · %s cores, %s granted · %s cores, %s free%s%s" % (
         conf["name"], c.get("cores"), gb(c.get("mem_bytes")), al.get("cores"), gb(al.get("mem_bytes")),
-        fr.get("cores"), gb(fr.get("mem_bytes"))))
+        fr.get("cores"), gb(fr.get("mem_bytes")),
+        " · %s cores, %s lent by paused jobs (%s cores, %s borrowed)" % (
+            lt.get("cores"), gb(lt.get("mem_bytes")), (lt.get("borrowed") or {}).get("cores"),
+            gb((lt.get("borrowed") or {}).get("mem_bytes"))) if lt.get("cores") else "",
+        " · auto-pause: %s" % {"marked": "marked jobs only", "any": "any job", "off": "off"}.get(
+            ans.get("auto_pause"), ans.get("auto_pause")) if ans.get("auto_pause") else ""))
     run = [j for j in jobs_ if j.get("state") == "running"]
     wait = [j for j in jobs_ if j.get("state") in ("queued", "held")]
     print("RUNNING")
@@ -294,6 +321,70 @@ def cmd_arrange(op, a):
     return 0
 
 
+def parse_for(text):
+    """--for 15m / 90s / 2h / 1h30m / a number of seconds -> seconds."""
+    import re
+    t = (text or "").strip().lower()
+    if re.fullmatch(r"[0-9]+", t):
+        return int(t)
+    m = re.fullmatch(r"(?:([0-9]+)h)?(?:([0-9]+)m)?(?:([0-9]+)s)?", t)
+    if not t or not m:
+        raise MuError(proto.EXIT_USAGE, "usage", "--for %s: give a duration such as 15m, 90s or 1h30m" % text, "mu pause JOB --for 15m")
+    return int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)
+
+
+def cmd_pause(op, a):
+    """mu pause JOB [--for D] / mu resume JOB [--timeout S] (scheduler.md §20.2, §20.9): the node decides."""
+    from mu import jobs
+    conf, _ = jobs.job_node(a.job_id, a.on)
+    conn = jobs.Conn(conf)
+    args = {"id": a.job_id}
+    frm = project_id()
+    if frm:
+        args["from"] = frm
+    if a.others:
+        args["others"] = 1
+    if op == "pause" and a.for_:
+        args["for"] = parse_for(a.for_)
+    if not has(jobs.hello(conn), "pause"):
+        raise too_old(conf, "pause (freeze/thaw)")
+    ans = conn.call(op, **args)
+    ans.setdefault("exit", 0)
+    ans.update(node=conf["name"])
+    if op == "resume" and ans.get("state") == "resuming" and a.timeout is not None:
+        end = time.time() + a.timeout
+        while time.time() < end:
+            time.sleep(max(0.5, min(float(os.environ.get("MU_POLL_S", "5")), max(0.5, end - time.time()))))
+            try:
+                s = conn.call("status", id=a.job_id)
+            except MuError:
+                continue
+            if not s.get("paused") or s.get("state") != "running":
+                ans.update(state=s.get("state"), paused=None, waited=True)
+                break
+        else:
+            ans.update(exit=proto.EXIT_STILL_RUNNING, next="mu queue --json (the resume stays asked; it thaws after "
+                       "its borrower ends, by %s)" % hhmm(ans.get("resumes_by")))
+    if a.json:
+        proto.emit_json(ans)
+        return ans["exit"]
+    if op == "pause":
+        pz = ans.get("paused") or {}
+        if ans.get("deadline_raised_to"):
+            print("%s: deadline raised to %s (a borrower runs until then)" % (a.job_id, hhmm(ans["deadline_raised_to"])))
+        print("%s paused until %s; keeps %s, lends %s cores and %s" % (a.job_id, hhmm(pz.get("until")),
+              gb(pz.get("held_mem_bytes")), (ans.get("lent") or {}).get("cores"), gb((ans.get("lent") or {}).get("mem_bytes"))))
+    elif not ans.get("changed"):
+        print("%s: nothing to resume (%s)" % (a.job_id, ans.get("state")))
+    elif ans.get("state") == "resuming":
+        print("%s: resuming: waits for %s, by %s" % (a.job_id, " ".join(str(x)[-6:] for x in ans.get("waits_for") or []),
+                                                    hhmm(ans.get("resumes_by"))))
+    else:
+        print("%s resumed (%s)" % (a.job_id, ans.get("state")))
+    print("next: %s" % ans.get("next", "mu queue --json"))
+    return ans["exit"]
+
+
 def cmd_compute_update(a):
     """mu compute update NODE: the node runs `mu autoupdate run --force` in a unit of its own, at once, beside its
     jobs (scheduler.md §9 "Version switch"); --wait polls hello until that run has a result."""
@@ -342,7 +433,10 @@ def main(cmd, args):
         "hold": "keep a queued job in its place without starting it (mu release lets it go)",
         "release": "let a held job start again, from the place it has",
         "move": "change a queued or held job's place: --before/--after another job, or the --front/--back of its band",
-        "priority": "put a queued or held job at the back of a band: urgent (owner key only), high, normal, low"}[cmd])
+        "priority": "put a queued or held job at the back of a band: urgent (owner key only), high, normal, low",
+        "pause": "freeze a running job until --for passes (default 30m, at most 2h); its cores and unused memory are "
+                 "lent meanwhile; it resumes by itself",
+        "resume": "thaw a paused job now, or as soon as the job borrowing its cores ends"}[cmd])
     p.add_argument("--on", metavar="NODE", help="the node (default: this clone's record of the job, or the only node)")
     if cmd == "queue":
         p.add_argument("--mine", action="store_true", help="this project's jobs only")
@@ -357,7 +451,14 @@ def main(cmd, args):
         p.add_argument("--back", action="store_true", help="the back of the job's band")
     if cmd == "priority":
         p.add_argument("band", choices=("urgent", "high", "normal", "low"))
+    if cmd == "pause":
+        p.add_argument("--for", dest="for_", metavar="DUR", help="how long, e.g. 15m (default 30m, at most 2h)")
+    if cmd == "resume":
+        p.add_argument("--timeout", type=float, metavar="S", help="wait up to S seconds for the thaw (exit 10 if a "
+                       "borrower still runs then)")
     a = p.parse_args(args)
     if not proto.JOB_ID.match(a.job_id or ""):
         raise MuError(proto.EXIT_USAGE, "bad-job-id", "'%s' is not a job id (YYYYMMDD-HHMMSS-xxxxxx)" % a.job_id, "mu queue")
+    if cmd in ("pause", "resume"):
+        return cmd_pause(cmd, a)
     return cmd_arrange(cmd, a)

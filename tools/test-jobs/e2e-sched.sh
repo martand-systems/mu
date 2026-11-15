@@ -579,6 +579,102 @@ v3() {
 f_v3_on() { asmu systemctl --user set-environment MU_DISPATCH_FAULT=busy-defers; }
 f_v3_off() { asmu systemctl --user unset-environment MU_DISPATCH_FAULT; use_node v2026.11.7; }
 
+# ---------------------------------------------------------------------------------------------- release 2: pause (§13)
+# QF: the freezer on this runner (fails, never skips: a CI image without a working freezer cannot pass release 2).
+# Q29, Q34, Q35, Q36 on real systemd; the rest of Q29-Q39 at unit level (tools/test-jobs/unit_sched.py, sched-pause).
+fz() { asmu systemctl --user show -p FreezerState "mu-job-$1.service" 2>/dev/null | sed 's/^FreezerState=//'; }
+cg_file() { local c; c="$(asmu systemctl --user show -p ControlGroup "mu-job-$1.service" | sed 's/^ControlGroup=//')"; sudo cat "/sys/fs/cgroup$c/$2" 2>/dev/null; }
+counter() { sudo cat "/srv/mu/jobs/$1/work/counter" 2>/dev/null; }
+pause_files() {
+  cat > /tmp/mu-e2e-count.py <<'PYC'
+import os, signal, sys, time
+b = bytearray(300 << 20)
+for i in range(0, len(b), 4096):
+    b[i] = 1
+def term(*a):
+    open("sigterm", "w").write("1")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, term)
+n = 0
+while True:
+    n += 1
+    open("counter.tmp", "w").write("%d %d\n" % (n, os.getpid()))
+    os.replace("counter.tmp", "counter")
+    time.sleep(0.2)
+PYC
+  chmod 644 /tmp/mu-e2e-count.py; asws cp /tmp/mu-e2e-count.py "$WCWD/count.py"
+}
+qf() {
+  local u=mu-e2e-freezer.service f1 f2 h
+  asmu systemctl --user stop "$u" >/dev/null 2>&1; asmu systemctl --user reset-failed "$u" >/dev/null 2>&1
+  asmu systemd-run --user --quiet --unit="$u" sleep 60 || { M="systemd-run failed"; return 1; }
+  asmu systemctl --user freeze "$u"; f1="$(asmu systemctl --user show -p FreezerState "$u" | sed 's/^FreezerState=//')"
+  asmu systemctl --user thaw "$u"; f2="$(asmu systemctl --user show -p FreezerState "$u" | sed 's/^FreezerState=//')"
+  asmu systemctl --user stop "$u" >/dev/null 2>&1
+  h="$(ws compute status office-pc --json 2>&1)"
+  M="freeze: FreezerState $f1; thaw: $f2; hello.features $(printf '%s' "$h" | jget hello.features); hello.pause $(printf '%s' "$h" | jget hello.pause)"
+  [ "${f1#frozen}" != "$f1" ] && [ "$f2" = running ] && printf '%s' "$h" | jget hello.features | grep -q pause
+}
+q29() {
+  qpre || return 1; pause_files; local a b c c0 c1 c2 mm0 mm1 mm2 cur p f1 rs
+  a="$(submit --cores "$NC" --mem 1G --time 5m --name q29-lender -- python3 count.py)"
+  wait_state "$a" running 60; poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$a/work/counter 2>/dev/null)\" ]"; sleep 2
+  mm0="$(cg_file "$a" memory.max)"
+  p="$(ws pause "$a" --for 150s --json 2>&1)"
+  f1="$(fz "$a")"; c0="$(counter "$a")"; cur="$(cg_file "$a" memory.current)"; sleep 5; c1="$(counter "$a")"
+  mm1="$(cg_file "$a" memory.max)"
+  b="$(submit --cores "$HC" --mem 256M --time 20s --name q29-borrower -- sleep 12)"
+  c="$(submit --cores "$HC" --mem 256M --time 5m --name q29-long -- sleep 5)"
+  wait_state "$b" running 30
+  M="pause: $(printf '%s' "$p" | jget ok) $(printf '%s' "$p" | jget error); FreezerState $f1; counter $c0 -> $c1 in 5 s;"
+  M="$M memory.max $mm0 -> $mm1 (current $cur); borrower $(jobstate "$b") class $(jobstate "$b" grant.class); 5-min job $(jobstate "$c");"
+  [ "${f1#frozen}" != "$f1" ] && [ -n "$c0" ] && [ "$c0" = "$c1" ] && lt "$mm1" "$mm0" && \
+    [ "$(jobstate "$b" grant.class)" = borrowing ] && [ "$(jobstate "$c")" = queued ] || { qend 1; return 1; }
+  rs="$(ws resume "$a" --json 2>&1)"
+  wait_state "$b" "succeeded failed" 60
+  poll 15 sh -c "[ \"\$(sudo -u mu -H env XDG_RUNTIME_DIR=/run/user/$MU_UID systemctl --user show -p FreezerState mu-job-$a.service)\" = FreezerState=running ]"
+  sleep 2; c2="$(counter "$a")"; mm2="$(cg_file "$a" memory.max)"
+  M="$M resume: $(printf '%s' "$rs" | jget state) (resumes_by $(printf '%s' "$rs" | jget resumes_by)); after the borrower: FreezerState $(fz "$a"), memory.max $mm2, counter $c2, attempt $(jobstate "$a" attempt), paused $(jobstate "$a" paused)"
+  [ "$(printf '%s' "$rs" | jget state)" = resuming ] && [ "$(fz "$a")" = running ] && [ "$mm2" = 1073741824 ] && \
+    [ "${c2%% *}" -gt "${c1%% *}" ] && [ "${c2#* }" = "${c1#* }" ] && [ "$(jobstate "$a" attempt)" = 1 ]
+  qend $?
+}
+q34() {
+  qpre || return 1; pause_files; local a t0 t1 st
+  a="$(submit --cores 1 --mem 1G --time 5m --name q34 -- python3 count.py)"
+  wait_state "$a" running 60; poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$a/work/counter 2>/dev/null)\" ]"
+  ws pause "$a" --for 120s --json >/dev/null 2>&1
+  local f; f="$(fz "$a")"; t0="$(date +%s)"
+  ws cancel "$a" --json >/dev/null 2>&1; wait_state "$a" "cancelled failed timeout" 20; t1="$(date +%s)"; st="$(jobstate "$a")"
+  M="paused ($f), cancelled: $st after $((t1 - t0)) s; SIGTERM file: $(sudo cat "/srv/mu/jobs/$a/work/sigterm" 2>/dev/null || echo none); unit $(asmu systemctl --user show -p ActiveState "mu-job-$a.service")"
+  [ "${f#frozen}" != "$f" ] && [ "$st" = cancelled ] && [ $((t1 - t0)) -le 10 ] && sudo test -f "/srv/mu/jobs/$a/work/sigterm"
+  qend $?
+}
+q35() {
+  qpre || return 1; local a t0 r w rs ps
+  a="$(submit --cores 1 --mem 256M --time 20s --name q35 -- sleep 120)"
+  wait_state "$a" running 60; t0="$(date +%s)"; sleep 3
+  ws pause "$a" --for 15s --json >/dev/null 2>&1
+  wait_state "$a" "timeout failed succeeded cancelled interrupted" 90
+  r="$(ws status "$a" --json 2>&1)"; w="$(printf '%s' "$r" | jget wall_s)"; rs="$(printf '%s' "$r" | jget run_s)"; ps="$(printf '%s' "$r" | jget paused_s)"
+  [ -n "$w" ] || w="$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wall_s"))' "/srv/mu/jobs/$a/result.json" 2>/dev/null)"
+  M="state $(printf '%s' "$r" | jget state) ($(printf '%s' "$r" | jget note)); wall $w s, run_s $rs, paused_s $ps; limit marker $(sudo test -f "/srv/mu/jobs/$a/timelimit" && echo yes || echo no)"
+  [ "$(printf '%s' "$r" | jget state)" = timeout ] && lt 31 "$w" && lt "$w" 45 && lt 17 "$rs" && lt "$rs" 25 && lt 12 "$ps" && lt "$ps" 18
+  qend $?
+}
+q36() {
+  qpre || return 1; local a f1 t0 t1 ok=1
+  a="$(submit --cores 1 --mem 256M --time 5m --name q36 -- sleep 120)"
+  wait_state "$a" running 60
+  ws pause "$a" --for 10s --json >/dev/null 2>&1; t0="$(date +%s)"; f1="$(fz "$a")"
+  poll 25 sh -c "[ \"\$(sudo -u mu -H env XDG_RUNTIME_DIR=/run/user/$MU_UID systemctl --user show -p FreezerState mu-job-$a.service)\" = FreezerState=running ]" || ok=0
+  t1="$(date +%s)"
+  local big; big="$(ws pause "$a" --for 3h --json 2>&1)"
+  M="--for 10s: $f1, then running after $((t1 - t0)) s; --for 3h: exit $(printf '%s' "$big" | jget exit) $(printf '%s' "$big" | jget error); paused_s $(jobstate "$a" time.paused_s)"
+  [ "$ok" = 1 ] && [ "${f1#frozen}" != "$f1" ] && [ $((t1 - t0)) -le 22 ] && [ "$(printf '%s' "$big" | jget error)" = pause-limit ]
+  qend $?
+}
+
 sched_rows() {
   run_row Q01 "concurrent: two jobs of half the node (--cores $HC --mem 512M) run at the same time" q01
   run_row Q02 "memory admission: three 1 GB jobs with M = 2 GiB: two run, the third waits for memory" q02
@@ -607,6 +703,11 @@ sched_rows() {
   run_row Q14B "an older workstation (the v2026.11.9 client) against this node: a held job's status, the list, --wait on a queued job (exit 10), its submit granted the whole node" q14b
   run_row V1 "a release installs beside a running job and becomes the default between starts; the runner restarts on it and adopts the job (run once); gc deferred" v1
   run_row V3 "mu compute update office-pc with a whole-node job running: installed and made the default at once (not queued behind it)" v3
+  run_row QF "release 2 pre-check: a user unit freezes and thaws on this runner, and hello has the pause feature" qf
+  run_row Q29 "pause by hand: frozen (counter still, memory.max lowered); a 20 s job borrows its cores, a 5-min one waits; resume waits for the borrower, then thaws (same pid, memory.max back)" q29
+  run_row Q34 "cancel while paused: cancelled within 10 s, the job saw SIGTERM (thawed first)" q34
+  run_row Q35 "time accounting: a --time 20s job paused 15 s ends timeout by its limit timer at about 20 s run and 35 s wall" q35
+  run_row Q36 "limits: --for 10s resumes by itself; --for 3h refused pause-limit" q36
 }
 sched_faults() {
   must_fail Q01 one-at-a-time 'nfault one-at-a-time' nfault q01
@@ -647,6 +748,10 @@ sched_faults() {
   must_fail Q14B held-as-queued 'nfault held-as-queued' nfault q14b
   must_fail V1 restart-only-idle 'nfault restart-only-idle' nfault v1
   must_fail V3 "busy-defers (the previous release's rule, in the update unit's environment)" f_v3_on f_v3_off v3
+  must_fail Q29 pause-noop 'nfault pause-noop' nfault q29
+  must_fail Q29 lend-without-deadline 'nfault lend-without-deadline' nfault q29
+  must_fail Q35 count-paused-time 'nfault count-paused-time' nfault q35
+  must_fail Q36 no-pause-deadline 'nfault no-pause-deadline' nfault q36
 }
-SCHED_ROWS="QS Q01 Q02 Q03 Q04 Q05 Q06 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q14 Q18 Q19 Q20 Q22 Q23 Q24 Q25 Q26 Q27 Q28 Q14B V1 V3"
-SCHED_FAULTS="Q01 Q02 Q03 Q04 Q05 Q05 Q06 Q06 Q06 Q07 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q13 Q14 Q18 Q19 Q20 Q22 Q22 Q23 Q23 Q24 Q25 Q25 Q26 Q26 Q26 Q27 Q27 Q28 Q14B V1 V3"
+SCHED_ROWS="QS Q01 Q02 Q03 Q04 Q05 Q06 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q14 Q18 Q19 Q20 Q22 Q23 Q24 Q25 Q26 Q27 Q28 Q14B V1 V3 QF Q29 Q34 Q35 Q36"
+SCHED_FAULTS="Q01 Q02 Q03 Q04 Q05 Q05 Q06 Q06 Q06 Q07 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q13 Q14 Q18 Q19 Q20 Q22 Q22 Q23 Q23 Q24 Q25 Q25 Q26 Q26 Q26 Q27 Q27 Q28 Q14B V1 V3 Q29 Q29 Q35 Q36"
