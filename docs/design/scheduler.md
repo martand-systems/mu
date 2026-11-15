@@ -1663,3 +1663,14 @@ node under the lock; passing judged by position; unit properties built only from
   only at an idle moment or by a hand-submitted `mu update` job; from then on releases install beside jobs.
 - Queued jobs from before the update are sized by the new rule: an unflagged job gets M (1 GiB less than before), and
   one whose `--mem` lies between the new M and the old limit fails `too-big` in the runner (§11).
+
+### 21.6 CI after the review (job-layer.yml on `scheduler-r1`)
+
+| Run | Result |
+|---|---|
+| 43647443827 | fast macOS, probe, e2e: green; fast Linux: the new start-lock check's last job found no free core on Linux (the start-time case added a fourth 1-core job) → fixed; sched: every row failed `drain failed` (`unfinished` listed a literal `*` on an empty node) → fixed |
+| 43656337740 | fast Linux and macOS green; sched: every row PASS, 37 FAILS-OK, 1 MISSED (Q05 with `backfill-ignores-shadow`: the runner's re-check refused the backfills, see 21.3) → fixed; e2e: H1 failed on `api.github.com is not reachable` in the host script's install (GitHub's API from the runner; not this branch) |
+| 43659475501 | fast Linux and macOS, probe green; sched: 35 PASS (S0–S4, QS, Q01–Q14, Q14B, Q18–Q20, Q22–Q28, V1, V3, Z1, Z2), 38 FAILS-OK, 0 FAIL or MISSED. V1 measured the install's own `memory.max` = 1 610 612 736 (1.5 GiB) on real systemd, the runner's restart while the job ran, the job run once; Q04's fault pass now sees C start, Q05's sees the head start 38 s after its first `starts_by`; Q14B: the v2026.11.9 client shows a held job as `held`, `--wait` exits 10, its submit is granted the whole node. e2e: H1 again on api.github.com, rerun |
+| linux-install 43647497051 | both images green on 3085fac (`bin/mu` and `install/` as final) |
+
+`tools/test-autoupdate/run.sh` (macOS, bash 3.2, run locally as CI keeps it): 292 passed, 0 failed.
