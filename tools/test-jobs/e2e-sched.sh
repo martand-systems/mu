@@ -672,8 +672,10 @@ q35() {
   wait_state "$a" "timeout failed succeeded cancelled interrupted" 90
   r="$(ws status "$a" --json 2>&1)"; w="$(printf '%s' "$r" | jget wall_s)"; rs="$(printf '%s' "$r" | jget run_s)"; ps="$(printf '%s' "$r" | jget paused_s)"
   [ -n "$w" ] || w="$(sudo python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wall_s"))' "/srv/mu/jobs/$a/result.json" 2>/dev/null)"
-  M="state $(printf '%s' "$r" | jget state) ($(printf '%s' "$r" | jget note)); wall $w s, run_s $rs, paused_s $ps; limit marker $(sudo test -f "/srv/mu/jobs/$a/timelimit" && echo yes || echo no)"
-  [ "$(printf '%s' "$r" | jget state)" = timeout ] && lt 31 "$w" && lt "$w" 45 && lt 17 "$rs" && lt "$rs" 25 && lt 12 "$ps" && lt "$ps" 18
+  local tr; tr="$(timer_ran "mu-limit-$a")"
+  M="state $(printf '%s' "$r" | jget state) ($(printf '%s' "$r" | jget note)); wall $w s, run_s $rs, paused_s $ps; limit marker $(sudo test -f "/srv/mu/jobs/$a/timelimit" && echo yes || echo no); the limit timer's service: $tr"
+  [ "$(printf '%s' "$r" | jget state)" = timeout ] && lt 31 "$w" && lt "$w" 45 && lt 17 "$rs" && lt "$rs" 25 && lt 12 "$ps" && lt "$ps" 18 && \
+    [ "$tr" = ok ]
   qend $?
 }
 q36() {
@@ -710,6 +712,13 @@ with_fault() {   # with_fault NAME: a test injector beside the faults already se
 no_injector() { nfault "$QF_SAVED"; }
 lender() {   # lender NAME [SECONDS]: a whole-node job that counts (count.py), 1 GiB, --time 10m; it ends after SECONDS of running
   submit --cores "$NC" --mem 1G --time 10m --name "$1" -- python3 count.py ${2:-}
+}
+timer_ran() {   # timer_ran UNIT: how the user manager logged a timer's service: "failed" (its systemctl did not take
+                # effect, as on CI before the timers named this user's bus), "ok", or "never" (review 2026-11-15)
+  local l; l="$(sudo journalctl _UID="$MU_UID" --no-pager -o cat 2>/dev/null | grep -F "$1.service:")"
+  if printf '%s' "$l" | grep -q "Failed with result"; then echo failed
+  elif printf '%s' "$l" | grep -Eq "Deactivated successfully|Succeeded|Finished"; then echo ok
+  else echo never; fi
 }
 wait_counting() { wait_state "$1" running 60 && poll 30 sh -c "[ -n \"\$(sudo cat /srv/mu/jobs/$1/work/counter 2>/dev/null)\" ]"; }
 
@@ -794,9 +803,10 @@ q35b() {   # an unpaused --time 20s job ends by its limit timer while the runner
   b="$(submit --cores 1 --mem 256M --time 1m --name e2e-slow-checkout -- true)"
   local i; for i in $(seq 1 75); do ended_now "$a" && { te=$(( $(date +%s) - t0 )); break; }; sleep 1; done
   wait_state "$a" "timeout failed succeeded cancelled" 120
-  M="its unit ended ${te:-not within 75} s after it started, while $b's 60 s checkout held the runner; then $(jobstate "$a") ($(jobstate "$a" note)), limit marker $(sudo test -f "/srv/mu/jobs/$a/timelimit" && echo yes || echo no)"
+  local tr; tr="$(timer_ran "mu-limit-$a")"
+  M="its unit ended ${te:-not within 75} s after it started, while $b's 60 s checkout held the runner; then $(jobstate "$a") ($(jobstate "$a" note)), limit marker $(sudo test -f "/srv/mu/jobs/$a/timelimit" && echo yes || echo no); the limit timer's service: $tr"
   no_injector
-  [ -n "$te" ] && [ "$te" -le 30 ] && [ "$(jobstate "$a")" = timeout ]
+  [ -n "$te" ] && [ "$te" -le 30 ] && [ "$(jobstate "$a")" = timeout ] && [ "$tr" = ok ]
   qend $?
 }
 q37() {   # auto-pause (policy "marked", the default)
@@ -806,13 +816,15 @@ q37() {   # auto-pause (policy "marked", the default)
   u="$(submit --cores "$NC" --mem 512M --time 10m --name q37-unmarked -- sleep 600)"; wait_state "$u" running 60
   h1="$(submit --priority urgent --others --cores "$HC" --mem 256M --time 20s --name q37-u1 -- sleep 5)"
   sleep 32; m1="unmarked: $(fz "$u") (auto-pauses $(sjget "$u" auto_pause_count)), urgent $(jobstate "$h1")"
-  { [ "$(fz "$u")" = running ] && [ -z "$(sjget "$u" auto_pause_count)" ] && [ "$(jobstate "$h1")" = queued ]; } || ok=0
+  { [ -n "$h1" ] && [ "$(fz "$u")" = running ] && [ -z "$(sjget "$u" auto_pause_count)" ] && [ "$(jobstate "$h1")" = queued ]; } || { ok=0; m1="$m1 ✗unmarked"; }
   ws cancel "$h1" --json >/dev/null 2>&1; ws cancel "$u" --json >/dev/null 2>&1; wait_state "$u" cancelled 40
   # 2. an urgent job whose memory does not fit: no pause (the victim lends no memory: 512M held of 512M)
-  v="$(submit --pausable --cores "$NC" --mem 512M --time 10m --name q37-victim -- sleep 600)"; wait_state "$v" running 60
+  # --time 1h: an auto-pause may last 30 min (AUTO_PAUSE_S), so a job whose budget, min(4 h, --time), is less than
+  # that is never a victim (pausectl.eligible); with 10m none was, and no urgent job ever started
+  v="$(submit --pausable --cores "$NC" --mem 512M --time 1h --name q37-victim -- sleep 900)"; wait_state "$v" running 60
   h2="$(submit --priority urgent --others --cores "$HC" --mem 1700M --time 20s --name q37-u2 -- sleep 5)"
   sleep 32; m2="memory does not fit: auto-pauses $(sjget "$v" auto_pause_count), urgent $(jobstate "$h2")"
-  { [ -z "$(sjget "$v" auto_pause_count)" ] && [ "$(jobstate "$h2")" = queued ]; } || ok=0
+  { [ -n "$h2" ] && [ -z "$(sjget "$v" auto_pause_count)" ] && [ "$(jobstate "$h2")" = queued ]; } || { ok=0; m2="$m2 ✗mem"; }
   ws cancel "$h2" --json >/dev/null 2>&1; wait_state "$h2" cancelled 40
   # 3. the victim is frozen only after the urgent job's (20 s) checkout, the urgent job starts as a borrower, and the
   #    victim is thawed once it ends, long before the deadline
@@ -820,14 +832,17 @@ q37() {   # auto-pause (policy "marked", the default)
   for t in $(seq 1 12); do frozen_now "$v" && fd="${fd}$t "; sleep 1; done
   wait_state "$h3" running 40; local fv; fv="$(fz "$v")"; local cl; cl="$(jobstate "$h3" grant.class)"
   wait_state "$h3" "succeeded failed timeout" 60; t="$(date +%s)"
-  poll 15 running_now "$v" || ok=0
+  local th=1; poll 15 running_now "$v" || th=0
   m3="frozen during the checkout at s: '${fd}'; then $fv with the urgent job running class $cl, thawed $(( $(date +%s) - t )) s after it ended (auto-pauses $(sjget "$v" auto_pause_count))"
-  { [ -z "$fd" ] && [ "$fv" = frozen ] && [ "$cl" = borrowing ] && [ "$(sjget "$v" auto_pause_count)" = 1 ]; } || ok=0
+  [ -n "$h3" ] || { ok=0; m3="$m3 ✗submit"; }
+  [ -z "$fd" ] || { ok=0; m3="$m3 ✗checkout"; }
+  { [ "$fv" = frozen ] && [ "$cl" = borrowing ] && [ "$(sjget "$v" auto_pause_count)" = 1 ]; } || { ok=0; m3="$m3 ✗borrow"; }
+  [ "$th" = 1 ] || { ok=0; m3="$m3 ✗thaw"; }
   # 4. a second urgent job within the cooldown: no pause
   h4="$(submit --priority urgent --others --cores "$HC" --mem 256M --time 20s --name q37-u4 -- sleep 5)"
   sleep 40; apc="$(sjget "$v" auto_pause_count)"
   m4="within the cooldown: auto-pauses $apc, $(fz "$v"), urgent $(jobstate "$h4")"
-  { [ "$apc" = 1 ] && [ "$(jobstate "$h4")" = queued ]; } || ok=0
+  { [ -n "$h4" ] && [ "$apc" = 1 ] && [ "$(jobstate "$h4")" = queued ]; } || { ok=0; m4="$m4 ✗cooldown"; }
   M="$m1; $m2; $m3; $m4"
   no_injector
   [ "$ok" = 1 ]
@@ -843,18 +858,23 @@ q38() {   # stops of a frozen unit: the log cap; the limit timer's command run b
   node_py 'node.update_node_info(log_cap_gb=4)'
   b="$(lender q38-limit)"; wait_counting "$b"
   wsp pause "$b" --for 120s --json >/dev/null 2>&1; local fb; fb="$(fz "$b")"
+  # the limit command run by its own timer (pausectl.run_timer, as the node arms it: the service in the user manager's
+  # environment, review 2026-11-15), not by hand through asmu's environment
   cmd="$(node_py 'from mu import pausectl
-print(pausectl.limit_command("'"$b"'")[2])')"
-  asmu /bin/sh -c "$cmd" >/dev/null 2>&1
+print(pausectl.run_timer(pausectl.limit_unit("'"$b"'"), 1, pausectl.limit_command("'"$b"'")))')"
   wait_state "$b" "timeout failed succeeded cancelled" 40 || ok=0
-  M="log cap: $fa, then $(jobstate "$a") ($(jobstate "$a" note)), SIGTERM file $(sudo test -f "/srv/mu/jobs/$a/work/sigterm" && echo yes || echo no); limit command by hand: $fb, then $(jobstate "$b") ($(jobstate "$b" note)), SIGTERM file $(sudo test -f "/srv/mu/jobs/$b/work/sigterm" && echo yes || echo no)"
+  local tr; tr="$(timer_ran "mu-limit-$b")"
+  M="log cap: $fa, then $(jobstate "$a") ($(jobstate "$a" note)), SIGTERM file $(sudo test -f "/srv/mu/jobs/$a/work/sigterm" && echo yes || echo no); the limit command by its timer ($cmd): $fb, then $(jobstate "$b") ($(jobstate "$b" note)), SIGTERM file $(sudo test -f "/srv/mu/jobs/$b/work/sigterm" && echo yes || echo no), the timer's service $tr"
   [ "$ok" = 1 ] && [ "$fa" = frozen ] && [ "$(jobstate "$a")" = failed ] && sudo test -f "/srv/mu/jobs/$a/work/sigterm" && \
-    [ "$fb" = frozen ] && [ "$(jobstate "$b")" = timeout ] && sudo test -f "/srv/mu/jobs/$b/work/sigterm"
+    [ "$fb" = frozen ] && [ "$(jobstate "$b")" = timeout ] && sudo test -f "/srv/mu/jobs/$b/work/sigterm" && [ "$tr" = ok ]
   local rc=$?; node_py 'node.update_node_info(log_cap_gb=4)'; qend $rc
 }
 q39() {   # the runner down past the deadline: the dead-man timer thaws the job
   qpre || return 1; pause_files; local a b t0 tz mh mr lt_ ev ok=1
   a="$(lender q39 30)"; wait_counting "$a"
+  # memory.max is lowered only once the runner has recorded the unit's cgroup (else the pause keeps the whole grant:
+  # §22.2); paused before that, the row cannot see the held memory
+  local i; for i in $(seq 1 30); do [ -n "$(sjget "$a" cgroup)" ] && break; sleep 1; done
   wsp pause "$a" --for 100s --json >/dev/null 2>&1; t0="$(date +%s)"
   b="$(submit --cores "$HC" --mem 256M --time 20s --name q39-borrower -- sleep 600)"
   wait_state "$b" running 30 || ok=0
@@ -865,11 +885,12 @@ q39() {   # the runner down past the deadline: the dead-man timer thaws the job
   mr="$(cg_file "$a" memory.max)"; lt_="$(timer_on "mu-limit-$a")"
   ev="$(sudo grep -c 'thawed outside' "/srv/mu/jobs/$a/events.log" 2>/dev/null)"
   wait_state "$a" "succeeded failed timeout interrupted" 120 || ok=0
-  M="the borrower $(jobstate "$b") ($(jobstate "$b" note)); thawed ${tz:-never} s after the pause (deadline 100 s + 120 s) with memory.max $mh; after the restart: $ev 'thawed outside' line(s), memory.max $mr, limit timer $lt_; the job $(jobstate "$a") started $(started_n "$a") time(s), paused_s $(jobstate "$a" paused_s)"
+  local tr; tr="$(timer_ran "mu-thaw-$a")"
+  M="the borrower $(jobstate "$b") ($(jobstate "$b" note)); thawed ${tz:-never} s after the pause (deadline 100 s + 120 s) with memory.max $mh, the dead-man's service $tr; after the restart: $ev 'thawed outside' line(s), memory.max $mr, limit timer $lt_; the job $(jobstate "$a") started $(started_n "$a") time(s), paused_s $(jobstate "$a" paused_s)"
   asmu systemctl --user start mu-node.service >/dev/null 2>&1
   [ "$ok" = 1 ] && [ -n "$tz" ] && [ "$tz" -ge 210 ] && lt "$mh" "$G1" && [ "${ev:-0}" -ge 1 ] && [ "$mr" = "$G1" ] && \
     [ "$lt_" = active ] && [ "$(jobstate "$a")" = succeeded ] && [ "$(started_n "$a")" = 1 ] && \
-    lt 210 "$(jobstate "$a" paused_s)" && lt "$(jobstate "$a" paused_s)" 250
+    lt 210 "$(jobstate "$a" paused_s)" && lt "$(jobstate "$a" paused_s)" 250 && [ "$tr" = ok ]
   qend $?
 }
 
@@ -962,15 +983,15 @@ sched_faults() {
   must_fail Q32 pause-in-memory-only 'nfault pause-in-memory-only' nfault q32
   must_fail Q33 requeue-keeps-pause 'nfault requeue-keeps-pause' nfault q33
   must_fail Q35 count-paused-time 'nfault count-paused-time' nfault q35
-  must_fail Q35B limit-in-runner-loop 'nfault limit-in-runner-loop' nfault q35b
+  must_fail Q35B limit-in-runner-loop 'nfault limit-in-runner-loop' nfault q35b 'unit ended ([3-9][0-9]|not within)' 
   must_fail Q36 no-pause-deadline 'nfault no-pause-deadline' nfault q36
-  must_fail Q37 pause-unmarked 'nfault pause-unmarked' nfault q37
-  must_fail Q37 pause-without-mem-check 'nfault pause-without-mem-check' nfault q37
-  must_fail Q37 freeze-before-checkout 'nfault freeze-before-checkout' nfault q37
-  must_fail Q37 keep-pause-after-beneficiary 'nfault keep-pause-after-beneficiary' nfault q37
-  must_fail Q37 no-cooldown 'nfault no-cooldown' nfault q37
+  must_fail Q37 pause-unmarked 'nfault pause-unmarked' nfault q37 '✗unmarked'
+  must_fail Q37 pause-without-mem-check 'nfault pause-without-mem-check' nfault q37 '✗mem'
+  must_fail Q37 freeze-before-checkout 'nfault freeze-before-checkout' nfault q37 '✗checkout'
+  must_fail Q37 keep-pause-after-beneficiary 'nfault keep-pause-after-beneficiary' nfault q37 '✗thaw'
+  must_fail Q37 no-cooldown 'nfault no-cooldown' nfault q37 '✗cooldown' 
   must_fail Q38 no-log-cap 'nfault no-log-cap' nfault q38
-  must_fail Q39 no-dead-man 'nfault no-dead-man' nfault q39
+  must_fail Q39 no-dead-man 'nfault no-dead-man' nfault q39 'thawed never' 
 }
 SCHED_ROWS="QS Q01 Q02 Q03 Q04 Q05 Q06 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q14 Q18 Q19 Q20 Q22 Q23 Q24 Q25 Q26 Q27 Q28 Q14B V1 V3 QF Q29 Q30 Q31 Q32 Q33 Q34 Q35 Q35B Q36 Q37 Q38 Q39"
 SCHED_FAULTS="Q01 Q02 Q03 Q04 Q05 Q05 Q06 Q06 Q06 Q07 Q07 Q08 Q09 Q10 Q11 Q12 Q13 Q13 Q14 Q18 Q19 Q20 Q22 Q22 Q23 Q23 Q24 Q25 Q25 Q26 Q26 Q26 Q27 Q27 Q28 Q14B V1 V3 Q29 Q29 Q30 Q30 Q31 Q32 Q33 Q35 Q35B Q36 Q37 Q37 Q37 Q37 Q37 Q38 Q39"
