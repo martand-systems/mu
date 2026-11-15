@@ -1,0 +1,456 @@
+{
+ "jobs": [
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": "2026-11-15T16:11:08Z",
+   "exit_code": 0,
+   "grant": {
+    "class": "normal",
+    "cores": 2,
+    "cpus": "0-1",
+    "mem_bytes": 1073741824,
+    "time_s": 3600
+   },
+   "job_id": "20261114-110000-d0n3d0",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "d0n3d0",
+   "note": null,
+   "ok": true,
+   "pausable": false,
+   "paused_s": 0.1,
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "run_s": 0.2,
+   "started_at": "2026-11-15T16:11:08Z",
+   "state": "succeeded",
+   "unit": "mu-job-20261114-110000-d0n3d0.service",
+   "usage": null
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": "2026-11-15T22:26:18Z",
+   "exit_code": null,
+   "grant": {
+    "class": "normal",
+    "cores": 4,
+    "cpus": "0-3",
+    "mem_bytes": 6442450944,
+    "time_s": 21600
+   },
+   "job_id": "20261114-120102-k3f9qa",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "k3f9qa",
+   "note": "paused until 16:26 by avi-mac",
+   "ok": true,
+   "pausable": true,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": null,
+    "held_mem_bytes": 6442450944,
+    "lent_to": [
+     "20261114-142955-2icaxr"
+    ],
+    "phase": "frozen",
+    "resume_asked": null,
+    "resumes_by": null,
+    "since": "2026-11-15T16:11:09Z",
+    "until": "2026-11-15T16:26:09Z",
+    "why": "hand"
+   },
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 4,
+    "mem_bytes": 6442450944,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 21600,
+    "why": "4 cores, 6.0 GB, 6h (cores flag, mem flag, time flag)"
+   },
+   "started_at": "2026-11-15T16:11:08Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 14400,
+    "limit_s": 21600,
+    "paused_s": 0,
+    "run_s": 0
+   },
+   "unit": "mu-job-20261114-120102-k3f9qa.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": "2026-11-15T18:26:18Z",
+   "exit_code": null,
+   "grant": {
+    "class": "normal",
+    "cores": 2,
+    "cpus": "4-5",
+    "mem_bytes": 2147483648,
+    "time_s": 7200
+   },
+   "job_id": "20261114-121500-r7mm2x",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "r7mm2x",
+   "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+   "ok": true,
+   "pausable": false,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": null,
+    "held_mem_bytes": 2147483648,
+    "lent_to": [
+     "20261114-143010-b8b8b8"
+    ],
+    "phase": "frozen",
+    "resume_asked": {
+     "at": "2026-11-15T16:11:09Z",
+     "by": "avi-mac"
+    },
+    "resumes_by": "2026-11-15T16:17:19Z",
+    "since": "2026-11-15T16:11:09Z",
+    "until": "2026-11-15T16:26:09Z",
+    "why": "hand"
+   },
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 2,
+    "mem_bytes": 2147483648,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 7200,
+    "why": "2 cores, 2.0 GB, 2h (cores flag, mem flag, time flag)"
+   },
+   "started_at": "2026-11-15T16:11:08Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 7200,
+    "limit_s": 7200,
+    "paused_s": 0,
+    "run_s": 0
+   },
+   "unit": "mu-job-20261114-121500-r7mm2x.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": "2026-11-15T18:12:18Z",
+   "exit_code": null,
+   "grant": {
+    "class": "normal",
+    "cores": 2,
+    "cpus": "6-7",
+    "mem_bytes": 1073741824,
+    "time_s": 7200
+   },
+   "job_id": "20261114-121600-f1ll3r",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "f1ll3r",
+   "note": null,
+   "ok": true,
+   "pausable": false,
+   "paused": null,
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 2,
+    "mem_bytes": 1073741824,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 7200,
+    "why": "2 cores, 1.0 GB, 2h (cores flag, mem flag, time flag)"
+   },
+   "started_at": "2026-11-15T16:11:08Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 7200,
+    "limit_s": 7200,
+    "paused_s": 0,
+    "run_s": 0
+   },
+   "unit": "mu-job-20261114-121600-f1ll3r.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": {
+    "at": "2026-11-15T16:11:09Z",
+    "by": "avi-mac",
+    "owner": true
+   },
+   "job_id": "20261114-130200-h3ld00",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "h3ld00",
+   "note": null,
+   "ok": true,
+   "place": 2,
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 2,
+    "mem_bytes": 1073741824,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 3600,
+    "why": "2 cores, 1.0 GB, 1h (cores flag, mem flag, time flag)"
+   },
+   "started_at": null,
+   "starts_by": null,
+   "state": "held",
+   "unit": null,
+   "waiting_for": {
+    "held": true
+   }
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "borrowing",
+   "ended_at": null,
+   "ends_by": "2026-11-15T16:22:19Z",
+   "exit_code": null,
+   "grant": {
+    "borrowed": [
+     {
+      "cpus": "0-3",
+      "from": "20261114-120102-k3f9qa",
+      "mem_bytes": 0,
+      "until": "2026-11-15T16:26:09Z"
+     }
+    ],
+    "class": "borrowing",
+    "cores": 4,
+    "cpus": "0-3",
+    "mem_bytes": 536870912,
+    "time_s": 600
+   },
+   "job_id": "20261114-142955-2icaxr",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "2icaxr",
+   "note": null,
+   "ok": true,
+   "pausable": false,
+   "paused": null,
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 4,
+    "mem_bytes": 536870912,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 600,
+    "why": "4 cores, 0.5 GB, 10m (cores flag, mem flag, time flag)"
+   },
+   "started_at": "2026-11-15T16:11:09Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 0,
+    "limit_s": 600,
+    "paused_s": 0,
+    "run_s": 0
+   },
+   "unit": "mu-job-20261114-142955-2icaxr.service"
+  },
+  {
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "borrowing",
+   "ended_at": null,
+   "ends_by": "2026-11-15T16:17:19Z",
+   "exit_code": null,
+   "grant": {
+    "borrowed": [
+     {
+      "cpus": "4-5",
+      "from": "20261114-121500-r7mm2x",
+      "mem_bytes": 0,
+      "until": "2026-11-15T16:26:09Z"
+     }
+    ],
+    "class": "borrowing",
+    "cores": 2,
+    "cpus": "4-5",
+    "mem_bytes": 268435456,
+    "time_s": 300
+   },
+   "job_id": "20261114-143010-b8b8b8",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "b8b8b8",
+   "note": null,
+   "ok": true,
+   "pausable": false,
+   "paused": null,
+   "position": null,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 2,
+    "mem_bytes": 268435456,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 300,
+    "why": "2 cores, 0.2 GB, 5m (cores flag, mem flag, time flag)"
+   },
+   "started_at": "2026-11-15T16:11:09Z",
+   "state": "running",
+   "time": {
+    "budget_left_s": 0,
+    "limit_s": 300,
+    "paused_s": 0,
+    "run_s": 0
+   },
+   "unit": "mu-job-20261114-143010-b8b8b8.service"
+  },
+  {
+   "attempt": 1,
+   "band": "urgent",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": false,
+   "job_id": "20261114-143100-urg3nt",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "urg3nt",
+   "note": null,
+   "ok": true,
+   "place": 1,
+   "position": 1,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 8,
+    "mem_bytes": 8589934592,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 21600,
+    "why": "8 cores, 8.0 GB, 6h (cores flag, mem flag, time flag)"
+   },
+   "started_at": null,
+   "starts_by": "2026-11-15T22:26:18Z",
+   "state": "queued",
+   "unit": null,
+   "waiting_for": {
+    "resources": {
+     "cores": 8,
+     "free_cores": 0,
+     "free_mem_bytes": 6710886400,
+     "mem_bytes": 8589934592
+    }
+   }
+  },
+  {
+   "attempt": 1,
+   "band": "low",
+   "cancel_requested": false,
+   "ended_at": null,
+   "exit_code": null,
+   "held": false,
+   "job_id": "20261114-143200-l0wl0w",
+   "key": "avi-mac",
+   "log_size": 0,
+   "name": "l0wl0w",
+   "note": null,
+   "ok": true,
+   "place": 3,
+   "position": 2,
+   "project": null,
+   "project_id": "p1-0123456789ab",
+   "queued_at": null,
+   "request": {
+    "class": "normal",
+    "cores": 8,
+    "mem_bytes": 1073741824,
+    "source": {
+     "cores": "flag",
+     "mem": "flag",
+     "time": "flag"
+    },
+    "time_s": 3600,
+    "why": "8 cores, 1.0 GB, 1h (cores flag, mem flag, time flag)"
+   },
+   "started_at": null,
+   "starts_by": null,
+   "state": "queued",
+   "unit": null,
+   "waiting_for": {
+    "resources": {
+     "behind": "20261114-143100-urg3nt",
+     "cores": 8,
+     "free_cores": 0,
+     "free_mem_bytes": 6710886400,
+     "mem_bytes": 1073741824
+    }
+   }
+  }
+ ],
+ "ok": true,
+ "rev": 6
+}

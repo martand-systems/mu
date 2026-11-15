@@ -26,6 +26,9 @@ Test faults (durable.fault; each makes a unit check or an e2e row fail, schedule
   keep-pause-after-beneficiary  an auto-pause lasts until its deadline after the urgent job ended
   freeze-before-checkout    the auto-pause freezes its victims before the urgent job's checkout
   no-dead-man               no dead-man timer is armed
+  timer-env-inherited       the two timers run with the user manager's environment instead of this user's bus: where
+                            PAM gives the manager another user's XDG_RUNTIME_DIR (/etc/environment, as on CI's runner),
+                            their systemctl --user gets "Failed to connect to bus: Permission denied" and does nothing
 A test injector (sets up a slow step for an e2e row; not a check):
   auto-checkout-slow        the auto-pause's checkout of the urgent job takes 20 s more (Q37)
 """
@@ -181,11 +184,17 @@ def run_timer(name, seconds, argv):
     import subprocess
     n = N()
     stop_timer(name)
+    env = n.user_env()
+    # the timer's service gets the user manager's environment, not ours: name this user's runtime folder and bus, so
+    # that its systemctl --user reaches this manager even when PAM gave the manager another user's XDG_RUNTIME_DIR
+    bus = [] if fault("timer-env-inherited") else [
+        "--setenv=XDG_RUNTIME_DIR=" + env["XDG_RUNTIME_DIR"],
+        "--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus" % env["XDG_RUNTIME_DIR"]]
     cmd = [os.environ.get("MU_SYSTEMD_RUN") or "systemd-run", "--user", "--quiet", "--unit=" + name,
-           "--on-active=%ds" % max(1, int(seconds)), "--timer-property=AccuracySec=1s",
+           "--on-active=%ds" % max(1, int(seconds)), "--timer-property=AccuracySec=1s"] + bus + [
            "--description=μ timer %s" % name, "--"] + argv
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=sched.START_WAIT_S, env=n.user_env(),
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=sched.START_WAIT_S, env=env,
                            stdin=subprocess.DEVNULL)
         return r.returncode == 0, r.stderr.strip()
     except (OSError, subprocess.TimeoutExpired) as e:

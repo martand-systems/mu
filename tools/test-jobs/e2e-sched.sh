@@ -586,11 +586,11 @@ f_v3_off() { asmu systemctl --user unset-environment MU_DISPATCH_FAULT; use_node
 fz() { asmu systemctl --user show -p FreezerState "mu-job-$1.service" 2>/dev/null | sed 's/^FreezerState=//'; }
 cg_file() { local c; c="$(asmu systemctl --user show -p ControlGroup "mu-job-$1.service" | sed 's/^ControlGroup=//')"; sudo cat "/sys/fs/cgroup$c/$2" 2>/dev/null; }
 counter() { sudo cat "/srv/mu/jobs/$1/work/counter" 2>/dev/null; }
-# wsp: `mu pause` / `mu resume` as ws. The dispatcher of this branch (bin/mu, rev 12) routes queue|hold|release|move|
-# priority to the job layer but not pause|resume, and the integration contract (§1.3) keeps bin/mu unchanged on this
-# branch: the integrator adds them. Until the installed dispatcher routes them, these rows call the job layer exactly as
-# its infra() would (the default version's python -I -S on recipe/src/mu/cli.py, MU_HOME and MU_INFRA_VERSION set) and
-# say so once; after that, through `mu` itself.
+# wsp: `mu pause` / `mu resume` as ws. The dispatcher before rev 13 (bin/mu) routes queue|hold|release|move|
+# priority to the job layer but not pause|resume; rev 13 (release-2026.11.11) routes them too, so with this checkout's
+# bin/mu installed for ws these rows go through `mu` itself. With an older dispatcher installed they call the job layer
+# exactly as its infra() would (the default version's python -I -S on recipe/src/mu/cli.py, MU_HOME and
+# MU_INFRA_VERSION set) and say so once.
 wsp() {
   if sudo grep -q '|pause|resume)' "$WSH/bin/mu"; then ws "$@"; return; fi
   local d; d="$(sudo cat "$WSH/default")"
@@ -804,19 +804,19 @@ q37() {   # auto-pause (policy "marked", the default)
   with_fault auto-checkout-slow
   # 1. an unmarked job is never paused
   u="$(submit --cores "$NC" --mem 512M --time 10m --name q37-unmarked -- sleep 600)"; wait_state "$u" running 60
-  h1="$(submit --priority urgent --cores "$HC" --mem 256M --time 20s --name q37-u1 -- sleep 5)"
+  h1="$(submit --priority urgent --others --cores "$HC" --mem 256M --time 20s --name q37-u1 -- sleep 5)"
   sleep 32; m1="unmarked: $(fz "$u") (auto-pauses $(sjget "$u" auto_pause_count)), urgent $(jobstate "$h1")"
   { [ "$(fz "$u")" = running ] && [ -z "$(sjget "$u" auto_pause_count)" ] && [ "$(jobstate "$h1")" = queued ]; } || ok=0
   ws cancel "$h1" --json >/dev/null 2>&1; ws cancel "$u" --json >/dev/null 2>&1; wait_state "$u" cancelled 40
   # 2. an urgent job whose memory does not fit: no pause (the victim lends no memory: 512M held of 512M)
   v="$(submit --pausable --cores "$NC" --mem 512M --time 10m --name q37-victim -- sleep 600)"; wait_state "$v" running 60
-  h2="$(submit --priority urgent --cores "$HC" --mem 1700M --time 20s --name q37-u2 -- sleep 5)"
+  h2="$(submit --priority urgent --others --cores "$HC" --mem 1700M --time 20s --name q37-u2 -- sleep 5)"
   sleep 32; m2="memory does not fit: auto-pauses $(sjget "$v" auto_pause_count), urgent $(jobstate "$h2")"
   { [ -z "$(sjget "$v" auto_pause_count)" ] && [ "$(jobstate "$h2")" = queued ]; } || ok=0
   ws cancel "$h2" --json >/dev/null 2>&1; wait_state "$h2" cancelled 40
   # 3. the victim is frozen only after the urgent job's (20 s) checkout, the urgent job starts as a borrower, and the
   #    victim is thawed once it ends, long before the deadline
-  h3="$(submit --priority urgent --cores "$HC" --mem 256M --time 20s --name q37-u3 -- sleep 8)"
+  h3="$(submit --priority urgent --others --cores "$HC" --mem 256M --time 20s --name q37-u3 -- sleep 8)"
   for t in $(seq 1 12); do frozen_now "$v" && fd="${fd}$t "; sleep 1; done
   wait_state "$h3" running 40; local fv; fv="$(fz "$v")"; local cl; cl="$(jobstate "$h3" grant.class)"
   wait_state "$h3" "succeeded failed timeout" 60; t="$(date +%s)"
@@ -824,7 +824,7 @@ q37() {   # auto-pause (policy "marked", the default)
   m3="frozen during the checkout at s: '${fd}'; then $fv with the urgent job running class $cl, thawed $(( $(date +%s) - t )) s after it ended (auto-pauses $(sjget "$v" auto_pause_count))"
   { [ -z "$fd" ] && [ "$fv" = frozen ] && [ "$cl" = borrowing ] && [ "$(sjget "$v" auto_pause_count)" = 1 ]; } || ok=0
   # 4. a second urgent job within the cooldown: no pause
-  h4="$(submit --priority urgent --cores "$HC" --mem 256M --time 20s --name q37-u4 -- sleep 5)"
+  h4="$(submit --priority urgent --others --cores "$HC" --mem 256M --time 20s --name q37-u4 -- sleep 5)"
   sleep 40; apc="$(sjget "$v" auto_pause_count)"
   m4="within the cooldown: auto-pauses $apc, $(fz "$v"), urgent $(jobstate "$h4")"
   { [ "$apc" = 1 ] && [ "$(jobstate "$h4")" = queued ]; } || ok=0

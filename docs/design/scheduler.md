@@ -1749,3 +1749,26 @@ was built with no fallback: freeze and thaw, `MemoryMax` lowered on a frozen uni
 - `--others` and the authorisation of `pause`/`resume` reuse the hold rule (`sched.authorise("hold", …)`); no check
   of its own.
 - The dashboard's view of a paused job is dashboard-1b's; the post-merge row D40P joins the two.
+
+### 22.4 Integration (branch `release-2026.11.11`, with dashboard phase 1b)
+
+- **Dispatcher rev 13** (`bin/mu`, `install/install.sh`): `pause|resume` join the job layer's words, and `mu help`
+  lists them. `tools/test-jobs/run.sh` checks that both reach the default toolchain's job layer in a project pinned to
+  a version without it (must-fail: the same dispatcher without the two words). The e2e rows' `wsp` now goes through
+  `mu` itself, since node-setup installs this checkout's `bin/mu` for ws.
+- **The two timers on CI's real systemd did nothing** ("Failed to connect to bus: Permission denied"): as `node.user_env()`
+  notes, the CI runner's `/etc/environment` reaches the `mu` user manager through PAM with another user's
+  `XDG_RUNTIME_DIR`, and a timer's service gets the manager's environment, not the caller's. So `mu-limit-<id>` never stopped a job (Q35B: the
+  job ran to the `RuntimeMaxSec` backstop, 2 × `--time`) and `mu-thaw-<id>` never thawed one (Q39). `run_timer()` now
+  names this user's runtime folder and bus in the timer's service (`--setenv`); unit check in `sched-pause` with the
+  fault `timer-env-inherited`.
+- **Q37** submitted its urgent jobs without `--others`, which release 1 requires (`urgent` may pass any job), so none
+  was accepted; the row now passes `--others`.
+- **`list` no longer sends a finished job's `pauses`** (the contract's §3.1: status only; fault `list-keeps-pauses`).
+- **The dashboard's release 2 fixtures against the real node:** `tools/test-jobs/r2_answers.py` runs this release's
+  node code against the stubs of `sched-pause` (a frozen lender with a borrower, a lender whose resume waits, a held,
+  an urgent and a low job, a finished job that was paused) and sends the answers through the Mac's server too; unit
+  section `r2-shapes` compares them both ways with dashfake's fixtures (faults `drop-field`, `list-keeps-pauses`,
+  `fixture-drift`), and Vitest D48R decodes the real answers (`tools/test-dashboard/fixtures/real-r2/`). Two
+  differences were fixed in dashfake: a resuming job's note (the node says "resuming: waits for … (ends by …)") and a
+  finished job's `grant` and `pausable`.

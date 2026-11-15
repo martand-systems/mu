@@ -222,6 +222,20 @@ eq "mu submit --on local: exit 2 (stage 2)" "$rc" 2
 out="$(cd "$ROOT/cwd" && mu log not-an-id 2>&1)"; rc=$?
 eq "a malformed job id: exit 2" "$rc" 2
 has "mu help lists the job commands" "$(mu help 2>&1)" "mu submit [--on NODE]"
+# release 2's two words (dispatcher rev 13): pause and resume reach the default toolchain's job layer, even in a project
+# pinned to a version without it; a dispatcher without them hands them to the pinned toolchain instead
+route_pause() {   # route_pause DISPATCHER: "pause resume" answers, as one line each
+  local w; for w in pause resume; do (cd "$ROOT/old project" && /bin/bash "$1" "$w" 20261114-101500-k3f9qa --json 2>&1 | tail -n 1); done
+}
+out="$(route_pause "$MU_HOME/bin/mu")"
+if printf '%s\n' "$out" | grep -q 'stub toolchain'; then bad "mu pause and mu resume reach the job layer (rev 13)" "$out"
+else has "mu pause and mu resume reach the job layer of the default toolchain, also in a project pinned to v2026.11.6 (rev 13)" \
+  "$out" '"error": "no-node"'; fi
+sed 's/|pause|resume)/)/' "$MU_HOME/bin/mu" > "$ROOT/mu-no-pause"
+out="$(route_pause "$ROOT/mu-no-pause")"
+case "$out" in *'stub toolchain v2026.11.6: pause'*) ok "must-fail: a dispatcher without the two words hands mu pause to the pinned toolchain (as it must)" ;;
+  *) bad "must-fail: a dispatcher without pause|resume still reached the job layer" "$out" ;; esac
+has "mu help lists pause and resume" "$(mu help 2>&1)" "mu pause JOB [--for D]"
 t0="$(date +%s)"; for i in 1 2 3 4 5; do mu compute list --json >/dev/null 2>&1; done; t1="$(date +%s)"
 echo "  info  5 starts of a job command: $((t1 - t0)) s"
 
@@ -314,8 +328,13 @@ for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-me
          count-paused-time pause-noop pause-in-memory-only no-dead-man drop-field thaw-over-borrower repause-shortens \
          no-valve no-pause-deadline cancel-without-thaw stop-without-thaw requeue-keeps-pause freeze-after-result \
          limit-in-runner-loop pause-unmarked freeze-before-checkout keep-pause-after-beneficiary no-cooldown \
-         lender-ends-ids-freed; do
+         lender-ends-ids-freed timer-env-inherited; do
   must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
+done
+# the dashboard's release 2 fixtures against the real node's answers (tools/test-jobs/r2_answers.py; the integration)
+py_section "$PY1" r2-shapes
+for f in drop-field list-keeps-pauses fixture-drift; do
+  must_fail_tagged "the dashboard's release 2 fixtures against the real node's answers" "$f" "$PY1" r2-shapes
 done
 
 section "chisel pins agree (apps.toml, relay/Dockerfile, the distro script)"

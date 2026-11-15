@@ -75,6 +75,11 @@ decided by the node by project (`--others`). It ships in **two releases**: the q
 (2.5.3), pause in a second release (2.5.5) after its probe. §20 was reviewed independently on 2026-11-14 and revised
 (scheduler.md §19, second table).
 
+**2026-11-15:** release 1 (2.5.3) shipped in v2026.11.10. Release 2 (2.5.5) is built (branch `scheduler-r2`,
+scheduler.md §22; probe items 10–13 passed in `sched-probe-2`) and integrated with dashboard phase 1b on branch
+`release-2026.11.11` (dispatcher rev 13: `mu pause`/`mu resume` routed). Not released: the release, its tag and the
+update of the office PC wait for the owner.
+
 | Sub-step | Design § | Effort | Needs the PC? |
 |---|---|---|---|
 | 2.5.0 Probe: the queued job `sched-probe` (cpuset, Open MPI's CPU set, `memory.peak`, P/E visibility) and a second one (system memory footprint, `CPUQuota` in a user unit, an express thread beside a 20-thread job; **freeze/thaw of a user unit under WSL and lowering a frozen unit's memory limit, `RuntimeMaxSec` while frozen and a transient timer's accuracy, an MPI job and a `timeout` through a pause, stopping a frozen unit**: items 10–13, needed by 2.5.5 only); results recorded in §12 before the build | §12 | ½ day | Through jobs only, no visit |
@@ -111,6 +116,10 @@ own Python server (owner's direction 2026-11-14, §2.3; design §3.1, §4.8). Ph
   scheduler (being designed on branch `scheduler`): it changes nothing on the node, and needs only the owner's go-ahead.
 - **3.1b waits** for the scheduler to merge (both change the node's runner) and for step 2 (node code reaches the PC
   only by auto-update). Its probe (3.0) runs after the scheduler, so it measures the runner 3.1b will change.
+- **2026-11-15:** 3.1b is built (branch `dashboard-1b`, dashboard.md §7.1.2) and integrated with scheduler release 2
+  on branch `release-2026.11.11`, where the page's release 2 fixtures are checked against the real node's answers
+  (`tools/test-jobs/r2_answers.py`, unit section r2-shapes; D40P on CI's real node). Not released yet. Until then,
+  v2026.11.10's page shows office-pc as an error (it takes r1's features for a live node; 1b gates by name).
 - Until 3.1b reaches the PC, the dashboard polls the node with `list` on a stated budget (design §4.3: every 15 s
   while a tab is visible and a job is unfinished, else 60 s; 5 min on battery). Each call leaves one `audit.log` line,
   so the `audit.log` rotation ships with step 2's release.

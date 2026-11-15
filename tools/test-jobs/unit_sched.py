@@ -1143,6 +1143,11 @@ def t_sched_pause(base):
     memcur(J, 300 * MI)
     check("an ordinary job is started with a time-limit timer for its --time" + flag("count-paused-time"),
           any(c.startswith("start mu-limit-%s " % J) and "--on-active=600s" in c for c in calls()), calls())
+    xdg = node.user_env()["XDG_RUNTIME_DIR"]
+    check("its time-limit timer runs systemctl --user on this user's bus (XDG_RUNTIME_DIR %s and its bus named in the "
+          "timer's service), not the user manager's environment" % xdg + flag("timer-env-inherited"),
+          any(c.startswith("start mu-limit-%s " % J) and ("--setenv=XDG_RUNTIME_DIR=%s " % xdg) in c and
+              ("--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus " % xdg) in c for c in calls()), calls())
     a = tryverb(pausectl.verb_pause, {"id": J, "for": "300"})
     p0 = pz(J)
     check("mu pause: the unit frozen, the pause on disk (phase frozen, deadline, held = memory.current + 512 MiB)" +
@@ -1155,6 +1160,10 @@ def t_sched_pause(base):
           ("stop mu-limit-%s.timer" % J) in calls() and any(c.startswith("start mu-thaw-%s " % J) for c in calls()) and
           any(c.startswith("set-property --runtime mu-job-%s.service MemoryMax=%d" % (J, 812 * MI)) for c in calls()),
           calls()[-12:])
+    check("the dead-man timer too runs systemctl --user thaw on this user's bus, not the user manager's environment" +
+          flag("timer-env-inherited"),
+          any(c.startswith("start mu-thaw-%s " % J) and ("--setenv=XDG_RUNTIME_DIR=%s " % xdg) in c for c in calls()),
+          [c for c in calls() if c.startswith("start mu-thaw-")])
     check("the pause answer's shape: paused, time, lent, next" + flag("drop-field"),
           all(k in a for k in ("paused", "time", "lent", "next")) and all(
               k in (a.get("paused") or {}) for k in ("since", "until", "by", "why", "held_mem_bytes", "lent_to",

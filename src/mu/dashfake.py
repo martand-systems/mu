@@ -373,13 +373,20 @@ class FakeNode:
             express = j.klass in ("express", "borrowing")
             out["time"] = {"limit_s": j.time_s, "run_s": int(run), "paused_s": 0 if express else int(j.paused_s(t)),
                            "budget_left_s": 0 if express else int(max(0, 4 * 3600 - j.paused_s(t)))}
-            if pz is not None:
+            if pz is not None and asked:   # the node's wording (pausectl.note_of), built at answer time
+                out["note"] = "resuming: waits for %s (ends by %s)" % (
+                    " ".join(x[-6:] for x in j.lent_to), out["paused"]["resumes_by"][11:16])
+            elif pz is not None:
                 out["note"] = ("paused for %s until %s" % (pz[4][-6:], time.strftime("%H:%M", time.gmtime(pz[1])))
                                if pz[3] == "auto" else "paused until %s by %s" % (
                                    time.strftime("%H:%M", time.gmtime(pz[1])), pz[2]))
         elif st in proto.FINISHED:
             out["run_s"] = round(j.run_s(t), 1)
             out["paused_s"] = round(j.paused_s(j.end), 1)
+            # as the node: a finished job keeps the grant it ran on (result.json) and says whether it was pausable
+            out["grant"] = {"cores": j.limit_cores, "cpus": "0-%d" % (j.limit_cores - 1),
+                            "mem_bytes": int(j.limit_gb * GB), "time_s": j.time_s, "class": j.klass}
+            out["pausable"] = j.pausable
 
     def status_pauses(self, j):
         return [{"from": proto.iso(a + self.skew), "to": proto.iso(b + self.skew), "by": by, "why": why,

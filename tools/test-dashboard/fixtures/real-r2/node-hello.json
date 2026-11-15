@@ -1,0 +1,90 @@
+{
+ "allocated": {
+  "cores": 8,
+  "cpus": "0-7",
+  "mem_bytes": 10468982784
+ },
+ "auto_pause": "marked",
+ "autoupdate": {
+  "enabled": false,
+  "last_check": null,
+  "last_message": null,
+  "last_result": null,
+  "pending_gc": null,
+  "pending_switch": null
+ },
+ "capacity": {
+  "cores": 8,
+  "cpus": "0-7",
+  "express_max": 2,
+  "mem_bytes": 17179869184,
+  "reserve_express": 1073741824,
+  "reserve_system": 2147483648
+ },
+ "disk": {
+  "free_gb": 207,
+  "host": null,
+  "min_free_gb": 0,
+  "where": "/srv/mu"
+ },
+ "features": [
+  "sched",
+  "usage",
+  "queue-control",
+  "update",
+  "stats",
+  "watch",
+  "metrics",
+  "pause"
+ ],
+ "free": {
+  "cores": 0,
+  "mem_bytes": 6710886400
+ },
+ "hw": {
+  "cores_logical": 8,
+  "cores_physical": 8,
+  "cpu_model": "13th Gen Intel(R) Core(TM) i7-13700",
+  "kernel": "6.6.87.2-microsoft-standard-WSL2",
+  "mem_total_kb": 16777216,
+  "wsl": null
+ },
+ "key": "avi-mac",
+ "last_stop": "unknown",
+ "limits": {
+  "cpu": "none",
+  "memory": false,
+  "pids": true,
+  "selftest_at": null,
+  "selftest_detail": null
+ },
+ "mu": {
+  "default": "",
+  "infra": null,
+  "installed": []
+ },
+ "node": "office-pc",
+ "ok": true,
+ "owners": [
+  "avi-mac"
+ ],
+ "pause": {
+  "mem_lend": true
+ },
+ "protocol": 1,
+ "protocol_min": 1,
+ "queue": {
+  "express": 0,
+  "held": 1,
+  "paused": 2,
+  "queued": 2,
+  "running": 5
+ },
+ "runner": "inactive",
+ "time": "2026-11-15T16:11:09Z",
+ "update": {
+  "running": false
+ },
+ "warnings": [],
+ "you_are_owner": true
+}

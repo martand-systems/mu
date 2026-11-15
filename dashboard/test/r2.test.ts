@@ -62,3 +62,44 @@ describe("D49: run time and paused samples", () => {
     expect(cols.max[iPaused]!).toBeLessThan(cols.max[iBefore]!); // the limit line steps down while frozen
   });
 });
+
+// The same page code on the real node's answers: tools/test-jobs/r2_answers.py runs release 2's node code (node.py,
+// pausectl.py) against stubs of systemd and sends what `mu node serve` printed through the Mac's server
+// (tools/test-dashboard/fixtures/real-r2/, written by `python3 -I -S tools/test-jobs/r2_answers.py DIR`; unit.py's
+// section r2-shapes checks that the dashfake fixtures above keep the real answers' keys, types and states).
+describe("D48R: the real node's release 2 answers, through the Mac's server", () => {
+  const real = (f: string) => load(join("real-r2", f));
+  const rov = decodeOverview(real("api-overview.json"), new Ctx());
+  const job = (short: string) => rov.jobs.find((j) => j.job_id.endsWith(short))!;
+  it("the real node's frozen lender is 'paused', its state stays running", () => {
+    expect(job("k3f9qa").state).toBe("running");
+    expect(job("k3f9qa").display).toBe("paused"); // paused-as-running
+  });
+  it("the real node's lender whose resume waits for its borrower is 'resuming'", () => {
+    expect(job("r7mm2x").display).toBe("resuming");
+  });
+  it("held, borrowing, the bands and a finished job that was paused decode", () => {
+    expect(job("h3ld00").state).toBe("held");
+    expect(job("2icaxr").class).toBe("borrowing");
+    expect(job("2icaxr").grant?.borrowed[0]?.from).toBe("20261114-120102-k3f9qa");
+    expect(job("urg3nt").band).toBe("urgent");
+    expect(job("l0wl0w").band).toBe("low");
+    const done = job("d0n3d0");
+    expect(done.state).toBe("succeeded");
+    expect(done.paused_s).toBeGreaterThan(0);
+  });
+  it("the wording on the real answers", () => {
+    const now = rov.now;
+    expect(schedText(job("k3f9qa"), now)).toMatch(/^paused by avi-mac until \d\d:\d\d · resumes by itself$/);
+    expect(schedText(job("r7mm2x"), now)).toMatch(/^resuming: waits for b8b8b8 \(ends by \d\d:\d\d\)$/);
+    expect(schedText(job("h3ld00"), now)).toMatch(/^held by avi-mac \d\d:\d\d · keeps place 2$/);
+    expect(schedText(job("2icaxr"), now)).toMatch(/^on cores lent by k3f9qa until \d\d:\d\d$/);
+  });
+  it("the real paused job's detail: its time bar is the node's run time", () => {
+    const d = decodeJobDetail(real("api-job-paused.json"), new Ctx());
+    const tb = timeBar(d.job, d.now)!;
+    expect(tb.source).toBe("node");
+    expect(tb.run_s).toBe(d.job.time!.run_s);
+    expect(d.job.display).toBe("paused");
+  });
+});

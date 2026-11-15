@@ -90,6 +90,7 @@ if [ "${FRONT:-0}" = 1 ]; then
   vitest_must_fail keep-fragment test/token.test.ts                    # D15's unit part
   # phase 1b: scheduler release 2 on the page (D48's decoder part, D49), each on the test it targets
   vitest_must_fail_on paused-as-running test/r2.test.ts "a frozen lender is 'paused'"
+  vitest_must_fail_on paused-as-running test/r2.test.ts "the real node's frozen lender is 'paused'"   # D48R
   vitest_must_fail_on count-paused-in-run test/r2.test.ts "the time bar counts run time"
   vitest_must_fail_on paused-cpu-zero test/r2.test.ts "paused samples break the cores series"
   # D38: the server's rename-field fault, through fixtures the faulty server emits

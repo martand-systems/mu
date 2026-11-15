@@ -65,6 +65,7 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   queue-project-filter    `queue` lists only the caller's project
   drop-field              the arranging answers lack `place` (the JSON-shape check must notice)
   held-as-queued          a hold is written as state "queued" with a flag (the previous release's runner starts it)
+  list-keeps-pauses       list sends a finished job's pause history, which is status's alone (contract §3.1; r2-shapes)
  the review of 2026-11-15 (docs/design/scheduler.md "Release 1 as built"), each undoing one fix:
   no-size-bounds          a spec's sizes are not bounded (a huge --time overflows every plan: no start, no status)
   no-display-check        name, project and submitted are stored and shown as sent (forged lines, crashes)
@@ -1273,6 +1274,9 @@ def verb_list(key, args):
     mine = [j for j in jobs if not proj or j["job"].get("project_id") == proj]
     unfinished = [status_of(j, v) for j in mine if not j["result"]]
     finished = sorted((status_of(j, v) for j in mine if j["result"]), key=lambda s: s.get("ended_at") or "")[-limit:] if limit else []
+    for s in finished:   # a finished job's pause history (up to 20 entries) is status's alone (contract §3.1)
+        if not fault("list-keeps-pauses"):
+            s.pop("pauses", None)
     return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
             "rev": nodestats.read_rev()}
 

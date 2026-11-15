@@ -1002,7 +1002,8 @@ SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs"
             "untrusted-node": t_untrusted_node, "runner": t_runner,
             "snapshot-alone": t_snapshot_alone, "snapshot-content": t_snapshot_content,
             "snapshot-report": t_snapshot_report, "sched": unit_sched.t_sched, "sched-sim": unit_sched.t_sched_sim,
-            "sched-runner": t_sched_runner, "sched-pause": lambda: unit_sched.t_sched_pause(tmpdir("sched-pause"))}
+            "sched-runner": t_sched_runner, "sched-pause": lambda: unit_sched.t_sched_pause(tmpdir("sched-pause")),
+            "r2-shapes": lambda: __import__("r2_answers").t_r2_shapes(check, unit_sched.flag, tmpdir("r2-shapes"))}
 
 if __name__ == "__main__":
     sec = sys.argv[1]

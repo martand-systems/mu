@@ -98,8 +98,22 @@ PYJ
 }
 
 # ================================================================================================== set-up
+# H1's flake: the host script pins GitHub's host key from api.github.com/meta (cross-checked with ssh-keyscan), and
+# GitHub answers 403 to an address past 60 unauthenticated requests an hour, which a shared runner's address often is;
+# then no install run pins it and H1 fails "GitHub's host key not pinned". The product is right to refuse to pin
+# without the API, so CI authenticates root's curl to api.github.com only (a netrc for that one host, the job's own
+# GITHUB_TOKEN, 1000 requests an hour): the host script's own check is unchanged. MU_CI_META_TOKEN comes from the
+# workflow; printf is a builtin, so the token is in no process's argv, and it is in no file that is uploaded. H9 checks
+# that root's curl is authenticated there (fault meta-anon: without it, the limit is 60 and H9 fails).
+META_NETRC=/root/.mu-ci-meta.netrc
+meta_auth() {
+  [ -n "${MU_CI_META_TOKEN:-}" ] || { echo "   note: MU_CI_META_TOKEN not set: api.github.com/meta stays unauthenticated (H9 fails)"; return 0; }
+  printf 'machine api.github.com\nlogin x-access-token\npassword %s\n' "$MU_CI_META_TOKEN" | sudo sh -c 'umask 077; cat > "$1"' sh "$META_NETRC"
+  printf 'netrc-file = "%s"\n' "$META_NETRC" | sudo sh -c 'umask 077; cat > /root/.curlrc'
+}
 setup() {
   echo "== set-up: the relay replica, the node, the workstation"
+  meta_auth
   local gz="$WORK/chisel.gz" sha
   sha="$(awk -F'"' '/^\[chisel.linux-64\]/ { s = 1 } s && /^sha256/ { print $2; exit }' "$ROOT/toolchain/apps.toml")"
   curl -fsSL -o "$gz" "$(awk -F'"' '/^\[chisel.linux-64\]/ { s = 1 } s && /^url/ { print $2; exit }' "$ROOT/toolchain/apps.toml")"
@@ -781,8 +795,17 @@ h_updates() {   # what unattended-upgrades itself says it would take, on the run
   M="${o:-unattended-upgrade printed no 'Allowed origins' line: $(printf '%s' "$all" | tail -n 3 | tr '\n' ' ')}"
   [ -n "$o" ] && ! printf '%s' "$o" | grep -Eq -- '-updates|-backports|-proposed' && printf '%s' "$o" | grep -q -- '-security'
 }
+h_meta() {   # root's curl (as the host script runs it) is authenticated to api.github.com: limit 1000+ an hour, not 60
+  local h lim used; h="$(sudo curl -sS --max-time 30 -o /dev/null -D - https://api.github.com/meta 2>&1 | tr -d '\r')"
+  lim="$(printf '%s\n' "$h" | sed -n 's/^x-ratelimit-limit: *//Ip' | head -n 1)"; used="$(printf '%s\n' "$h" | sed -n 's/^x-ratelimit-used: *//Ip' | head -n 1)"
+  M="root's curl to api.github.com/meta: $(printf '%s\n' "$h" | head -n 1), x-ratelimit-limit ${lim:-none} (used ${used:-?}); pinned in ~mu/.ssh/known_hosts: $(sudo grep -c '^github.com ssh-ed25519 ' /home/mu/.ssh/known_hosts 2>/dev/null || echo 0)"
+  [ -n "$lim" ] && [ "$lim" -ge 1000 ]
+}
+hf_meta_on() { sudo mv -f /root/.curlrc /root/.curlrc.off 2>/dev/null || true; }
+hf_meta_off() { sudo mv -f /root/.curlrc.off /root/.curlrc 2>/dev/null || true; }
 host_rows() {
   run_row H1 "the host script's status: every check passes (--no-wsl --offline), and it says ready for jobs" h_status
+  run_row H9 "CI: the host script's api.github.com/meta request is authenticated (1000 an hour, not 60), so H1's pin does not depend on a shared runner's address" h_meta
   run_row H2 "install is idempotent: the third run changes nothing" h_idempotent
   run_row H3 "tunnel status: connected; the relay password in no output of the set-up" h_tunnel
   run_row H4 "keys, host-key: the workstation's key under its name, with restrict; the pinned host key is the node's" h_keys
@@ -833,6 +856,7 @@ host_faults() {
   must_fail H1 "something listening on port 22" hf_22_on hf_22_off h_status
   must_fail H1 "the tunnel stopped" hf_tunnel_on hf_tunnel_off h_status
   must_fail H1 "the tunnel's egress filter removed" f_egress_on f_egress_off h_status
+  must_fail H9 "meta-anon (root's curl without the netrc for api.github.com)" hf_meta_on hf_meta_off h_meta
 }
 # last: uninstall, then install again. The node's host key must survive, so the workstation's pin still holds
 h_uninstall() {
@@ -1027,8 +1051,8 @@ qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /d
 qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 H9 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 H9 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 # the scheduler's rows (docs/design/scheduler.md §13): tools/test-jobs/e2e-sched.sh, run by `e2e.sh sched`
 . "$ROOT/tools/test-jobs/e2e-sched.sh"
 . "$ROOT/tools/test-jobs/e2e-dash.sh"

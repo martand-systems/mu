@@ -4,11 +4,19 @@
  "cancel_requested": false,
  "ended_at": "2026-11-14T07:23:20Z",
  "exit_code": 0,
+ "grant": {
+  "class": "normal",
+  "cores": 20,
+  "cpus": "0-19",
+  "mem_bytes": 22000000000,
+  "time_s": 43200
+ },
  "job_id": "20261114-042000-3zv05p",
  "log_size": 224276,
  "name": "frame-fea",
  "note": null,
  "ok": true,
+ "pausable": true,
  "paused_s": 840.0,
  "pauses": [
   {

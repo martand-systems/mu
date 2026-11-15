@@ -32,7 +32,16 @@ on:
       - "tools/test-wsl-disk/**"
       - "tools/test-wsl2-host/**"
       - ".github/workflows/job-layer.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "e2e rows to run, e.g. \"Q35B Q37\" (set-up always runs; empty: every row and fault, and check_ran)"
+        required: false
+        default: ""
+      jobs:
+        description: "which end-to-end jobs to run: e2e sched dash-node (empty: all)"
+        required: false
+        default: ""
 permissions:
   contents: read
 concurrency:
@@ -97,6 +106,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: e2e.sh probe
         run: tools/test-jobs/e2e.sh probe
+        env:
+          MU_CI_META_TOKEN: ${{ github.token }}   # api.github.com/meta authenticated for root's curl only (e2e.sh meta_auth, row H9)
       - name: Summary
         if: always()
         run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
@@ -116,12 +127,16 @@ jobs:
   e2e:
     name: end to end (§16 rows, then each with its fault)
     needs: probe
+    if: inputs.jobs == '' || contains(inputs.jobs, 'e2e')
     runs-on: ubuntu-24.04
     timeout-minutes: 110
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: e2e.sh all
         run: tools/test-jobs/e2e.sh all
+        env:
+          MU_CI_META_TOKEN: ${{ github.token }}   # api.github.com/meta authenticated for root's curl only (e2e.sh meta_auth, row H9)
+          ONLY: ${{ inputs.only }}
       - name: Summary
         if: always()
         run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
@@ -141,12 +156,16 @@ jobs:
   sched:
     name: scheduler end to end (scheduler.md §13 rows, then each with its fault)
     needs: probe
+    if: inputs.jobs == '' || contains(inputs.jobs, 'sched')
     runs-on: ubuntu-24.04
     timeout-minutes: 140
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: e2e.sh sched
         run: tools/test-jobs/e2e.sh sched
+        env:
+          MU_CI_META_TOKEN: ${{ github.token }}   # api.github.com/meta authenticated for root's curl only (e2e.sh meta_auth, row H9)
+          ONLY: ${{ inputs.only }}
       - name: Summary
         if: always()
         run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
@@ -164,12 +183,16 @@ jobs:
   dash-node:
     name: dashboard 1b against a real node (dashboard.md §7.1 D rows, then each with its fault)
     needs: probe
+    if: inputs.jobs == '' || contains(inputs.jobs, 'dash-node')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: e2e.sh dash
         run: tools/test-jobs/e2e.sh dash
+        env:
+          MU_CI_META_TOKEN: ${{ github.token }}   # api.github.com/meta authenticated for root's curl only (e2e.sh meta_auth, row H9)
+          ONLY: ${{ inputs.only }}
       - name: Summary
         if: always()
         run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true

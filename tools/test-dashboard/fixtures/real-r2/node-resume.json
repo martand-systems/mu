@@ -1,0 +1,31 @@
+{
+ "changed": true,
+ "exit": 0,
+ "job_id": "20261114-121500-r7mm2x",
+ "next": "mu queue --json",
+ "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+ "ok": true,
+ "op": "resume",
+ "paused": {
+  "by": "avi-mac",
+  "for_job": null,
+  "held_mem_bytes": 2147483648,
+  "lent_to": [
+   "20261114-143010-b8b8b8"
+  ],
+  "phase": "frozen",
+  "resume_asked": {
+   "at": "2026-11-15T16:11:09Z",
+   "by": "avi-mac"
+  },
+  "resumes_by": "2026-11-15T16:17:19Z",
+  "since": "2026-11-15T16:11:09Z",
+  "until": "2026-11-15T16:26:09Z",
+  "why": "hand"
+ },
+ "resumes_by": "2026-11-15T16:17:19Z",
+ "state": "resuming",
+ "waits_for": [
+  "20261114-143010-b8b8b8"
+ ]
+}

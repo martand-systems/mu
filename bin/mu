@@ -3,8 +3,8 @@
 # Manages versions itself (status, versions, install, update, autoupdate, use, pin, remove, gc) and hands every other command
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
 # The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node, and the scheduler's queue, hold,
-# release, move, priority) and the dashboard always run on the default toolchain.
-MU_DISPATCHER_REV=12   # bump on every change (installers only replace an older dispatcher)
+# release, move, priority, pause, resume) and the dashboard always run on the default toolchain.
+MU_DISPATCHER_REV=13   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -415,6 +415,8 @@ ${B}Compute jobs${N} (always the default version; every command takes --json and
   mu hold|release JOB      keep a queued job in place without starting it / let it go
   mu move JOB --before J|--after J|--front|--back · mu priority JOB urgent|high|normal|low
                            arrange queued jobs; another project's only with --others (when the owner asked)
+  mu pause JOB [--for D] · mu resume JOB [--timeout S]   freeze a running job (its cores lent meanwhile;
+                           at most 2 h, resumes by itself) / thaw it; another project's only with --others
   mu compute update NODE   install the latest release on the node now, beside its running jobs
   mu dashboard [open|on|off]   a local page of jobs, nodes and this Mac's load (read-only; mu dashboard --help)
   Exit codes: 0 ok, 2 usage, 3 version, 4 unreachable, 5 refused, 6 node cannot, 7 job failed, 8 integrity,
@@ -1304,7 +1306,7 @@ case "$cmd" in
   gc)                     cmd_gc "$@" ;;
   autoupdate|auto-update) cmd_autoupdate "$@" ;;
   compute|submit|status|log|fetch|cancel|relay|node|dashboard) infra "$cmd" "$@" ;;
-  queue|hold|release|move|priority) infra "$cmd" "$@" ;;   # the scheduler's queue control (docs/design/scheduler.md §20)
+  queue|hold|release|move|priority|pause|resume) infra "$cmd" "$@" ;;   # the scheduler's queue control (docs/design/scheduler.md §20, §22)
   --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
   *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
 esac
