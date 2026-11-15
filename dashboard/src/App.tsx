@@ -83,7 +83,7 @@ function Dashboard() {
           <JobDetailView key={jobId} id={jobId} />
         ) : (
           <>
-            <MachineCards mac={data.mac} nodes={data.nodes} />
+            <MachineCards mac={data.mac} nodes={data.nodes} jobs={data.jobs} />
             <JobTable jobs={data.jobs} nodes={data.nodes} more={data.more} firstNode={data.nodes[0]?.name ?? null} />
           </>
         )}

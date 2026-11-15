@@ -1,0 +1,48 @@
+{
+ "attempt": 1,
+ "band": "normal",
+ "cancel_requested": false,
+ "class": "normal",
+ "ended_at": null,
+ "ends_by": "2026-11-14T14:28:20Z",
+ "exit_code": null,
+ "grant": {
+  "class": "normal",
+  "cores": 20,
+  "cpus": "0-19",
+  "mem_bytes": 22000000000,
+  "time_s": 21600
+ },
+ "job_id": "20261114-081320-ux90yo",
+ "log_size": 109824,
+ "name": "frame-fea",
+ "note": "paused until 10:03 by avi-mac",
+ "ok": true,
+ "pausable": true,
+ "paused": {
+  "by": "avi-mac",
+  "for_job": null,
+  "held_mem_bytes": 5880000000,
+  "lent_to": [
+   "20261114-094800-lyms3c"
+  ],
+  "phase": "frozen",
+  "resume_asked": null,
+  "resumes_by": null,
+  "since": "2026-11-14T09:48:20Z",
+  "until": "2026-11-14T10:03:20Z",
+  "why": "hand"
+ },
+ "position": null,
+ "project_id": "jatayu-6fbf5aebb090",
+ "queued_at": "2026-11-14T08:13:20Z",
+ "started_at": "2026-11-14T08:23:20Z",
+ "state": "running",
+ "time": {
+  "budget_left_s": 14100,
+  "limit_s": 21600,
+  "paused_s": 300,
+  "run_s": 5100
+ },
+ "unit": "mu-job-20261114-081320-ux90yo.service"
+}

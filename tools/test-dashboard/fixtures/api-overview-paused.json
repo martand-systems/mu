@@ -1,0 +1,709 @@
+{
+ "api": 1,
+ "jobs": [
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "borrowing",
+   "ended_at": null,
+   "ends_by": 1794650310.0,
+   "exit_code": null,
+   "grant": {
+    "borrowed": [
+     {
+      "cpus": "0-3",
+      "from": "20261114-081320-ux90yo",
+      "mem_bytes": 2000000000,
+      "until": 1794650600.0
+     }
+    ],
+    "class": "borrowing",
+    "cores": 4,
+    "cpus": "0-3",
+    "mem_bytes": 2000000000,
+    "time_s": 600
+   },
+   "held": null,
+   "job_id": "20261114-094800-lyms3c",
+   "limits": {
+    "cores": 4,
+    "mem_bytes": 2000000000,
+    "time_s": 600
+   },
+   "live": {
+    "anon": 1523676075,
+    "class": "borrowing",
+    "cpu_cores": 3.78,
+    "file": 2030000000,
+    "grant_cores": 4,
+    "log_size": 5923,
+    "max": 2000000000,
+    "paused": false,
+    "peak": 4097956450,
+    "pids": 44,
+    "shmem": 386666666,
+    "stale": false,
+    "t": 1794649998.2
+   },
+   "log_size": 5923,
+   "mine": true,
+   "name": "sched-probe",
+   "node": "office-pc",
+   "note": null,
+   "pausable": false,
+   "paused": null,
+   "paused_s": null,
+   "place": null,
+   "position": null,
+   "project": "bench",
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": 1794649680.0,
+   "run_s": null,
+   "short": "lyms3c",
+   "stale": false,
+   "started_at": 1794649710.0,
+   "state": "running",
+   "time": {
+    "budget_left_s": 0,
+    "limit_s": 600,
+    "paused_s": 0,
+    "run_s": 290
+   },
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": 1794661700.0,
+   "exit_code": null,
+   "grant": {
+    "borrowed": [],
+    "class": "normal",
+    "cores": 2,
+    "cpus": "0-1",
+    "mem_bytes": 4000000000,
+    "time_s": 14400
+   },
+   "held": null,
+   "job_id": "20261114-084640-v70sqb",
+   "limits": {
+    "cores": 2,
+    "mem_bytes": 4000000000,
+    "time_s": 14400
+   },
+   "live": {
+    "anon": 1178082107,
+    "class": "normal",
+    "cpu_cores": 0.0,
+    "file": 2100000000,
+    "grant_cores": 2,
+    "log_size": 79074,
+    "max": 3751643749,
+    "paused": true,
+    "peak": 3825205391,
+    "pids": 44,
+    "shmem": 400000000,
+    "stale": false,
+    "t": 1794649998.2
+   },
+   "log_size": 79074,
+   "mine": true,
+   "name": "cfd-wing",
+   "node": "office-pc",
+   "note": "paused for lyms3c until 09:58",
+   "pausable": true,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": "20261114-094800-lyms3c",
+    "held_mem_bytes": 720000000,
+    "lent_to": [
+     "20261114-094800-lyms3c"
+    ],
+    "phase": "frozen",
+    "resume_asked": {
+     "at": 1794649940.0,
+     "by": "avi-mac"
+    },
+    "resumes_by": 1794650060.0,
+    "since": 1794648800.0,
+    "until": 1794650300.0,
+    "why": "auto"
+   },
+   "paused_s": null,
+   "place": null,
+   "position": null,
+   "project": "bench",
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": 1794646000.0,
+   "run_s": null,
+   "short": "v70sqb",
+   "stale": false,
+   "started_at": 1794646100.0,
+   "state": "running",
+   "time": {
+    "budget_left_s": 13200,
+    "limit_s": 14400,
+    "paused_s": 1200,
+    "run_s": 2700
+   },
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": "normal",
+   "ended_at": null,
+   "ends_by": 1794666500.0,
+   "exit_code": null,
+   "grant": {
+    "borrowed": [],
+    "class": "normal",
+    "cores": 20,
+    "cpus": "0-19",
+    "mem_bytes": 22000000000,
+    "time_s": 21600
+   },
+   "held": null,
+   "job_id": "20261114-081320-ux90yo",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 21600
+   },
+   "live": {
+    "anon": 9691037010,
+    "class": "normal",
+    "cpu_cores": 0.0,
+    "file": 2100000000,
+    "grant_cores": 20,
+    "log_size": 109824,
+    "max": 12434857750,
+    "paused": true,
+    "peak": 12678678490,
+    "pids": 44,
+    "shmem": 400000000,
+    "stale": false,
+    "t": 1794649998.2
+   },
+   "log_size": 109824,
+   "mine": true,
+   "name": "frame-fea",
+   "node": "office-pc",
+   "note": "paused until 10:03 by avi-mac",
+   "pausable": true,
+   "paused": {
+    "by": "avi-mac",
+    "for_job": null,
+    "held_mem_bytes": 5880000000,
+    "lent_to": [
+     "20261114-094800-lyms3c"
+    ],
+    "phase": "frozen",
+    "resume_asked": null,
+    "resumes_by": null,
+    "since": 1794649700.0,
+    "until": 1794650600.0,
+    "why": "hand"
+   },
+   "paused_s": null,
+   "place": null,
+   "position": null,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794644000.0,
+   "run_s": null,
+   "short": "ux90yo",
+   "stale": false,
+   "started_at": 1794644600.0,
+   "state": "running",
+   "time": {
+    "budget_left_s": 14100,
+    "limit_s": 21600,
+    "paused_s": 300,
+    "run_s": 5100
+   },
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "urgent",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": null,
+   "ends_by": null,
+   "exit_code": null,
+   "grant": null,
+   "held": null,
+   "job_id": "20261114-095140-b0hq9m",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": null,
+   "log_size": 0,
+   "mine": true,
+   "name": "loads-check",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": null,
+   "place": 1,
+   "position": 1,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794649900.0,
+   "run_s": null,
+   "short": "b0hq9m",
+   "stale": false,
+   "started_at": null,
+   "state": "queued",
+   "time": null,
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": null,
+   "ends_by": null,
+   "exit_code": null,
+   "grant": null,
+   "held": {
+    "at": 1794648200.0,
+    "by": "avi-mac"
+   },
+   "job_id": "20261114-092000-r504us",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": null,
+   "log_size": 0,
+   "mine": true,
+   "name": "mesh-study",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": null,
+   "place": 1,
+   "position": null,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794648000.0,
+   "run_s": null,
+   "short": "r504us",
+   "stale": false,
+   "started_at": null,
+   "state": "held",
+   "time": null,
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "low",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": null,
+   "ends_by": null,
+   "exit_code": null,
+   "grant": null,
+   "held": null,
+   "job_id": "20261114-095230-h8eax8",
+   "limits": null,
+   "live": null,
+   "log_size": 0,
+   "mine": false,
+   "name": "sweep-aoa",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": null,
+   "place": 2,
+   "position": 2,
+   "project": null,
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794649950.0,
+   "run_s": null,
+   "short": "h8eax8",
+   "stale": false,
+   "started_at": null,
+   "state": "queued",
+   "time": null,
+   "usage": null
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": 1794644692.0,
+   "ends_by": null,
+   "exit_code": 0,
+   "grant": null,
+   "held": null,
+   "job_id": "20261114-074320-pg20as",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": null,
+   "log_size": 49862,
+   "mine": true,
+   "name": "cfd-cavity",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": 0,
+   "place": null,
+   "position": null,
+   "project": "bench",
+   "project_id": "bench-1b32c28cb38c",
+   "queued_at": 1794642200.0,
+   "run_s": 2472.0,
+   "short": "pg20as",
+   "stale": false,
+   "started_at": 1794642220.0,
+   "state": "succeeded",
+   "time": null,
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 41801.5,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 6899999999,
+    "mem_work_peak_bytes": 6000000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 418.0,
+    "user_s": 41383.5
+   }
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": 1794641000.0,
+   "ends_by": null,
+   "exit_code": 0,
+   "grant": null,
+   "held": null,
+   "job_id": "20261114-042000-3zv05p",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": null,
+   "log_size": 224276,
+   "mine": true,
+   "name": "frame-fea",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": 840.0,
+   "place": null,
+   "position": null,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794630000.0,
+   "run_s": 10140.0,
+   "short": "3zv05p",
+   "stale": false,
+   "started_at": 1794630020.0,
+   "state": "succeeded",
+   "time": null,
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 171467.4,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 11270000000,
+    "mem_work_peak_bytes": 9800000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 1714.7,
+    "user_s": 169752.7
+   }
+  },
+  {
+   "as_of": 1794650000.0,
+   "attempt": 1,
+   "band": "normal",
+   "cancel_requested": false,
+   "class": null,
+   "ended_at": 1794635115.0,
+   "ends_by": null,
+   "exit_code": 3,
+   "grant": null,
+   "held": null,
+   "job_id": "20261114-054320-lwusq5",
+   "limits": {
+    "cores": 20,
+    "mem_bytes": 22000000000,
+    "time_s": 43200
+   },
+   "live": null,
+   "log_size": 2062,
+   "mine": true,
+   "name": "frame-fea",
+   "node": "office-pc",
+   "note": null,
+   "pausable": null,
+   "paused": null,
+   "paused_s": 0,
+   "place": null,
+   "position": null,
+   "project": "jatayu",
+   "project_id": "jatayu-6fbf5aebb090",
+   "queued_at": 1794635000.0,
+   "run_s": 95.0,
+   "short": "lwusq5",
+   "stale": false,
+   "started_at": 1794635020.0,
+   "state": "failed",
+   "time": null,
+   "usage": {
+    "cores_avg": 16.91,
+    "cpu_s": 1606.4,
+    "mem_events": {
+     "max": 0,
+     "oom_kill": 0
+    },
+    "mem_peak_bytes": 6899999999,
+    "mem_work_peak_bytes": 6000000000,
+    "pids_peak": 44,
+    "source": "cgroup",
+    "sys_s": 16.1,
+    "user_s": 1590.3
+   }
+  }
+ ],
+ "mac": {
+  "battery": {
+   "on_battery": false,
+   "percent": 100.0
+  },
+  "cores": {
+   "eff": 4,
+   "logical": 8,
+   "perf": 4,
+   "physical": 8
+  },
+  "cpu_pct": 38.7,
+  "host": "fixture-mac",
+  "load": [
+   2.1,
+   1.9,
+   1.7
+  ],
+  "mem": {
+   "available": 8005542654,
+   "pressure": "ok",
+   "total": 17179869184,
+   "used": 9174326530
+  },
+  "mu_version": "v2026.11.9",
+  "name": "This Mac",
+  "per_core": [
+   24.0,
+   41.4,
+   46.2,
+   24.7,
+   28.9,
+   50.4,
+   48.6,
+   44.2
+  ],
+  "sampler": "fake",
+  "series": {
+   "cpu_pct": [
+    [
+     1794650002.0,
+     38.7
+    ]
+   ],
+   "mem_used": [
+    [
+     1794650002.0,
+     9174326530
+    ]
+   ]
+  },
+  "stale": false,
+  "t": 1794650002.0
+ },
+ "more": {
+  "office-pc": false
+ },
+ "nodes": [
+  {
+   "attention": [],
+   "error": null,
+   "features": [
+    "sched",
+    "usage",
+    "queue-control",
+    "update",
+    "stats",
+    "watch",
+    "metrics",
+    "pause"
+   ],
+   "hello": {
+    "autoupdate": {
+     "enabled": true,
+     "last_result": "ok"
+    },
+    "clock_offset_s": 0.0,
+    "cores_logical": 32,
+    "cores_physical": 16,
+    "cpu_model": "AMD Ryzen 9 7950X 16-Core Processor",
+    "disk": {
+     "free_gb": 89,
+     "min_free_gb": 20
+    },
+    "kernel": "6.6.87.2-microsoft-standard-WSL2",
+    "key": "avi-mac",
+    "last_stop": "clean",
+    "mem_total": 25769803776,
+    "mu_installed": [
+     "v2026.11.8",
+     "v2026.11.9"
+    ],
+    "mu_version": "v2026.11.9",
+    "protocol": 1,
+    "queue": {
+     "queued": 2,
+     "running": 3
+    },
+    "runner": "active",
+    "t": 1794650000.0,
+    "wsl": true
+   },
+   "jobs_listed": 9,
+   "link": "relay",
+   "list_stale": false,
+   "list_t": 1794650000.0,
+   "more": false,
+   "name": "office-pc",
+   "offline_since": null,
+   "old_node": false,
+   "old_node_text": null,
+   "reconnecting": false,
+   "series": {
+    "cpu_pct": [
+     [
+      1794649998.2,
+      77.3
+     ]
+    ]
+   },
+   "state": "online",
+   "stats": {
+    "cpu_pct": 77.3,
+    "disk": {
+     "free_gb": 89,
+     "min_free_gb": 20
+    },
+    "load": [
+     24.1,
+     23.6,
+     19.8
+    ],
+    "mem": {
+     "avail": 4760341918,
+     "cached": 2100000000,
+     "shmem": 400000000,
+     "total": 25769803776,
+     "used": 21009461858
+    },
+    "node_stale": false,
+    "per_core": [
+     79,
+     77,
+     76,
+     81,
+     81,
+     79,
+     81,
+     81,
+     72,
+     76,
+     75,
+     72,
+     74,
+     73,
+     76,
+     72,
+     81,
+     78,
+     76,
+     73,
+     78,
+     77,
+     78,
+     72,
+     77,
+     77,
+     78,
+     81,
+     74,
+     77,
+     78,
+     81
+    ],
+    "psi": {
+     "cpu_some10": 41.2,
+     "mem_some10": 0.0
+    },
+    "queue": {
+     "express": 0,
+     "held": 1,
+     "paused": 2,
+     "queued": 2,
+     "running": 3
+    },
+    "stale": false,
+    "t": 1794649998.2,
+    "uptime_s": 86400
+   }
+  }
+ ],
+ "now": 1794650002.0,
+ "ok": true,
+ "summary": {
+  "held": 1,
+  "nodes": 1,
+  "online": 1,
+  "paused": 2,
+  "queued": 2,
+  "running": 3
+ }
+}

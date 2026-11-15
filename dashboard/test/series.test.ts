@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MetricSample } from "../src/api/types";
 import { resourceColumns, sparkPath, stepOf, thin, withGaps } from "../src/lib/series";
 
-const sample = (t: number): MetricSample => ({ t, cpu: 2, anon: 1e9, file: 1e8, shmem: 0, cur: 1e9, peak: 1e9, max: 8e9, pids: 4, psi_mem: 0 });
+const sample = (t: number): MetricSample => ({ t, cpu: 2, anon: 1e9, file: 1e8, shmem: 0, cur: 1e9, peak: 1e9, max: 8e9, pids: 4, psi_mem: 0, paused: false });
 
 describe("D37: gaps", () => {
   it("a 30 s hole in 5 s samples gets a null break", () => {

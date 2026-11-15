@@ -1,0 +1,116 @@
+{
+ "age_s": 1.8,
+ "host": {
+  "cpu_pct": 77.3,
+  "disk": {
+   "free_gb": 89,
+   "min_free_gb": 20
+  },
+  "load": [
+   24.1,
+   23.6,
+   19.8
+  ],
+  "mem": {
+   "avail": 4760341918,
+   "cached": 2100000000,
+   "shmem": 400000000,
+   "total": 25769803776
+  },
+  "per_core": [
+   79,
+   77,
+   76,
+   81,
+   81,
+   79,
+   81,
+   81,
+   72,
+   76,
+   75,
+   72,
+   74,
+   73,
+   76,
+   72,
+   81,
+   78,
+   76,
+   73,
+   78,
+   77,
+   78,
+   72,
+   77,
+   77,
+   78,
+   81,
+   74,
+   77,
+   78,
+   81
+  ],
+  "psi": {
+   "cpu_some10": 41.2,
+   "mem_some10": 0.0
+  },
+  "uptime_s": 86400
+ },
+ "node": "office-pc",
+ "ok": true,
+ "queue": {
+  "express": 0,
+  "held": 1,
+  "paused": 2,
+  "queued": 2,
+  "running": 3
+ },
+ "rev": 23,
+ "running": [
+  {
+   "anon": 9691037010,
+   "class": "normal",
+   "cpu_cores": 0.0,
+   "file": 2100000000,
+   "grant_cores": 20,
+   "job_id": "20261114-081320-ux90yo",
+   "log_size": 109824,
+   "max": 12434857750,
+   "paused": true,
+   "peak": 12678678490,
+   "pids": 44,
+   "shmem": 400000000
+  },
+  {
+   "anon": 1523676075,
+   "class": "borrowing",
+   "cpu_cores": 3.78,
+   "file": 2030000000,
+   "grant_cores": 4,
+   "job_id": "20261114-094800-lyms3c",
+   "log_size": 5923,
+   "max": 2000000000,
+   "paused": false,
+   "peak": 4097956450,
+   "pids": 44,
+   "shmem": 386666666
+  },
+  {
+   "anon": 1178082107,
+   "class": "normal",
+   "cpu_cores": 0.0,
+   "file": 2100000000,
+   "grant_cores": 2,
+   "job_id": "20261114-084640-v70sqb",
+   "log_size": 79074,
+   "max": 3751643749,
+   "paused": true,
+   "peak": 3825205391,
+   "pids": 44,
+   "shmem": 400000000
+  }
+ ],
+ "stale": false,
+ "t": 1794649998.2
+}

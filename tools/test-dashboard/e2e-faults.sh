@@ -71,6 +71,14 @@ vitest_must_fail() {   # vitest_must_fail FAULT FILE [ENV=VALUE]: the Vitest fil
   else bad "must-fail: $file with the fault $f: nothing failed (exit $rc)" "$out"; fi
 }
 
+vitest_must_fail_on() {   # vitest_must_fail_on FAULT FILE TEST: that test (by its name) must be among the failures
+  local f="$1" file="$2" name="$3" out rc
+  case "$f$file" in *"$FILTER"*) ;; *) return 0 ;; esac
+  out="$(cd "$DASH" && NO_COLOR=1 FORCE_COLOR=0 MU_DASH_FAULT="$f" npx --no-install vitest run "$file" 2>&1 | nocolor)"; rc=$?
+  if [ "$rc" != 0 ] && printf '%s\n' "$out" | grep -F "FAIL " | grep -qF -- "$name"; then ok "must-fail: $file fails on \"$name\" with the fault $f"
+  else bad "must-fail: $file with the fault $f: \"$name\" did not fail (exit $rc)" "$out"; fi
+}
+
 if [ "${FRONT:-0}" = 1 ]; then
   echo "Vitest must-fails"
   [ "$(uname -s)" = Darwin ] && [ -z "${CI:-}" ] && { echo "run FRONT=1 in CI (npm runs on the Mac only through tools/dashboard-npm)"; exit 2; }
@@ -80,6 +88,10 @@ if [ "${FRONT:-0}" = 1 ]; then
   vitest_must_fail mac-swap-mem test/components.test.tsx               # D08's card part
   vitest_must_fail refused-as-offline test/components.test.tsx         # D18's card part
   vitest_must_fail keep-fragment test/token.test.ts                    # D15's unit part
+  # phase 1b: scheduler release 2 on the page (D48's decoder part, D49), each on the test it targets
+  vitest_must_fail_on paused-as-running test/r2.test.ts "a frozen lender is 'paused'"
+  vitest_must_fail_on count-paused-in-run test/r2.test.ts "the time bar counts run time"
+  vitest_must_fail_on paused-cpu-zero test/r2.test.ts "paused samples break the cores series"
   # D38: the server's rename-field fault, through fixtures the faulty server emits
   fx="$WORK/fixtures-rename-field"; mkdir -p "$fx"
   if MU_JOBS_FAULT=rename-field python3 -I -S "$REPO/src/mu/dashfake.py" fixtures "$fx" > /dev/null 2>&1; then
@@ -91,6 +103,9 @@ else
   echo "Playwright must-fails"
   V="CSP or Trusted Types violations (D29)"
   must_fail D04 chromium "D04: the card says the node is behind this Mac"  page=assume-features
+  must_fail D04b chromium "D04b: the r1 node's card asks for an update"     server=features-any
+  must_fail D48 chromium "D48: the frozen lender shows paused, not running" page=paused-as-running
+  must_fail D48 webkit   "D48: the frozen lender shows paused, not running" page=paused-as-running
   must_fail D39 chromium "D39: running within 20 s"                         env=MU_DASH_OLD_STEP=60
   must_fail D05 chromium "D05: lab-pc's jobs are listed under lab-pc"       server=node-from-config
   must_fail D06 chromium "D06: the card shows the node's memory"            server=swap-mem-fields

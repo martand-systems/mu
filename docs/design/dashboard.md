@@ -1221,6 +1221,78 @@ allow access to the relay credential).
 **Release:** merge `dashboard-1a` into `main` and tag; only the Mac needs the release (no node change); after updating,
 `mu dashboard on` once.
 
+### 7.1.2 Phase 1b as built (branch `dashboard-1b`, 2026-11-15)
+
+Built in parallel with scheduler release 2 (`scheduler-r2`) under one integration contract; this section records what
+1b built and where it departs from §4.2–§4.3 and §7.1. Neither branch releases; the integrator merges `scheduler-r2`
+first, then this branch.
+
+**In plain words.** The node now says how busy it and each running job are, every 5 s, and keeps each job's whole run
+as a series. The page shows those figures live and draws the run's chart. A node that has not updated yet (v2026.11.10)
+is recognised by name and read as before, with no refused calls. The page also already shows release 2's paused,
+resuming, held and borrowing jobs, built against fixtures, since no node pauses jobs yet.
+
+**Node.** `src/mu/nodestats.py` holds 1b's node side; `node.py` changed only at the contract's anchors (B1–B9):
+- The runner's existing 5 s sampler (release 1's) is extended, not duplicated (contract §9 item 3). It reads only the
+  jobs the last runner pass saw running (`nodestats.LAST_RUNNING`), never every job folder (item 11), never under the
+  queue lock. Per running job it rewrites `usage.json` (still the running-maximum store; it survives a runner restart,
+  so the spec's "rebuild maxima from `metrics.jsonl`" step is dropped) and appends one `metrics.jsonl` line, with
+  `"paused": 1` while `state.json`'s `pause.phase` is freezing, frozen or thawing. Once per pass it writes
+  `metrics/now.json` (host sample, running jobs with `grant_cores`, `class`, `paused`, the queue counts with `held`,
+  `paused`, `express`, and the pass's own cost `sample_ms`).
+- The state rev (`metrics/rev`, item 4): `note_pass(jobs)` in `step()` fingerprints every unfinished job and each result
+  of the last 10 minutes (state, attempt, band, held, pause phase, resume asked, grant class) plus the order's rev, and
+  bumps the rev when it changes. `list`, `stats` and every `watch` line read it at answer time. `queue.rev` keeps its
+  order meaning.
+- Verbs: `stats`, `watch interval=2..60 [max=]` (sends a line when `now.json`'s `t` or the rev changes, and at least
+  every 15 s; ends at `max`, cap 600 s, or when the client is gone), `metrics id= offset= [max=]` (the same byte reader
+  as `log`). `stats` and `metrics` journal only refusals and errors; `watch` journals its open and its close.
+- `cores_avg = cpu_s / run time` (paused time left out, item 6), in both shim- and runner-written results.
+- `hello.features` gains `stats`, `watch`, `metrics`; release 2 appends `pause`.
+
+**Mac.** Features are gated by name (item 1, the live bug of v2026.11.10's dashboard: it took any feature list for a
+live node and opened `watch` against a node that refuses it). `watch` and `metrics` are used with real nodes that name
+them; a repeated watch sample adds no point. Rows carry the scheduler's fields (`band`, `held`, `place`, `class`,
+`grant` with `borrowed`, `ends_by`, and release 2's `pausable`, `paused`, `time`, `run_s`, `paused_s`).
+`mu compute status --json` adds `stats` (D21); `mu fetch` marks `fetched` in `jobs.index`.
+
+**Page.** The `held` state; `paused` and `resuming` as display states of a running job (grey, never orange); band chips
+(outlined, monochrome, `normal` unmarked); the wording and copy commands of the contract (`mu resume`, `mu release`,
+`mu move --front`); the time bar by run time ("1h25m run of 6h · 5m paused (not counted)"); paused samples break the
+cores series and are hatched, the memory limit line follows `memory.max`; the node card's "17.8 / 20 granted" and
+"keeps 5.5 GB (paused)" lines and its paused and held counts. Not in 1b: lent and borrowed spans on the node bars and a
+job's history of holds, moves and pauses (phase 2: they need `queue` and `events`; item 14).
+
+**Tests.** Node side, unit (`tools/test-jobs/unit_stats.py`, in `run.sh`): the rev and its fingerprint, the host sample
+from canned `/proc` files, `job_line` with the paused flag, the quiet journal and the watch cap, the sampler reading
+only `LAST_RUNNING` and never taking the lock, run time and `cores_avg`, `stats` with 2,000 job folders; each check
+with its fault and a tagged must-fail. Real node (`e2e.sh dash`, CI job `dash-node`): D01–D03, D09–D11, D21, D25, D40,
+and D05–D07 with the server's real `NodeReader` (`tools/test-jobs/dash_real.py`), each with its fault; D40P reports
+SKIP here (no `pause`); on a node with `pause` it becomes an expected row that must PASS, with its fault
+`rename-field-node-paused` an expected must-fail. Mac: Python sections `phase1b` (D04b, release 2's rows) and
+`compute-status` (D21, the fetched mark); Vitest `r2.test.ts` (D48's decoder part, D49); Playwright D04b and D48
+(Chromium and WebKit, axe), each with its fault on its own assertion. D09's budget is 5 ms + 3 ms per running job
+(item 8); "the loop stays at 1 s" is measured as samples 5 s apart. D25 is measured over 2 minutes, not 10, and holds
+the 2 % budget for what the tab adds: the same 2 minutes are measured first without the tab. μ's processes include
+release 1's runner, which passes every second with or without a tab; in all they used 2.90 CPU-s in 120 s with the tab
+in the first CI run, over the 2.4 CPU-s budget. The second measured 2.23 CPU-s without the tab and 0.04 more with it. D03 also
+requires `stats` with 2,000 job folders to be within 5 ms of `stats` without them: CI's runner scanned 2,000 folders
+in 62 ms, inside the 100 ms budget, so the budget alone did not catch the fault `stats-scan`. D07 against
+the real node stops the runner (the figures go stale) rather than cutting the link.
+
+**dash-probe on office-pc** (2026-11-15, job `20261115-122354-g4qd2c`, `--quick` beside JATAYU's 20-core job, since
+`--cores 2 --mem 2G` did not fit): WSL kernel 6.18.58.1; `/proc/pressure/{cpu,memory,io}` present (PSI on);
+`/proc/<pid>/io` readable as `mu`; the job's cgroup has `memory.peak`, `pids.peak` and `memory.pressure`. A transient
+unit OOM-killed at `MemoryMax=128M`: its cgroup directory is gone at once, `MemoryPeak` and `MemoryCurrent` are not
+set (systemd 255), `CPUUsageNSec` survives (147 ms) and `Result=oom-kill`. So the runner-sampled path stays for
+runner-written results (`CPUUsageNSec` could later give their `cpu_s` exactly). One sampler pass's file reads over the
+job's own cgroup and the host files: median 0.09 ms, p90 0.2 ms, max 4.7 ms (busy machine). The probe's unit was
+stopped and reset; no unit was left.
+
+**Untested here:** the real office PC with this code (it needs a release); real Safari; the page against a real paused
+job before the merge (fixtures only, D40P after it); D25 over 10 minutes and with 20 single-core jobs; a `watch` session
+outliving its installed version (item 18, a known limit).
+
 ### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 
 **Scope.**

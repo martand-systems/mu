@@ -1,6 +1,7 @@
 """μ dashboard: the local server, its API, the Mac's sampler and the `mu dashboard` commands (docs/design/dashboard.md
-§4.3, §4.4, §4.6, §4.8). Phase 1a: no node-side change; a node without `features` is read with `hello`, `list`,
-`status` and `log` on the old-node budget of §4.3.
+§4.3, §4.4, §4.6, §4.8). A node is read by the features its hello names (phase 1b): `stats`, `watch` and `metrics`
+each switch on their own part; a node without `stats` (v2026.11.10 and older) is read with `hello`, `list`, `status`
+and `log` on the old-node budget of §4.3.
 
     mu dashboard [status] [--json]    is it running, on which port (the URL never carries the token)
     mu dashboard open [JOB] [--json]  start it if needed, then open the browser (at JOB) through a 0600 redirect file
@@ -29,6 +30,11 @@ Test hooks: MU_LAUNCHCTL, MU_LAUNCH_AGENTS_DIR, MU_OPENER (the program that open
   fault-guard-off     a real serve takes the unsafe faults     open-passes-faults  `open` hands MU_JOBS_FAULT to its server
   open-trusts-port    `open` trusts whatever answers the port no-trusted-types    the CSP without require-trusted-types-for
   list-age-only       a row's as_of is the list's time, even while the node's rev says nothing changed
+ phase 1b (§7.1.2):
+  features-any        any non-empty hello.features counts as a node with stats, watch and metrics (D04b)
+  poll-stats-1s       a node with stats is polled with `stats` every second instead of one `watch` (D25)
+  mac-samples-only    the whole-run chart is never read from the node's metrics.jsonl (D09: gaps while away)
+  drop-sched-fields   rows lack the scheduler's fields (band, held, paused, time, run_s, ...)
 A real (non-dev) `serve` refuses to start with any fault that weakens its security (UNSAFE_FAULTS); open-url-argv
 works only with MU_OPENER (a test's stub opener).
 """
@@ -76,6 +82,9 @@ HELLO_STEP = 600.0
 RECENT_SUBMIT_S = 120.0
 BACKOFF = (5.0, 10.0, 20.0, 60.0)
 LIST_LIMIT = 100
+CLASSES = ("normal", "express", "borrowing")          # grant.class (scheduler release 1, and 2's borrowers)
+BANDS = ("urgent", "high", "normal", "low")
+PAUSE_PHASES = ("freezing", "frozen", "thawing")
 LABEL = "systems.martand.mu.dashboard"
 PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -472,7 +481,17 @@ class NodeWorker:
         self.stats_rev, self.list_rev = None, None
         self.last_w = self.last_m = None
         self.watch_stop, self.watch_thread = None, None
+        self.last_poll_m = -1e9
+        self.last_stats_nt = None
         self.wake = threading.Event()
+
+    def has(self, feature):
+        """Does the node's hello name FEATURE (stats, watch, metrics)? Gated by name: v2026.11.10's node sends
+        `sched usage queue-control update` and has none of the three (contract §9 item 1)."""
+        f = self.features
+        if fault("features-any"):
+            return bool(f)
+        return bool(f) and feature in f
 
     # ---------------------------------------------------------------- the plan
     def unfinished(self):
@@ -484,9 +503,9 @@ class NodeWorker:
         recent = self.app.index.recent(self.name, RECENT_SUBMIT_S)
         busy = self.unfinished() or recent
         if visible:
-            if fault("poll-list-2s") and not self.features:
+            if fault("poll-list-2s") and not self.has("stats"):
                 return True, 2.0
-            if self.features:
+            if self.has("watch"):
                 return True, FEATURE_BACKSTOP
             return True, (self.app.old_step if busy else OLD_IDLE_STEP)
         if busy:
@@ -521,13 +540,19 @@ class NodeWorker:
             return
         # the step shrinks when the node turns busy or a tab opens: the next list comes at most one step after the last
         self.next_list = min(self.next_list, self.last_list_m + step)
-        if self.features and self.app.visible():
+        if fault("poll-stats-1s") and self.has("stats") and self.app.visible():
+            if self.clock.mono() - self.last_poll_m >= 1.0:
+                self.last_poll_m = self.clock.mono()
+                ans = self._call("stats")
+                if ans is not None:
+                    self.on_stats(ans)
+        elif self.has("watch") and self.app.visible():
             self.ensure_watch()
         else:
             self.stop_watch()
         now_m = self.clock.mono()
         due = now_m >= self.next_list
-        if self.features and self.stats_rev is not None and self.stats_rev != self.list_rev and \
+        if self.has("stats") and self.stats_rev is not None and self.stats_rev != self.list_rev and \
                 now_m - self.last_list_m >= 5.0:
             due = True
         if due:
@@ -590,7 +615,7 @@ class NodeWorker:
             pass
         if not self.do_hello():
             return False
-        if self.features and "stats" in self.features:
+        if self.has("stats"):
             ans = self._call("stats")
             if ans is None and self.state != "online":
                 return False
@@ -655,9 +680,12 @@ class NodeWorker:
         age = num(ans.get("age_s"), 0, 1e7) or 0.0
         t = self.clock.wall() - age
         host = ans.get("host") if isinstance(ans.get("host"), dict) else {}
+        nt = num(ans.get("t"), 0, 4e9)
         with self.lock:
             self.stats, self.stats_t = ans, t
-            self.series.append((round(t, 1), num(host.get("cpu_pct"), 0, 100)))
+            if nt is None or nt != self.last_stats_nt:   # a watch line repeats a sample when only the rev moved
+                self.series.append((round(t, 1), num(host.get("cpu_pct"), 0, 100)))
+            self.last_stats_nt = nt
             if isinstance(ans.get("rev"), int):
                 self.stats_rev = ans["rev"]
                 if self.list_rev is not None and self.stats_rev != self.list_rev:
@@ -719,20 +747,23 @@ class NodeWorker:
                                     "anon": num(r.get("anon"), 0), "file": num(r.get("file"), 0),
                                     "shmem": num(r.get("shmem"), 0), "peak": num(r.get("peak"), 0),
                                     "max": num(r.get("max"), 0), "pids": num(r.get("pids"), 0),
-                                    "log_size": num(r.get("log_size"), 0)}
+                                    "log_size": num(r.get("log_size"), 0),
+                                    "grant_cores": num(r.get("grant_cores"), 0, 4096),
+                                    "class": r.get("class") if r.get("class") in CLASSES else None,
+                                    "paused": r.get("paused") is True}
         return out
 
     def list_current_t(self):
         """(under self.lock) When the job list was last known to be current: the list's own time, or, on a node with
         features, the time of the latest stats whose rev equals the list's (nothing changed since the list)."""
         t = self.list_t
-        if t is not None and not fault("list-age-only") and self.features and self.stats_t is not None and \
+        if t is not None and not fault("list-age-only") and self.has("stats") and self.stats_t is not None and \
                 self.stats_rev is not None and self.stats_rev == self.list_rev and self.stats_t > t:
             return self.stats_t
         return t
 
     def list_stale_after(self):
-        return STALE_S if self.features else max(STALE_S, 2 * self.app.old_step + 5)
+        return STALE_S if self.has("watch") else max(STALE_S, 2 * self.app.old_step + 5)
 
     def card(self, series_s=CARD_SERIES_S):
         now = self.clock.wall()
@@ -742,7 +773,7 @@ class NodeWorker:
             state, err, since = self.state, self.error, self.offline_since
             feats, more, list_t, njobs = self.features, self.more, self.list_current_t(), len(self.jobs)
             reconnecting = self.reconnecting
-        old = h is not None and not feats
+        old = h is not None and not self.has("stats")
         hello = None
         attention = []
         if h:
@@ -804,7 +835,9 @@ class NodeWorker:
                              "mem_some10": num(psi.get("mem_some10"), 0, 100)},
                      "disk": {"free_gb": num(dk.get("free_gb"), 0), "min_free_gb": num(dk.get("min_free_gb"), 0)},
                      "uptime_s": num(hs.get("uptime_s"), 0),
-                     "queue": {"running": num(q.get("running"), 0), "queued": num(q.get("queued"), 0)},
+                     "queue": {"running": num(q.get("running"), 0), "queued": num(q.get("queued"), 0),
+                               "held": num(q.get("held"), 0), "paused": num(q.get("paused"), 0),
+                               "express": num(q.get("express"), 0)},
                      "node_stale": bool(st.get("stale"))}
         return {"name": self.name, "link": "relay", "state": state, "reconnecting": reconnecting,
                 "features": list(feats) if feats else [], "old_node": old,
@@ -938,8 +971,9 @@ class App:
             out = [r for r in out if r["node"] == node]
         if mine is not None:
             out = [r for r in out if r["mine"] == mine]
-        order = {"running": 0, "queued": 1}
-        out.sort(key=lambda r: (order.get(r["state"], 2), r["position"] or 0 if r["state"] == "queued" else 0,
+        order = {"running": 0, "queued": 1, "held": 1}
+        out.sort(key=lambda r: (order.get(r["state"], 2), (r["position"] or r["place"] or 0)
+                                if r["state"] in ("queued", "held") else 0,
                                 -(r["ended_at"] or r["started_at"] or r["queued_at"] or 0)))
         return out
 
@@ -961,7 +995,8 @@ class App:
                      "mem_events": {"max": num(ev.get("max"), 0), "oom_kill": num(ev.get("oom_kill"), 0)},
                      "source": u.get("source") if u.get("source") in ("cgroup", "runner-sampled") else None}
         node = names[0] if fault("node-from-config") and names else w.name
-        return {"job_id": jid, "short": jid[-6:], "node": node, "name": text(s.get("name"), 200),
+        extra = self.row_sched(w, {} if fault("drop-sched-fields") else s, st)
+        return {**extra, "job_id": jid, "short": jid[-6:], "node": node, "name": text(s.get("name"), 200),
                 "project": text((idx or {}).get("project"), 80), "project_id": text(s.get("project_id"), 80),
                 "mine": bool(idx), "state": st, "position": num(s.get("position"), 0),
                 "attempt": num(s.get("attempt"), 0), "queued_at": w.node_epoch(s.get("queued_at")),
@@ -974,6 +1009,44 @@ class App:
                                                     "cores": num(lim.get("cores"), 0)},
                 "as_of": rnd(list_t, 1), "stale": list_t is None or now - list_t > w.list_stale_after()}
 
+    def row_sched(self, w, s, st):
+        """The scheduler's fields of a row (release 1's band, held, place, grant; release 2's paused, time, run_s,
+        paused_s; contract §3.1). Absent on an older node: null."""
+        def who(x):
+            return {"by": text(x.get("by"), 64), "at": w.node_epoch(x.get("at"))} if isinstance(x, dict) else None
+        g = s.get("grant") if isinstance(s.get("grant"), dict) else None
+        grant = None
+        if g:
+            bor = []
+            for b in g.get("borrowed", [])[:16] if isinstance(g.get("borrowed"), list) else []:
+                if isinstance(b, dict):
+                    bor.append({"from": text(b.get("from"), 40), "cpus": text(b.get("cpus"), 200),
+                                "mem_bytes": num(b.get("mem_bytes"), 0), "until": w.node_epoch(b.get("until"))})
+            grant = {"cores": num(g.get("cores"), 0, 4096), "cpus": text(g.get("cpus"), 200),
+                     "mem_bytes": num(g.get("mem_bytes"), 0), "time_s": num(g.get("time_s"), 0),
+                     "class": g.get("class") if g.get("class") in CLASSES else None, "borrowed": bor}
+        pz = s.get("paused") if isinstance(s.get("paused"), dict) and st == "running" else None
+        paused = None
+        if pz:
+            paused = {"phase": pz.get("phase") if pz.get("phase") in PAUSE_PHASES else None,
+                      "since": w.node_epoch(pz.get("since")), "until": w.node_epoch(pz.get("until")),
+                      "by": text(pz.get("by"), 64), "why": pz.get("why") if pz.get("why") in ("hand", "auto") else None,
+                      "for_job": text(pz.get("for_job"), 40), "held_mem_bytes": num(pz.get("held_mem_bytes"), 0),
+                      "lent_to": [text(x, 40) for x in pz.get("lent_to", [])[:16]]
+                      if isinstance(pz.get("lent_to"), list) else [],
+                      "resume_asked": who(pz.get("resume_asked")), "resumes_by": w.node_epoch(pz.get("resumes_by"))}
+        tm = s.get("time") if isinstance(s.get("time"), dict) and st == "running" else None
+        held = s.get("held") if st == "held" else None
+        return {"band": s.get("band") if s.get("band") in BANDS else None,
+                "held": who(held), "place": num(s.get("place"), 0),
+                "class": (s.get("class") if s.get("class") in CLASSES else None) or (grant or {}).get("class"),
+                "grant": grant, "ends_by": w.node_epoch(s.get("ends_by")),
+                "pausable": s.get("pausable") if isinstance(s.get("pausable"), bool) else None,
+                "paused": paused,
+                "time": None if tm is None else {k: num(tm.get(k), 0) for k in
+                                                 ("limit_s", "run_s", "paused_s", "budget_left_s")},
+                "run_s": num(s.get("run_s"), 0), "paused_s": num(s.get("paused_s"), 0)}
+
     def find(self, job_id):
         for w in self.workers.values():
             with w.lock:
@@ -985,7 +1058,8 @@ class App:
         on = " --on %s" % node if len(self.workers) > 1 else ""
         return {"status": "mu status %s%s" % (job_id, on), "log": "mu log %s -f%s" % (job_id, on),
                 "fetch": "mu fetch %s%s" % (job_id, on), "cancel": "mu cancel %s%s" % (job_id, on),
-                "node": "mu compute status %s" % node}
+                "node": "mu compute status %s" % node, "resume": "mu resume %s%s" % (job_id, on),
+                "release": "mu release %s%s" % (job_id, on), "front": "mu move %s --front%s" % (job_id, on)}
 
     # ---------------------------------------------------------------- API answers
     def api_session(self):
@@ -1003,7 +1077,9 @@ class App:
                 "more": {n["name"]: n["more"] for n in nodes},
                 "summary": {"nodes": len(nodes), "online": online,
                             "running": sum(1 for r in rows if r["state"] == "running"),
-                            "queued": sum(1 for r in rows if r["state"] == "queued")}}
+                            "queued": sum(1 for r in rows if r["state"] == "queued"),
+                            "held": sum(1 for r in rows if r["state"] == "held"),
+                            "paused": sum(1 for r in rows if r["paused"] is not None)}}
 
     def api_jobs(self, query):
         node = query.get("node")
@@ -1067,10 +1143,9 @@ class App:
         index = None if not idx else {"key": text(idx.get("key"), 64),
                                       "submit_started": iso_epoch(idx.get("submit_started")),
                                       "accepted": iso_epoch(idx.get("accepted")), "fetched": iso_epoch(idx.get("fetched"))}
-        feats = w.features or []
         return {"now": rnd(now, 3), "job": row, "record": record, "run": runo, "index": index,
-                "node": {"name": w.name, "state": w.state, "old_node": w.hello is not None and not feats,
-                         "metrics": "metrics" in feats},
+                "node": {"name": w.name, "state": w.state, "old_node": w.hello is not None and not w.has("stats"),
+                         "metrics": w.has("metrics")},
                 "commands": self.commands(job_id, w.name)}
 
     def logbuf(self, w, job_id, size_hint):
@@ -1111,11 +1186,10 @@ class App:
         w, s = self.find(job_id)
         if w is None:
             raise ApiError(404, "no-such-job", "no node listed this job")
-        feats = w.features or []
         lim = (self.row(w, s, None, None, self.clock.wall(), [w.name]).get("limits") or {})
         base = {"job_id": job_id, "limit_mem": lim.get("mem_bytes"), "limit_cores": lim.get("cores"),
                 "t": rnd(self.clock.wall(), 3)}
-        if "metrics" not in feats:
+        if not w.has("metrics"):
             base.update(available=False, reason="old-node" if w.hello is not None else "unknown", samples=[],
                         complete=False)
             return base
@@ -1128,7 +1202,9 @@ class App:
                 m = self.metrics[job_id] = {"offset": 0, "samples": [], "at": -1e9}
         now_m = self.clock.mono()
         running = s.get("state") == "running"
-        if now_m - m["at"] > 30.0 or (not running and m["at"] < 0):
+        if fault("mac-samples-only"):     # D09's fault: the node's metrics.jsonl is never read (gaps while away)
+            m["at"] = now_m
+        elif now_m - m["at"] > 30.0 or (not running and m["at"] < 0):
             m["at"] = now_m                                   # failures wait 30 s too
             got = bytearray()
 
@@ -1156,7 +1232,8 @@ class App:
                                      "anon": num(d.get("anon"), 0), "file": num(d.get("file"), 0),
                                      "shmem": num(d.get("shmem"), 0), "cur": num(d.get("cur"), 0),
                                      "peak": num(d.get("peak"), 0), "max": num(d.get("max"), 0),
-                                     "pids": num(d.get("pids"), 0), "psi_mem": num(d.get("psi_mem"), 0, 100)})
+                                     "pids": num(d.get("pids"), 0), "psi_mem": num(d.get("psi_mem"), 0, 100),
+                                     "paused": d.get("paused") == 1})
             del m["samples"][:-20000]
         base.update(available=True, reason=None, samples=list(m["samples"]), complete=not running)
         return base
@@ -1932,9 +2009,17 @@ def api_fixtures():
         p.update({"job_id": fin, "following": False, "eof": True, "error": None, "t": rnd(app.clock.wall(), 3)})
         out["api-job-log.json"] = wrap(p)
         for scen, key in (("old-node", "api-overview-old-node.json"), ("offline", "api-overview-offline.json"),
-                          ("refused", "api-overview-refused.json")):
+                          ("refused", "api-overview-refused.json"), ("r1-node", "api-overview-r1-node.json")):
             a2, _ = make(scen)
             out[key] = wrap(a2.api_overview())
+        # scheduler release 2's page (contract §6): the paused scenario's overview, the paused lender's detail and
+        # its whole-run samples (with the frozen span)
+        a3, _ = make("paused")
+        n3 = a3.workers["office-pc"]
+        lender = [j for j, s in n3.jobs.items() if isinstance(s.get("paused"), dict) and s["paused"].get("lent_to")][0]
+        out["api-overview-paused.json"] = wrap(a3.api_overview())
+        out["api-job-paused.json"] = wrap(a3.api_job(lender))
+        out["api-job-metrics-paused.json"] = wrap(a3.api_metrics(lender))
         out["api-error-401.json"] = {"api": API, "ok": False, "error": "token", "message": "this page has no current "
                                      "token: run  mu dashboard open  in a terminal (or ask Claude to)"}
         return out

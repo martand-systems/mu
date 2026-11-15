@@ -3,7 +3,7 @@
 import { CircleArrowUp, Laptop, RotateCw, Server, TriangleAlert } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { apiPost } from "../../api/client";
-import type { MacCard as Mac, NodeCard as Node } from "../../api/types";
+import type { JobRow, MacCard as Mac, NodeCard as Node } from "../../api/types";
 import { isStale, useNow } from "../../lib/clock";
 import { bytes, bytesOf, clock, num, pct, plural, shortDuration } from "../../lib/format";
 import { AgeLabel } from "../../ui/AgeLabel";
@@ -167,7 +167,30 @@ function NodeProblem({ n, now }: { n: Node; now: number }) {
   return null;
 }
 
-export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null }) {
+/** One line per running job on the node: its cores of the cores granted, or what a paused job keeps (contract §6). */
+function NodeJobs({ jobs, stale }: { jobs: JobRow[]; stale: boolean }) {
+  const live = jobs.filter((j) => j.live !== null);
+  if (!live.length) return null;
+  return (
+    <ul className="flex flex-col gap-0.5 pl-15 text-xs text-text-muted" data-fig="node-jobs" aria-label="running jobs">
+      {live.map((j) => (
+        <li key={j.job_id} className="flex gap-1.5 tabular-nums" data-job-line={j.job_id}>
+          <span className="font-mono">{j.short}</span>
+          {j.live!.paused || j.display ? (
+            <span className="text-text">keeps {bytes(j.paused?.held_mem_bytes ?? ((j.live!.anon ?? 0) + (j.live!.shmem ?? 0)))} (paused)</span>
+          ) : (
+            <span className={stale ? "text-stale" : "text-text"}>
+              {num(j.live!.cpu_cores)}{j.live!.grant_cores !== null ? ` / ${j.live!.grant_cores} granted` : " cores"}
+              {j.class === "borrowing" ? " · borrowed" : j.class === "express" ? " · express" : ""}
+            </span>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function NodeCard({ n, macVersion, jobs = [] }: { n: Node; macVersion: string | null; jobs?: JobRow[] }) {
   const now = useNow();
   const st = n.stats;
   const h = n.hello;
@@ -195,6 +218,7 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
               <div className="flex gap-1"><dt>cache</dt><dd className={`tabular-nums ${statsStale ? "text-stale" : "text-text"}`}>{bytes(st.mem.cached)}</dd></div>
               {st.disk.free_gb !== null && <div className="flex gap-1"><dt>disk free</dt><dd className="tabular-nums text-text">{st.disk.free_gb} GB</dd></div>}
             </dl>
+            <NodeJobs jobs={jobs} stale={statsStale} />
           </>
         )}
         {n.state === "online" && !st && n.old_node && (
@@ -217,6 +241,8 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
           <div className={`flex flex-col gap-0.5 text-xs text-text-muted ${n.state === "online" && st ? "pl-15" : ""}`} data-fig="node-queue">
             <p>
               <span className="text-text">{plural(q.running ?? 0, "running", "running")}</span> · <span className="text-text">{q.queued ?? 0} queued</span>
+              {"paused" in q && typeof q.paused === "number" && q.paused > 0 && <> · <span className="text-text">{q.paused} paused</span></>}
+              {"held" in q && typeof q.held === "number" && q.held > 0 && <> · <span className="text-text">{q.held} held</span></>}
             </p>
             {h?.mu_version && !n.old_node && <p>μ {h.mu_version}{macVersion && h.mu_version === macVersion ? " (same as this Mac)" : ""}</p>}
           </div>
@@ -242,12 +268,12 @@ export function NodeCard({ n, macVersion }: { n: Node; macVersion: string | null
   );
 }
 
-export function MachineCards({ mac, nodes }: { mac: Mac; nodes: Node[] }) {
+export function MachineCards({ mac, nodes, jobs = [] }: { mac: Mac; nodes: Node[]; jobs?: JobRow[] }) {
   return (
     <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))]" data-testid="machines">
       <MacCard mac={mac} />
       {nodes.map((n) => (
-        <NodeCard key={n.name} n={n} macVersion={mac.mu_version} />
+        <NodeCard key={n.name} n={n} macVersion={mac.mu_version} jobs={jobs.filter((j) => j.node === n.name && j.state === "running")} />
       ))}
     </div>
   );

@@ -161,3 +161,27 @@ jobs:
             .scratch/s4/logs/
           include-hidden-files: true
           retention-days: 14
+  dash-node:
+    name: dashboard 1b against a real node (dashboard.md §7.1 D rows, then each with its fault)
+    needs: probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: e2e.sh dash
+        run: tools/test-jobs/e2e.sh dash
+      - name: Summary
+        if: always()
+        run: cat .scratch/jobs/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: job-layer-dash
+          path: |
+            .scratch/jobs/summary.md
+            .scratch/jobs/results.tsv
+            .scratch/jobs/out/
+            .scratch/jobs/logs/
+            .scratch/s4/logs/
+          include-hidden-files: true
+          retention-days: 14

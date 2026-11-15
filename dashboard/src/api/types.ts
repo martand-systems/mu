@@ -90,7 +90,7 @@ export interface NodeStats {
   psi: { cpu_some10: number | null; mem_some10: number | null };
   disk: { free_gb: number | null; min_free_gb: number | null };
   uptime_s: number | null;
-  queue: { running: number | null; queued: number | null };
+  queue: { running: number | null; queued: number | null; held: number | null; paused: number | null; express: number | null };
   node_stale: boolean;
 }
 
@@ -115,7 +115,7 @@ export interface NodeCard {
 }
 
 export type JobState =
-  | "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timeout" | "oom" | "interrupted" | "unknown";
+  | "queued" | "held" | "running" | "succeeded" | "failed" | "cancelled" | "timeout" | "oom" | "interrupted" | "unknown";
 
 export interface Usage {
   cpu_s: number | null;
@@ -140,6 +140,48 @@ export interface LiveJob {
   max: number | null; // the job's memory limit
   pids: number | null;
   log_size: number | null;
+  grant_cores: number | null; // the cores granted (phase 1b)
+  class: GrantClass | null;
+  paused: boolean; // frozen (scheduler release 2): its memory is real, its cpu about 0
+}
+
+export type GrantClass = "normal" | "express" | "borrowing";
+export type Band = "urgent" | "high" | "normal" | "low";
+// Display states (contract §2): a paused or resuming job's `state` stays "running"
+export type DisplayState = "paused" | "resuming";
+
+export interface Who {
+  by: string | null;
+  at: Epoch | null;
+}
+
+export interface Paused {
+  phase: "freezing" | "frozen" | "thawing" | null;
+  since: Epoch | null;
+  until: Epoch | null; // resumes by itself then
+  by: string | null;
+  why: "hand" | "auto" | null;
+  for_job: string | null; // an auto-pause: the urgent job it made room for
+  held_mem_bytes: number | null; // the memory it keeps while frozen
+  lent_to: string[];
+  resume_asked: Who | null;
+  resumes_by: Epoch | null; // once asked: the latest borrower's end bound
+}
+
+export interface Grant {
+  cores: number | null;
+  cpus: string | null;
+  mem_bytes: number | null;
+  time_s: number | null;
+  class: GrantClass | null;
+  borrowed: { from: string | null; cpus: string | null; mem_bytes: number | null; until: Epoch | null }[];
+}
+
+export interface JobTime {
+  limit_s: number | null;
+  run_s: number | null; // run time, paused time not counted
+  paused_s: number | null;
+  budget_left_s: number | null;
 }
 
 export interface Limits {
@@ -171,6 +213,19 @@ export interface JobRow {
   limits: Limits | null; // from this Mac's .mu/jobs record (mine only)
   as_of: Epoch | null; // the node list this row came from
   stale: boolean;
+  // the scheduler's fields (release 1: band, held, place, class, grant, ends_by; release 2: the rest); null when absent
+  band: Band | null;
+  held: Who | null;
+  place: number | null;
+  class: GrantClass | null;
+  grant: Grant | null;
+  ends_by: Epoch | null;
+  pausable: boolean | null;
+  paused: Paused | null;
+  time: JobTime | null;
+  run_s: number | null; // finished jobs
+  paused_s: number | null;
+  display: DisplayState | null; // derived in decode.ts, never sent
 }
 
 export interface Overview extends Envelope {
@@ -179,7 +234,7 @@ export interface Overview extends Envelope {
   nodes: NodeCard[];
   jobs: JobRow[]; // sorted: running, queued (by position), then finished, newest first
   more: Record<string, boolean>;
-  summary: { nodes: number; online: number; running: number; queued: number };
+  summary: { nodes: number; online: number; running: number; queued: number; held: number; paused: number };
 }
 
 export interface JobsList extends Envelope {
@@ -207,7 +262,7 @@ export interface JobDetail extends Envelope {
   run: { fetched_at: Epoch | null; wall_s: number | null; outputs_missing: (string | null)[] } | null;
   index: { key: string | null; submit_started: Epoch | null; accepted: Epoch | null; fetched: Epoch | null } | null;
   node: { name: string; state: NodeState; old_node: boolean; metrics: boolean };
-  commands: { status: string; log: string; fetch: string; cancel: string; node: string };
+  commands: { status: string; log: string; fetch: string; cancel: string; node: string; resume: string; release: string; front: string };
 }
 
 export interface LogPiece extends Envelope {
@@ -235,6 +290,7 @@ export interface MetricSample {
   max: number | null;
   pids: number | null;
   psi_mem: number | null;
+  paused: boolean; // taken while the job was frozen: a break in the cores, a hatched span
 }
 
 export interface JobMetrics extends Envelope {

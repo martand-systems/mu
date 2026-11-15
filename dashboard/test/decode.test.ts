@@ -24,6 +24,10 @@ const DECODER: Record<string, (v: unknown, c: Ctx) => unknown> = {
   "api-job-metrics.json": decodeJobMetrics,
   "api-node.json": decodeNodeAnswer,
   "api-mac.json": decodeMacAnswer,
+  "api-overview-r1-node.json": decodeOverview,
+  "api-overview-paused.json": decodeOverview,
+  "api-job-paused.json": decodeJobDetail,
+  "api-job-metrics-paused.json": decodeJobMetrics,
 };
 
 describe("D38: every golden /api fixture decodes with no problem", () => {

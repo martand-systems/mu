@@ -5,7 +5,9 @@ watch) with the shapes of today's node (src/mu/node.py) and of phase 1b's (§4.2
 time by itself. It has the transport interface of dashnode.DashConn: call(), stream(), fail(), close_master(), and
 records every verb it is asked (D17, D18, D39).
 
-Scenarios: idle, busy, offline, refused, stale, old-node, hostile, many, wake (SCENARIOS below says what each shows).
+Scenarios: idle, busy, offline, refused, stale, old-node, r1-node, paused, hostile, many, wake (SCENARIOS below says
+what each shows). Phase 1b: features are by name (r1-node: v2026.11.10's list, no stats); the paused scenario and the
+fixtures node-list-r2.json and node-status-paused.json carry scheduler release 2's fields (the integration contract §3).
 
     python3 -I -S src/mu/dashfake.py fixtures DIR     write the golden fixtures (tools/test-dashboard/fixtures)
     python3 -I -S src/mu/dashfake.py scenarios        list the scenarios
@@ -26,7 +28,9 @@ from mu import proto  # noqa: E402
 from mu.proto import MuError  # noqa: E402
 
 FIXED_T0 = 1794650000.0      # the fixtures' "now": 2026-11-14T07:53:20Z
-FEATURES = ["stats", "usage", "watch", "metrics"]
+FEATURES_R1 = ["sched", "usage", "queue-control", "update"]            # v2026.11.10 (scheduler release 1)
+FEATURES_1B = FEATURES_R1 + ["stats", "watch", "metrics"]               # dashboard phase 1b
+FEATURES = FEATURES_1B + ["pause"]                                      # with scheduler release 2 (contract §3.8)
 GB = 1000 ** 3
 
 SCENARIOS = {
@@ -40,6 +44,10 @@ SCENARIOS = {
                 "running (+20 s) -> succeeded (+60 s)",
     "hostile": "a job whose name, note and log hold HTML, ANSI escapes and a 1 MB line; node strings with markup",
     "many": "office-pc with 150 finished jobs and one running (the list holds 100)",
+    "r1-node": "office-pc on v2026.11.10: features sched usage queue-control update, no stats, watch or metrics "
+               "(the old-node plan); a job goes queued -> running (+20 s) -> succeeded (+60 s); one held job",
+    "paused": "scheduler release 2's states: a paused lender, a borrower on its cores, a job resuming, a held job, "
+              "an urgent and a low job queued, a finished job that was paused",
     "wake": "office-pc with features; at +30 s the wall clock jumps 10 minutes ahead (a sleep and wake)",
 }
 
@@ -118,7 +126,10 @@ def job_id_at(t, salt):
 class FakeJob:
     def __init__(self, node, salt, name, queued, start=None, end=None, final="succeeded", exit_code=None, note=None,
                  project=("jatayu", "jatayu-4f2a91c0d3e1"), mine=True, cores=17.8, mem_gb=9.8, limit_gb=22.0,
-                 limit_cores=20, time_s=43200, log="solver", argv=None):
+                 limit_cores=20, time_s=43200, log="solver", argv=None, band="normal", held=None, pauses=(),
+                 resume_asked=None, klass="normal", borrowed=None, lent_to=(), pausable=False):
+        self.band, self.held, self.pauses, self.resume_asked = band, held, list(pauses), resume_asked
+        self.klass, self.borrowed, self.lent_to, self.pausable = klass, borrowed, list(lent_to), pausable
         self.node, self.name, self.queued, self.start, self.end = node, name, queued, start, end
         self.final, self.exit_code, self.note, self.mine = final, exit_code, note, mine
         self.project, self.cores, self.mem_gb, self.limit_gb, self.limit_cores = project, cores, mem_gb, limit_gb, limit_cores
@@ -131,10 +142,26 @@ class FakeJob:
         if t < self.queued:
             return None
         if self.start is None or t < self.start:
-            return "queued"
+            return "held" if self.held else "queued"
         if self.end is None or t < self.end:
             return "running"
         return self.final
+
+    def pause_at(self, t):
+        """The pause (start, end, by, why, for_job) that T falls in, or None."""
+        for pz in self.pauses:
+            if pz[0] <= t < pz[1]:
+                return pz
+        return None
+
+    def paused_s(self, t):
+        return sum(max(0.0, min(t, b) - a) for a, b, *_ in self.pauses if a < t)
+
+    def run_s(self, t):
+        if self.start is None or t < self.start:
+            return 0.0
+        upto = min(t, self.end) if self.end is not None else t
+        return max(0.0, upto - self.start - self.paused_s(upto))
 
     def project_id(self):
         return "%s-%s" % (self.project[0], hashlib.sha256(self.project[0].encode()).hexdigest()[:12])
@@ -170,8 +197,11 @@ class FakeJob:
         shmem = int(0.4 * GB * ramp)
         cur = anon + file_ + shmem
         cpu = round(self.cores * (0.9 + 0.1 * _h(self.id, "c", int(e // 5))), 2)
-        return {"t": round(node_t, 1), "cpu": cpu, "anon": anon, "file": file_, "shmem": shmem, "cur": cur,
-                "peak": int(cur * 1.04), "max": int(self.limit_gb * GB), "pids": 44, "psi_mem": 0.0}
+        out = {"t": round(node_t, 1), "cpu": cpu, "anon": anon, "file": file_, "shmem": shmem, "cur": cur,
+               "peak": int(cur * 1.04), "max": int(self.limit_gb * GB), "pids": 44, "psi_mem": 0.0}
+        if self.pause_at(t):           # frozen: memory stays, cpu about 0, the limit lowered to what it holds
+            out.update(cpu=0.0, max=int(cur * 1.02), paused=1)
+        return out
 
     def usage(self):
         if self.start is None or self.end is None:
@@ -179,8 +209,10 @@ class FakeJob:
         wall = max(1.0, self.end - self.start)
         cpu_s = round(self.cores * wall * 0.95, 1)
         oom = self.final == "oom"
+        run = max(1.0, wall - self.paused_s(self.end))
+        cpu_s = round(self.cores * run * 0.95, 1)
         return {"cpu_s": cpu_s, "user_s": round(cpu_s * 0.99, 1), "sys_s": round(cpu_s * 0.01, 1),
-                "cores_avg": round(cpu_s / wall, 2),
+                "cores_avg": round(cpu_s / run, 2),
                 "mem_peak_bytes": int((self.limit_gb if oom else self.mem_gb * 1.15) * GB),
                 "mem_work_peak_bytes": int((self.limit_gb * 0.99 if oom else self.mem_gb) * GB), "pids_peak": 44,
                 "mem_events": {"max": 3 if oom else 0, "oom_kill": 1 if oom else 0},
@@ -208,7 +240,9 @@ class FakeNode:
                  mu_version="v2026.11.9", stale_stats=None):
         self.name, self.clock, self.t0 = name, clock, t0
         self.jobs = list(jobs)
-        self.features = features
+        self.feats = list(FEATURES_1B) if features is True else (list(features) if features else [])
+        self.features = "stats" in self.feats      # live figures (phase 1b); old-node mode without
+        self.r2 = "pause" in self.feats
         self.skew = skew
         self.failure = failure
         self.hostile = hostile
@@ -243,7 +277,7 @@ class FakeNode:
                 self.clock.sleep(min(2.0, timeout))
             raise err
         fn = {"hello": self.hello, "list": self.list, "status": self.status}.get(verb)
-        if fn is None and self.features:
+        if fn is None and "stats" in self.feats:
             fn = {"stats": self.stats}.get(verb)
         if fn is None:
             raise MuError(proto.EXIT_ERROR, "unknown-verb", "%s refused the request (unknown-verb) [unknown-verb]"
@@ -261,9 +295,9 @@ class FakeNode:
             return 255, "", None, False
         if verb == "log":
             return self._stream_log(args, on_data, stop)
-        if verb == "metrics" and self.features:
+        if verb == "metrics" and "metrics" in self.feats:
             return self._stream_metrics(args, on_data)
-        if verb == "watch" and self.features:
+        if verb == "watch" and "watch" in self.feats:
             return self._stream_watch(args, on_data, stop)
         self._pending = MuError(proto.EXIT_ERROR, "unknown-verb", "%s refused the request (unknown-verb) "
                                 "[unknown-verb]" % self.name, "update μ on %s" % self.name, node=self.name)
@@ -301,9 +335,55 @@ class FakeNode:
                "exit_code": j.exit_code if st in proto.FINISHED else None, "log_size": len(j.log_bytes(t)),
                "note": j.note if st in proto.FINISHED else None,
                "unit": ("mu-job-%s.service" % j.id) if st != "queued" else None, "cancel_requested": False}
-        if self.features and st in proto.FINISHED:
+        if "usage" in self.feats and st in proto.FINISHED:
             out["usage"] = j.usage()
+        if "sched" in self.feats:
+            self.sched_fields(out, j, t, st)
         return out
+
+    def sched_fields(self, out, j, t, st):
+        """Scheduler release 1's fields, and release 2's on a node with `pause` (contract §3.1)."""
+        out["band"] = j.band
+        if st in ("queued", "held"):
+            out["place"] = out["position"] or (sum(1 for x in self.visible_jobs(t) if x.state(t) in ("queued", "held")
+                                                   and x.queued <= j.queued))
+            out["held"] = {"by": j.held["by"], "at": proto.iso(j.held["at"] + self.skew), "owner": True} \
+                if st == "held" else False
+        elif st == "running":
+            g = {"cores": j.limit_cores, "cpus": "0-%d" % (j.limit_cores - 1), "mem_bytes": int(j.limit_gb * GB),
+                 "time_s": j.time_s, "class": j.klass}
+            if j.klass == "borrowing" and j.borrowed:
+                g["borrowed"] = [{"from": j.borrowed["from"], "cpus": g["cpus"], "mem_bytes": g["mem_bytes"],
+                                  "until": proto.iso(j.borrowed["until"] + self.skew)}]
+            out["grant"], out["class"] = g, j.klass
+            out["ends_by"] = proto.iso(j.start + j.time_s + j.paused_s(t) + self.skew)
+        if not self.r2:
+            return
+        if st == "running":
+            pz = j.pause_at(t)
+            asked = j.resume_asked is not None and t >= j.resume_asked and pz is not None
+            out["pausable"] = j.pausable
+            out["paused"] = None if pz is None else {
+                "phase": "frozen", "since": proto.iso(pz[0] + self.skew), "until": proto.iso(pz[1] + self.skew),
+                "by": pz[2], "why": pz[3], "for_job": pz[4], "held_mem_bytes": int(j.mem_gb * 0.6 * GB),
+                "lent_to": list(j.lent_to),
+                "resume_asked": {"by": "avi-mac", "at": proto.iso(j.resume_asked + self.skew)} if asked else None,
+                "resumes_by": proto.iso(pz[1] - 240 + self.skew) if asked else None}
+            run = j.run_s(t)
+            express = j.klass in ("express", "borrowing")
+            out["time"] = {"limit_s": j.time_s, "run_s": int(run), "paused_s": 0 if express else int(j.paused_s(t)),
+                           "budget_left_s": 0 if express else int(max(0, 4 * 3600 - j.paused_s(t)))}
+            if pz is not None:
+                out["note"] = ("paused for %s until %s" % (pz[4][-6:], time.strftime("%H:%M", time.gmtime(pz[1])))
+                               if pz[3] == "auto" else "paused until %s by %s" % (
+                                   time.strftime("%H:%M", time.gmtime(pz[1])), pz[2]))
+        elif st in proto.FINISHED:
+            out["run_s"] = round(j.run_s(t), 1)
+            out["paused_s"] = round(j.paused_s(j.end), 1)
+
+    def status_pauses(self, j):
+        return [{"from": proto.iso(a + self.skew), "to": proto.iso(b + self.skew), "by": by, "why": why,
+                 "for_job": fj, "lent_mem_bytes": int(j.mem_gb * 0.4 * GB)} for a, b, by, why, fj in j.pauses]
 
     def hello(self, protocol=None):
         t = self.now()
@@ -322,10 +402,14 @@ class FakeNode:
                "queue": {"running": sum(1 for j in vis if j.state(t) == "running"),
                          "queued": sum(1 for j in vis if j.state(t) == "queued")},
                "last_stop": "clean", "runner": "active",
-               "autoupdate": {"enabled": True, "last_result": "ok" if self.features else "failed"},
+               "autoupdate": {"enabled": True, "last_result": "ok" if self.feats else "failed"},
                "time": proto.iso(self.node_time(t))}
-        if self.features:
-            out["features"] = list(FEATURES)
+        if self.feats:
+            out["features"] = list(self.feats)
+        if self.r2:
+            out["auto_pause"] = "marked"
+            out["queue"]["paused"] = sum(1 for j in vis if j.state(t) == "running" and j.pause_at(t))
+            out["pause"] = {"mem_lend": True}
         return out
 
     def list(self, project=None, limit="20"):
@@ -338,13 +422,18 @@ class FakeNode:
         out = {"ok": True, "jobs": sorted(unf + fin, key=lambda s: s["job_id"])}
         if self.features:
             out["rev"] = self.rev(t)
+        elif "sched" in self.feats:
+            out["rev"] = 3                  # v2026.11.10: the order file's rev, which a state change does not move
         return out
 
     def status(self, id=None):
         t = self.now()
         for j in self.visible_jobs(t):
             if j.id == id:
-                return self.status_of(j, t)
+                out = self.status_of(j, t)
+                if self.r2 and out["state"] in proto.FINISHED:
+                    out["pauses"] = self.status_pauses(j)
+                return out
         raise MuError(proto.EXIT_NO_SUCH, "no-such-job", "%s has no job %s [no-such-job]" % (self.name, id),
                       "mu status (this project's jobs); --on NODE if it ran on another node", node=self.name)
 
@@ -352,7 +441,7 @@ class FakeNode:
         """Increases whenever a job changes state."""
         n = 0
         for j in self.jobs:
-            for x in (j.queued, j.start, j.end):
+            for x in [j.queued, j.start, j.end] + [y for pz in j.pauses for y in pz[:2]] + [j.resume_asked]:
                 if x is not None and t >= x:
                     n += 1
         return n
@@ -381,8 +470,12 @@ class FakeNode:
                 "running": [dict(job_id=j.id, cpu_cores=j.sample(t, t)["cpu"], anon=j.sample(t, t)["anon"],
                                  file=j.sample(t, t)["file"], shmem=j.sample(t, t)["shmem"],
                                  peak=j.sample(t, t)["peak"], max=j.sample(t, t)["max"], pids=44,
-                                 log_size=len(j.log_bytes(t))) for j in run],
-                "queue": {"running": len(run), "queued": sum(1 for j in vis if j.state(t) == "queued")}}
+                                 log_size=len(j.log_bytes(t)), grant_cores=j.limit_cores, **{"class": j.klass},
+                                 paused=j.pause_at(t) is not None) for j in run],
+                "queue": {"running": len(run), "queued": sum(1 for j in vis if j.state(t) == "queued"),
+                          "held": sum(1 for j in vis if j.state(t) == "held"),
+                          "paused": sum(1 for j in run if j.pause_at(t)),
+                          "express": sum(1 for j in run if j.klass == "express")}}
 
     def metrics_bytes(self, j, t):
         if j.start is None or t < j.start:
@@ -552,7 +645,7 @@ class Scenario:
              FakeJob("office-pc", "b2", "frame-fea-v2", queued=t0 - 400, start=t0 - 300, cores=1.9, mem_gb=3.2,
                      limit_cores=2, limit_gb=8.0),
              FakeJob("office-pc", "b3", "mesh-study", queued=t0 - 120, start=None)]
-        self.add(FakeNode("office-pc", self.clock, t0, a + self._finished_set("office-pc", t0)))
+        self.add(FakeNode("office-pc", self.clock, t0, a + self._finished_set("office-pc", t0), features=FEATURES))
         b = [FakeJob("lab-pc", "c1", "cfd-cavity", queued=t0 - 2, start=t0 + 10, end=t0 + 40, final="succeeded",
                      exit_code=0, project=("bench", ""), cores=7.6, mem_gb=2.0, limit_gb=12.0, limit_cores=8),
              FakeJob("lab-pc", "c2", "aero-vlm-wing", queued=t0 - 9000, start=t0 - 8990, end=t0 - 8970,
@@ -578,6 +671,33 @@ class Scenario:
         jobs = [FakeJob("office-pc", "n1", "frame-fea", queued=t0 - 1, start=t0 + 20, end=t0 + 60,
                         final="succeeded", exit_code=0)] + self._finished_set("office-pc", t0, 3)
         self.add(FakeNode("office-pc", self.clock, t0, jobs, features=False, mu_version="v2026.11.8"))
+
+    def _r1_node(self, t0):
+        jobs = [FakeJob("office-pc", "r1", "frame-fea", queued=t0 - 1, start=t0 + 20, end=t0 + 60,
+                        final="succeeded", exit_code=0),
+                FakeJob("office-pc", "r2", "mesh-study", queued=t0 - 900, held={"by": "avi-mac", "at": t0 - 600})] + \
+            self._finished_set("office-pc", t0, 3)
+        self.add(FakeNode("office-pc", self.clock, t0, jobs, features=FEATURES_R1, mu_version="v2026.11.10"))
+
+    def _paused(self, t0):
+        lender = FakeJob("office-pc", "p1", "frame-fea", queued=t0 - 6000, start=t0 - 5400, cores=17.8, mem_gb=9.8,
+                         time_s=21600, pausable=True, pauses=[(t0 - 300, t0 + 600, "avi-mac", "hand", None)])
+        borrower = FakeJob("office-pc", "p2", "sched-probe", queued=t0 - 320, start=t0 - 290, cores=3.9, mem_gb=1.6,
+                           limit_cores=4, limit_gb=2.0, time_s=600, klass="borrowing",
+                           borrowed={"from": lender.id, "until": t0 + 600}, project=("bench", ""))
+        lender.lent_to = [borrower.id]
+        resuming = FakeJob("office-pc", "p3", "cfd-wing", queued=t0 - 4000, start=t0 - 3900, cores=1.9, mem_gb=1.2,
+                           limit_cores=2, limit_gb=4.0, time_s=14400, pausable=True, resume_asked=t0 - 60,
+                           pauses=[(t0 - 1200, t0 + 300, "avi-mac", "auto", borrower.id)], project=("bench", ""))
+        resuming.lent_to = [borrower.id]
+        held = FakeJob("office-pc", "p4", "mesh-study", queued=t0 - 2000, held={"by": "avi-mac", "at": t0 - 1800})
+        urgent = FakeJob("office-pc", "p5", "loads-check", queued=t0 - 100, band="urgent")
+        low = FakeJob("office-pc", "p6", "sweep-aoa", queued=t0 - 50, band="low", mine=False)
+        done = FakeJob("office-pc", "p7", "frame-fea", queued=t0 - 20000, start=t0 - 19980, end=t0 - 9000,
+                       final="succeeded", exit_code=0, pausable=True,
+                       pauses=[(t0 - 15000, t0 - 14160, "avi-mac", "hand", None)])
+        self.add(FakeNode("office-pc", self.clock, t0, [lender, borrower, resuming, held, urgent, low, done] +
+                          self._finished_set("office-pc", t0, 2), features=FEATURES))
 
     def _hostile(self, t0):
         h = FakeJob("office-pc", "h1", '<img src=x onerror="window.__xss=1">\x1b[2J<script>window.__xss=2</script>',
@@ -668,6 +788,11 @@ def node_fixtures(clock=None):
     fin = [j for j in n.jobs if j.final == "oom"][0]
     old = Scenario("old-node", clock=ManualClock(FIXED_T0)).nodes["office-pc"]
     metrics = n.metrics_bytes(run, clock.wall()).decode().splitlines()
+    r1 = Scenario("r1-node", clock=ManualClock(FIXED_T0)).nodes["office-pc"]
+    pn = Scenario("paused", clock=ManualClock(FIXED_T0)).nodes["office-pc"]
+    lender = [j for j in pn.jobs if j.lent_to][0]
+    pdone = [j for j in pn.jobs if j.pauses and j.end is not None][0]
+    paused_line = json.loads(pn.metrics_bytes(lender, FIXED_T0).decode().splitlines()[-1])
     return {
         "node-hello.json": n.hello(protocol=1),
         "node-hello-old.json": old.hello(protocol=1),
@@ -677,7 +802,12 @@ def node_fixtures(clock=None):
         "node-status-finished.json": n.status(id=fin.id),
         "node-stats.json": n.stats(),
         "node-watch-line.json": json.loads(json.dumps(n.stats())),
-        "node-metrics-lines.json": [json.loads(x) for x in metrics[:5]],
+        "node-metrics-lines.json": [json.loads(x) for x in metrics[:5]] + [paused_line],
+        "node-hello-r1.json": r1.hello(protocol=1),
+        "node-list-r2.json": pn.list(limit="100"),
+        "node-status-paused.json": pn.status(id=lender.id),
+        "node-status-finished-r2.json": pn.status(id=pdone.id),
+        "node-stats-r2.json": pn.stats(),
     }
 
 
