@@ -70,7 +70,7 @@ export function useLog(id: string, paused: boolean, queued: boolean) {
   return { buf: buf.current, st };
 }
 
-export function LogView({ id, queued, logCmd }: { id: string; queued: boolean; logCmd: string }) {
+export function LogView({ id, queued, logCmd, frozen = false }: { id: string; queued: boolean; logCmd: string; frozen?: boolean }) {
   const [paused, setPaused] = useState(false);
   const [wrap, setWrap] = useState(false);
   const { buf, st } = useLog(id, paused, queued);
@@ -93,7 +93,7 @@ export function LogView({ id, queued, logCmd }: { id: string; queued: boolean; l
     <section aria-label="log" className="flex min-w-0 flex-col rounded-md border border-border bg-surface" data-testid="log">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border px-3 py-2">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-text-muted">Log</h2>
-        <span className={`text-xs ${status === "following" ? "text-accent-text" : "text-text-muted"}`} data-testid="log-status">{status}</span>
+        <span className={`text-xs ${status === "following" && !frozen ? "text-accent-text" : "text-text-muted"}`} data-testid="log-status">{status}</span>
         <span className="font-mono text-xs tabular-nums text-text-muted">{bytes(st.size)}</span>
         <span className="ml-auto flex items-center gap-1.5">
           {status !== "complete" && status !== "waiting" && !queued && (

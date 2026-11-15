@@ -158,6 +158,8 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
   const pausedS = cols.paused.reduce((a, [x, y]) => a + (y - x), 0);
 
   const at = idx !== null && idx < cols.t.length ? idx : cols.t.length - 1;
+  const atT = cols.t[at] ?? null;
+  const pausedAt = atT !== null && cols.paused.some(([a, b]) => atT >= a && atT <= b); // frozen: no cores figure
   const pick = (a: (number | null)[]) => {
     for (let i = at; i >= 0; i--) if (a[i] !== null && a[i] !== undefined) return a[i]!;
     return null;
@@ -170,7 +172,7 @@ export function ResourceChart({ samples, limitMem, limitCores, label }: { sample
   return (
     <div className="flex flex-col gap-2 px-3 py-3" data-testid="resource-chart" aria-label={summary}>
       <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums">
-        <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cores)]" /><dt className="font-sans text-text-muted">cores</dt><dd className="text-text">{num(pick(cols.cores))}{limitCores !== null && ` / ${limitCores}`}</dd></div>
+        <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cores)]" /><dt className="font-sans text-text-muted">cores</dt><dd className="text-text">{pausedAt ? "paused" : num(pick(cols.cores))}{!pausedAt && limitCores !== null && ` / ${limitCores}`}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className={`inline-block h-0.5 w-3 ${hot ? "bg-attention" : "bg-[var(--series-mem)]"}`} /><dt className="font-sans text-text-muted">working (anon+shm)</dt><dd className="text-text">{bytes(pick(cols.work))}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-0.5 w-3 bg-[var(--series-cache)]" /><dt className="font-sans text-text-muted">cache (reclaimable)</dt><dd className="text-text">{bytes(pick(cols.cache))}</dd></div>
         <div className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block w-3 border-t border-dashed border-[var(--series-limit)]" /><dt className="font-sans text-text-muted">limit</dt><dd className="text-text">{bytes(limitMem)}</dd></div>

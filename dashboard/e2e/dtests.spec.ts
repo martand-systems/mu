@@ -99,6 +99,7 @@ test("D48 scheduler release 2 on the page: paused, resuming, held, borrower and 
   // the detail: the resume command, the time bar's words
   await gotoJob(page, lid);
   await expect(page.getByTestId("commands").getByText(/^mu resume \S+$/), "D48: the paused job's command is mu resume").toBeVisible();
+  await expect(page.getByTestId("log-status"), "D48: no orange on a paused job").not.toHaveClass(/text-accent-text/);
   await expect(page.getByTestId("time-label"), "D48: the time bar counts run time").toContainText(/run of 6h.* paused \(not counted\) · resumes by itself at \d\d:\d\d$/);
   await expect(page.getByTestId("paused-legend"), "D48: the chart marks the paused span").toBeVisible({ timeout: 15000 });
   await axe(page, "paused detail");

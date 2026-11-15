@@ -132,9 +132,10 @@ d11() {   # watch ends at max; a vanished client leaves no session after the cap
   a0="$(audit_lines)"
   nodeverb stats >/dev/null; nodeverb metrics "id=$j" offset=0 >/dev/null
   a1="$(audit_lines)"
-  t0="$(now)"; nodeverb watch interval=2 max=5 > "$WORK/out/d11-watch"; secs="$(since "$t0")"
+  t0="$(now)"; timeout 25 wssh mu-office-pc watch interval=2 max=5 > "$WORK/out/d11-watch" 2>/dev/null; secs="$(since "$t0")"
   a2="$(audit_lines)"
-  (wssh mu-office-pc watch interval=2 max=5 | head -1 >/dev/null) & sleep 2; pkill -u ws -f 'watch interval=2 max=5' 2>/dev/null; sleep 8
+  (timeout 25 wssh mu-office-pc watch interval=2 max=5 2>/dev/null | head -1 >/dev/null) & sleep 2
+  sudo pkill -u ws -f 'watch interval=2 max=5' 2>/dev/null; sleep 8
   left="$(pgrep -u mu -f 'serve .*watch' | wc -l)"
   M="stats + metrics: $((a1 - a0)) audit lines; watch max=5: ${secs} s, $(wc -l < "$WORK/out/d11-watch") lines, $((a2 - a1)) audit lines; sessions left after the cap: $left"
   [ "$((a1 - a0))" = 0 ] && lt "$secs" 9 && [ "$((a2 - a1))" = 2 ] && [ "$left" = 0 ]

@@ -378,7 +378,7 @@ export function JobDetailView({ id }: { id: string }) {
         </Card>
       ) : (
         <div className="grid gap-4 min-[1200px]:grid-cols-[7fr_5fr]">
-          <LogView id={d.job.job_id} queued={false} logCmd={d.commands.log} />
+          <LogView id={d.job.job_id} queued={false} logCmd={d.commands.log} frozen={d.job.display !== null} />
           <Card label="resources">
             <SectionTitle right={<span className="text-xs text-text-muted">whole run</span>}>Resources</SectionTitle>
             <Resources d={d} />
