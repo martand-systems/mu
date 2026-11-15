@@ -282,7 +282,8 @@ py_section "$PY1" sched-pause
 for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-mem-unchecked pause-without-mem-check \
          count-paused-time pause-noop pause-in-memory-only no-dead-man drop-field thaw-over-borrower repause-shortens \
          no-valve no-pause-deadline cancel-without-thaw stop-without-thaw requeue-keeps-pause freeze-after-result \
-         limit-in-runner-loop pause-unmarked freeze-before-checkout keep-pause-after-beneficiary no-cooldown; do
+         limit-in-runner-loop pause-unmarked freeze-before-checkout keep-pause-after-beneficiary no-cooldown \
+         lender-ends-ids-freed; do
   must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
 done
 

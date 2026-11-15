@@ -1009,6 +1009,12 @@ def t_sched_pause(base):
     bad = sched.invariants(cap, [A, Bl])
     check("invariants: a borrower that ends after its lender's deadline is a violation", any("deadline" in x for x in bad),
           bad)
+    # a borrower whose lender has ended keeps its own CPU ids until its unit ends
+    pl2 = sched.plan(now, cap, [B], [{"id": "C", "req": req(2, 256 * MI, 600)}])
+    pl3 = sched.plan(now, cap, [B], [{"id": "C", "req": req(3, 256 * MI, 600)}])
+    check("a borrower whose lender ended keeps its CPU ids: a 2-core job gets the other two, a 3-core one waits" +
+          flag("lender-ends-ids-freed"), ids(pl2) == ["C"] and not set(grants(pl2)["C"]["cpus"]) & set(Bg["cpus"]) and
+          ids(pl3) == [], (pl2["starts"], pl3["starts"]))
     # the auto-pause's victims
     c = [{"id": "x", "cores": 4, "est_lent": 1 * G, "active_mono": 1}, {"id": "y", "cores": 2, "est_lent": 0, "active_mono": 5},
          {"id": "z", "cores": 2, "est_lent": 100 * MI, "active_mono": 9}]

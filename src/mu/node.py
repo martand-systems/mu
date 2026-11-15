@@ -81,7 +81,9 @@ The scheduler's (docs/design/scheduler.md §13; the plan's own are in src/mu/sch
   unconfirmed-as-interrupted  a start whose unit never came counts as an interrupted attempt (not a failed start)
   no-note-active          the runner never records a unit's activation (end bound, cgroup, start_unconfirmed)
 release 2 (pause, resume, lending, the timers, auto-pause): the faults are listed in src/mu/pausectl.py and
-src/mu/sched.py
+src/mu/sched.py. Two test injectors here set up a race or a slow step for an e2e row; they are not checks:
+  shim-lingers-after-result  the shim waits 8 s after writing result.json before it exits (Q31 b)
+  slow-checkout           the checkout of a job named e2e-slow-checkout takes 60 s more, under the lock (Q35)
 """
 import fcntl
 import hashlib
@@ -1730,6 +1732,8 @@ def start_job(j, grant, S=None, prepared=False):
         durable.write_record(os.path.join(d, "state.json"), st)
     j["state"] = st
     try:
+        if fault("slow-checkout") and job.get("name") == "e2e-slow-checkout":   # test injector (Q35)
+            time.sleep(60)
         if not prepared:
             prepare_work(j)
         wd = os.path.join(d, "work", job.get("cwd") or "")
@@ -2658,6 +2662,8 @@ def run_job(job_id):
             type(e).__name__, e, "succeeded" if state == "succeeded" else "ended " + state))
         sys.stdout.flush()
         return 70
+    if fault("shim-lingers-after-result"):   # test injector (Q31 b): a pause may land after the result
+        time.sleep(8)
     return 0
 
 

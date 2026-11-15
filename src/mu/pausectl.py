@@ -26,6 +26,8 @@ Test faults (durable.fault; each makes a unit check or an e2e row fail, schedule
   keep-pause-after-beneficiary  an auto-pause lasts until its deadline after the urgent job ended
   freeze-before-checkout    the auto-pause freezes its victims before the urgent job's checkout
   no-dead-man               no dead-man timer is armed
+A test injector (sets up a slow step for an e2e row; not a check):
+  auto-checkout-slow        the auto-pause's checkout of the urgent job takes 20 s more (Q37)
 """
 import os
 import time
@@ -616,6 +618,9 @@ def auto_pause(ap, jobs, running, cap, walk, disk):
         if not freeze_all():
             return False
     try:
+        if fault("auto-checkout-slow"):   # test injector (Q37): the victims must not be frozen during this
+            time.sleep(20)
+            n.refresh_start_lock()
         n.prepare_work(H)
     except Exception as e:  # noqa
         for f in frozen:
