@@ -109,6 +109,20 @@ def t_rev():
     out = node.verb_list("k", {})
     check(tag("rev: list answers the state rev, not the order's", "rev-frozen"), out["rev"] == nodestats.read_rev()
           and out["rev"] != 7, out["rev"])
+    real_view = node.view
+
+    def racing_view(*a_, **k_):   # a runner pass between list's scan and its rev: the queued job started
+        v = real_view(*a_, **k_)
+        nodestats.note_pass([a, dict(b, state=dict(b["state"], state="running"))])
+        return v
+    node.view = racing_view
+    try:
+        out = node.verb_list("k", {})
+    finally:
+        node.view = real_view
+    check(tag("rev: list reads the rev before its scan, so a pass that moves it during the scan makes the Mac list "
+              "again (the old states are never stamped with the new rev)", "rev-after-scan"),
+          out["rev"] < nodestats.read_rev(), (out["rev"], nodestats.read_rev()))
     nodestats.note_pass([{"id": "x"}])   # broken input: never raises
     check("rev: note_pass never raises", True)
 

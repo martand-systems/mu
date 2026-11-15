@@ -267,6 +267,7 @@ stats_must_fail() {   # stats_must_fail FAULT SECTION: only a FAIL of a check ta
 }
 for p in $PYS; do stats_section "$p"; done
 stats_must_fail rev-frozen rev
+stats_must_fail rev-after-scan rev
 stats_must_fail no-age host
 stats_must_fail rename-field-node host
 stats_must_fail paused-line-missing line
@@ -328,7 +329,10 @@ for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-me
          count-paused-time pause-noop pause-in-memory-only no-dead-man drop-field thaw-over-borrower repause-shortens \
          no-valve no-pause-deadline cancel-without-thaw stop-without-thaw requeue-keeps-pause freeze-after-result \
          limit-in-runner-loop pause-unmarked freeze-before-checkout keep-pause-after-beneficiary no-cooldown \
-         lender-ends-ids-freed timer-env-inherited; do
+         lender-ends-ids-freed timer-env-inherited \
+         freezing-left refreeze-keeps-limit replan-sees-started pause-ignores-drain borrower-ignores-shadow \
+         no-dead-man-rearm pause-not-sticky audit-terse-pause open-pause-uncapped backstop-no-room \
+         ignore-mem-restore-failure renewal-over-2h no-pause-count-cap limit-command-unquoted limit-check-each-pass; do
   must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
 done
 # the dashboard's release 2 fixtures against the real node's answers (tools/test-jobs/r2_answers.py; the integration)

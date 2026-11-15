@@ -417,16 +417,21 @@ def plan(now, cap, running, queue, disk=None):
         out["waiting"][hq["id"]] = {"resources": need(hreq, state, cap)}
         # 5: later jobs
         def borrow_later(q, req):
+            by_s = []
+
             def rest_ok(m, t):   # memory beyond what is lent: within extra, or ends before S (step 5 of §3.3)
                 nonlocal extra_m
                 if m <= extra_m:
                     extra_m -= m
                     return True
+                by_s.append(True)
                 return S_time is not None and now + t + margin <= S_time
             g = borrow(req, rest_ok)
             if g is None:
                 return False
-            out["starts"].append({"id": q["id"], "grant": g, "S": S_time})
+            # S only for a start admitted by ending before S: start_job() checks it again after the checkout, as it
+            # does a backfilled job's (review 2026-11-15)
+            out["starts"].append({"id": q["id"], "grant": g, "S": S_time if by_s else None})
             return True
 
         for q, req in rest[i + 1:]:

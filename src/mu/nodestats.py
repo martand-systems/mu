@@ -24,6 +24,7 @@ Test hooks: MU_NODE_PROC (a folder standing in for /proc: stat, meminfo, loadavg
   sampler-scan-all     the sampler scans every job folder instead of LAST_RUNNING (unit; D03/D09's cost)
   cores-avg-by-wall    cores_avg divides by wall time, paused time included (D01, unit)
   rename-field-node-paused  a paused job's running[] entry sends "frozen" instead of "paused" (D40P)
+  rev-after-scan       list reads the state rev after its scan (node.verb_list; review 2026-11-15)
  and phase 1b's in node.py's hunks (B2, B7, B8; listed here so node.py's own list stays scheduler release 2's):
   sample-under-lock    the sampler's pass holds the queue lock (D09)
   usage-from-shim      a shim-written result's usage is the shim's own rusage, not the job's cgroup (D01)
@@ -114,7 +115,9 @@ def run_seconds(st, wall_s, now_mono=None):
     open_s = 0.0
     if pz.get("phase") in ("frozen", "thawing") and isinstance(pz.get("since_mono"), (int, float)):
         if not pz.get("boot_id") or pz.get("boot_id") == _N().boot_id():
-            open_s = max(0.0, (time.monotonic() if now_mono is None else now_mono) - pz["since_mono"])
+            from mu import pausectl   # a frozen record's open pause ends by its deadline + 120 s (the dead-man)
+            open_s = max(0.0, pausectl.open_end(pz, time.monotonic() if now_mono is None else now_mono) -
+                         pz["since_mono"])
     return max(0.0, wall_s - paused - open_s)
 
 

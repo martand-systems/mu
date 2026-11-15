@@ -139,6 +139,8 @@ LEND_MARGIN_MIN = 512 << 20   # held = min(grant, memory.current + max(512 MiB, 
 FREEZE_WAIT_S = 30            # systemctl freeze must reach "frozen" within this
 DEAD_MAN_S = 120              # the dead-man timer thaws a frozen job at its deadline + this
 VALVE_AFTER_S = 60            # a borrower still alive this long past its lender's deadline is killed
+PAUSE_COUNT_MAX = 20          # pauses per attempt (review 2026-11-15: 200 pause/resume cycles cost 4,200 systemd calls)
+BACKSTOP_ROOM_S = DEAD_MAN_S + 60   # RuntimeMaxSec's room past t + budget for a thaw after D (the dead-man's at D + 120)
 ARG_RULES["for"] = re.compile(r"^[0-9]{1,5}$")
 
 
@@ -1269,6 +1271,9 @@ def verb_status(key, args):
 def verb_list(key, args):
     proj = args.get("project")
     limit = int(args.get("limit", "20") or 20)
+    # the rev before the scan (review 2026-11-15): a pass that moves it after the scan then makes the Mac list again,
+    # instead of old states stamped with the new rev being taken as current for up to 5 minutes
+    rev = None if fault("rev-after-scan") else nodestats.read_rev()
     v = view()
     jobs = v["jobs"]
     mine = [j for j in jobs if not proj or j["job"].get("project_id") == proj]
@@ -1278,7 +1283,7 @@ def verb_list(key, args):
         if not fault("list-keeps-pauses"):
             s.pop("pauses", None)
     return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
-            "rev": nodestats.read_rev()}
+            "rev": nodestats.read_rev() if rev is None else rev}
 
 
 def verb_log(key, args):
@@ -1766,8 +1771,11 @@ def start_job(j, grant, S=None, prepared=False):
         durable.write_record(os.path.join(d, "state.json"), st)
         write_result(j, "failed", "runner", note=str(e)[:500])
         return False
-    if g.get("class") == "backfilled" and S is not None and not fault("stamp-before-checkout") and \
-            not fault("backfill-ignores-shadow"):   # (the fault is a scheduler without the test against S: here too)
+    # a backfilled job, or a borrower whose memory from free memory was admitted for ending before S (review
+    # 2026-11-15: plan() gives a borrower S only then), is checked against the head's start again after its checkout
+    if g.get("class") in ("backfilled", "borrowing") and S is not None and not fault("stamp-before-checkout") and \
+            not fault("backfill-ignores-shadow") and not (g.get("class") == "borrowing" and
+                                                          fault("borrower-ignores-shadow")):
         late = time.monotonic() + g["time_s"] + sched.MARGIN_S - S
         if late > 0:   # the checkout took too long: it would now end after the head's start (§3.3); nothing written
             event(d, "not started: after its checkout it would end %ds after the head's start; stays queued" % late)
@@ -1799,7 +1807,8 @@ def start_job(j, grant, S=None, prepared=False):
         props += ["-p", "MemoryMax=%d" % mm, "-p", "MemorySwapMax=0"]
     if g.get("class") == "express" and not fault("no-express-quota"):
         props += ["-p", "CPUQuota=100%"]
-    backstop = g["time_s"] + (min(PAUSE_BUDGET_S, g["time_s"]) if g.get("limit_timer") and not fault("count-paused-time") else 0)
+    backstop = g["time_s"] + (min(PAUSE_BUDGET_S, g["time_s"]) + (0 if fault("backstop-no-room") else BACKSTOP_ROOM_S)
+                              if g.get("limit_timer") and not fault("count-paused-time") else 0)
     props += ["-p", "RuntimeMaxSec=%d" % backstop, "-p", "TasksMax=4096",
               "-p", "KillMode=%s" % ("process" if fault("killmode-process") else "control-group"),
               "-p", "TimeoutStopSec=5", "-p", "OOMPolicy=kill", "-p", "LimitCORE=0", "-p", "Restart=no",
@@ -2138,7 +2147,7 @@ def step(first=False, stop=None, started=None):
                 if (j["state"] or {}).get("state") == "running":
                     running.append(j)   # unknown: it keeps its grant, or holds the whole node without one
         try:   # release 2: deadlines, deferred resumes, the end of auto-pauses, the valve, memory restored (§20.6)
-            pausectl.runner_pass(running, jobs)
+            pausectl.runner_pass(running, jobs, drain=drain)
         except Exception:  # noqa
             if fault("runner-pass-aborts"):
                 raise
@@ -2212,7 +2221,7 @@ def step(first=False, stop=None, started=None):
                         journal("runner: starting job %s: %s" % (x["id"], traceback.format_exc().replace("\n", " | ")[-800:]))
                 if ap and not (stop and stop[0]):
                     try:   # §20.7, inside the start lock: checkout, re-plan, freeze the victims, start the urgent job
-                        if pausectl.auto_pause(ap, jobs, running, cap, w, disk):
+                        if pausectl.auto_pause(ap, jobs, running, cap, w, disk, drain):
                             busy = True
                     except Exception:  # noqa
                         if fault("runner-pass-aborts"):
