@@ -158,7 +158,10 @@ q05() {
   a="$(submit --cores "$HC" --mem 256M --time 40s -- sleep 25)"; wait_state "$a" running 60
   h="$(submit --cores "$NC" --mem 256M --time 1m -- sleep 1)"; sleep 2
   sb="$(jobstate "$h" starts_by)"
-  for i in $(seq 1 18); do submit --cores "$HC" --mem 256M --time 20s -- sleep 15 >/dev/null; n=$((n + 1)); sleep 1; done
+  # 1-core short jobs, one every few seconds: a scheduler that lets them pass the head (backfill-ignores-shadow keeps
+  # S; no-head-reservation drops it) always has one running on some core, so the head waits until they stop coming,
+  # well past its first starts_by. As built, none of them may start before the head (20 s + MARGIN > S - now)
+  for i in $(seq 1 18); do submit --cores 1 --mem 256M --time 20s -- sleep 15 >/dev/null; n=$((n + 1)); sleep 1; done
   wait_state "$h" "succeeded failed" 150
   hst="$(jobstate "$h" started_at)"
   M="head's first starts_by $sb; it started $hst ($(jobstate "$h")); $n short jobs submitted meanwhile"
@@ -581,7 +584,7 @@ sched_rows() {
   run_row Q02 "memory admission: three 1 GB jobs with M = 2 GiB: two run, the third waits for memory" q02
   run_row Q03 "core packing: three 2-core jobs on 4 cores: two run, the third waits for cores and starts when one ends" q03
   run_row Q04 "backfill: a short job starts past the waiting head (backfilled); a 1 h one waits with a reservation" q04
-  run_row Q05 "starvation guard: a 4-core head behind a running job starts by its first starts_by while short jobs keep coming" q05
+  run_row Q05 "starvation guard: a whole-node head behind a running job starts by its first starts_by while 1-core short jobs keep coming" q05
   run_row Q06 "express lane: --quick runs beside a whole-node job within seconds, held to one CPU; the third waits as an ordinary 1-core job; explicit small flags are not express" q06
   run_row Q07 "isolation: every thread's CPU mask is its job's grant, two jobs disjoint; a thread that widens its mask is flagged" q07
   run_row Q08 "thread counts: OMP_NUM_THREADS, OPENBLAS, PYTHON_CPU_COUNT, CCX, MU_JOB_CPUS, TMPDIR from the grant" q08
