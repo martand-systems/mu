@@ -24,6 +24,10 @@ Test hooks: MU_NODE_PROC (a folder standing in for /proc: stat, meminfo, loadavg
   sampler-scan-all     the sampler scans every job folder instead of LAST_RUNNING (unit; D03/D09's cost)
   cores-avg-by-wall    cores_avg divides by wall time, paused time included (D01, unit)
   rename-field-node-paused  a paused job's running[] entry sends "frozen" instead of "paused" (D40P)
+ and phase 1b's in node.py's hunks (B2, B7, B8; listed here so node.py's own list stays scheduler release 2's):
+  sample-under-lock    the sampler's pass holds the queue lock (D09)
+  usage-from-shim      a shim-written result's usage is the shim's own rusage, not the job's cgroup (D01)
+  read-cgroup-after-exit  a runner-written result's usage is read from the job's cgroup, already gone (D02)
 """
 import calendar
 import hashlib
@@ -310,11 +314,13 @@ def job_line(j, st, u, prev):
     return row
 
 
-def write_now(rows):
+def write_now(rows, sample_ms=None):
+    """metrics/now.json; SAMPLE_MS: what this pass of the sampler cost (D09 reads it; stats does not send it)."""
     N = _N()
     q = dict(QUEUE) or {"running": len(rows), "queued": 0, "held": 0, "paused": 0, "express": 0}
     write_view(os.path.join(mdir(), "now.json"), {"t": round(time.time(), 1), "node": N.node_info().get("name"),
-                                                  "host": host_sample(), "running": rows, "queue": q})
+                                                  "host": host_sample(), "running": rows, "queue": q,
+                                                  "sample_ms": sample_ms})
 
 
 # ------------------------------------------------------------------------------------------------ the verbs

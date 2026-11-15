@@ -260,6 +260,7 @@ stats_must_fail metrics-from-zero verbs
 stats_must_fail journal-each-call verbs
 stats_must_fail no-cap verbs
 stats_must_fail sampler-scan-all sampler
+stats_must_fail sample-under-lock sampler
 stats_must_fail cores-avg-by-wall runtime
 stats_must_fail read-cgroup-after-exit runtime
 stats_must_fail stats-scan cost

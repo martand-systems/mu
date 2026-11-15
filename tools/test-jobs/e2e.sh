@@ -1031,6 +1031,7 @@ EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 Q1 Q2 Q3 Q4 Q
 EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 # the scheduler's rows (docs/design/scheduler.md §13): tools/test-jobs/e2e-sched.sh, run by `e2e.sh sched`
 . "$ROOT/tools/test-jobs/e2e-sched.sh"
+. "$ROOT/tools/test-jobs/e2e-dash.sh"
 check_ran() {   # [ROWS FAULTS]: the expected rows and faults (default: those of `all`)
   local want got
   [ $# = 2 ] && { EXPECT_ROWS="$1"; EXPECT_FAULTS="$2"; }
@@ -1075,6 +1076,8 @@ case "$MODE" in
          [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran; fi ;;
   sched) if setup && sched_setup; then sched_rows; [ "${NO_FAULTS:-0}" = 1 ] || sched_faults
            [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran "S0 S1 S2 S3 S4 $SCHED_ROWS" "$SCHED_FAULTS"; fi ;;
+  dash) if setup && dash_setup; then dash_rows; [ "${NO_FAULTS:-0}" = 1 ] || dash_faults
+          [ -n "${ONLY:-}" ] || [ "${NO_FAULTS:-0}" = 1 ] || check_ran "S0 S1 S2 S3 S4 $DASH_ROWS" "$DASH_FAULTS"; fi ;;
   *) echo "usage: e2e.sh probe|all|sched" >&2; exit 2 ;;
 esac
 collect; summary

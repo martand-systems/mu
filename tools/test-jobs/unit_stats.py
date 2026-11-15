@@ -267,6 +267,19 @@ def t_sampler():
     finally:
         node.scan_jobs = real
     check(tag("sampler: a pass reads LAST_RUNNING, never every job folder", "sampler-scan-all"), calls[0] == 0, calls[0])
+    locks = [0]
+    real_lock = node.Lock
+
+    class Counting(real_lock):
+        def __enter__(self):
+            locks[0] += 1
+            return real_lock.__enter__(self)
+    node.Lock = Counting
+    try:
+        node.sample()
+    finally:
+        node.Lock = real_lock
+    check(tag("sampler: a pass never takes the queue lock (D09)", "sample-under-lock"), locks[0] == 0, locks[0])
     nw = json.load(open(node.p("metrics", "now.json")))
     check("sampler: now.json is written each pass, with the queue counts",
           nw.get("queue", {}).get("running") == 1 and "host" in nw and isinstance(nw.get("t"), float), nw.get("queue"))
