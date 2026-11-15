@@ -1610,8 +1610,8 @@ it (`tools/test-jobs/run.sh` counts only checks tagged with that fault for the s
 | audit lines leave out the request | `asked`, `old->new` | sched-runner 9 · `audit-terse` |
 | `queue` shows command lines | spec corrected (§20.4), not the client: no new access, and the name helps the queue view | — |
 | V1 passed its fault pass for the wrong reason (a leftover v2026.11.11 tag, an earlier row's audit line) | the release repository made anew; the row's own audit lines; leftover toolchains removed; the restart must precede the job's end | e2e V1 · `restart-only-idle` |
-| Q05's timing assertion never shown failing | `must_fail Q05 backfill-ignores-shadow` (keeps S) | e2e Q05 |
-| Q04 failed its fault on the reason string | waits for B to end, then watches C for 6 s with B's cores free | e2e Q04 · `backfill-ignores-shadow` |
+| Q05's timing assertion never shown failing | `must_fail Q05 backfill-ignores-shadow` (keeps S); the short jobs are 1-core (with half-node ones the head found every core free between two of them and started on time: the first CI pass of that fault was MISSED) | e2e Q05 |
+| Q04 failed its fault on the reason string | waits for B to end, then watches C for 6 s with B's cores free. The first CI pass showed why C never started under the fault: the runner's own re-check after the checkout (the second test against S) refused it each pass. The fault now removes both tests, as a scheduler without the shadow would | e2e Q04, Q05 · `backfill-ignores-shadow` |
 | the simulation cannot catch a missing reservation | while jobs wait there must be a head with a `starts_by` | sched-sim · `no-head-reservation` |
 | Q16 untested | the `systemd-run` stub copies `state.json` at its call: the grant must be there; check 5 strict (started once, attempt 1, the 4-core job waits) | sched-runner 1, 5 · `grant-after-systemd-run`, `unconfirmed-as-interrupted` |
 | runner side of the start lock untested | sched-runner 11 | `runner-ignores-start-lock` |

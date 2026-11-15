@@ -546,7 +546,7 @@ au_state() { sudo sed -n "s/^$1=//p" /home/mu/.local/share/mu/state/autoupdate.s
 v1() {
   qpre || return 1; local a out d n ra rs a0 mm
   # this row's own audit lines and releases: an earlier row's restart line or tag (V3 pushes v2026.11.11) proves nothing
-  a0="$(sudo wc -l < /srv/mu/audit.log)"
+  a0="$(sudo sh -c 'wc -l < /srv/mu/audit.log')"   # (the file is mu's: the redirect must be sudo's too)
   sudo rm -rf /home/mu/.local/share/mu/toolchains/v2026.11.10 /home/mu/.local/share/mu/toolchains/v2026.11.11
   release_repo v2026.11.10
   a="$(submit --cores 1 --mem 256M --time 2m -- sh -c "$(qcmd 25)")"; wait_state "$a" running 60; sleep 2

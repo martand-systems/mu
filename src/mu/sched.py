@@ -9,7 +9,8 @@ Test faults (durable.fault; each must make a unit test or an e2e row fail, sched
   one-at-a-time           nothing ordinary starts beside a running ordinary job (the previous release's rule)
   no-core-admission       cores are not counted (CPU ids are handed out again)
   no-mem-admission        memory is not counted
-  backfill-ignores-shadow a later job that fits now starts whatever its time (no test against S)
+  backfill-ignores-shadow a later job that fits now starts whatever its time (no test against S, in the plan nor in
+                          the runner's re-check after the checkout)
   no-head-reservation     a head that does not fit is skipped (no reservation at all)
   margin-zero             the time test leaves out START_WAIT + SLACK
   extra-not-reduced       a job started into `extra` does not use it up

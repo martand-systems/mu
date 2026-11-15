@@ -1691,7 +1691,8 @@ def start_job(j, grant, S=None):
         durable.write_record(os.path.join(d, "state.json"), st)
         write_result(j, "failed", "runner", note=str(e)[:500])
         return False
-    if g.get("class") == "backfilled" and S is not None and not fault("stamp-before-checkout"):
+    if g.get("class") == "backfilled" and S is not None and not fault("stamp-before-checkout") and \
+            not fault("backfill-ignores-shadow"):   # (the fault is a scheduler without the test against S: here too)
         late = time.monotonic() + g["time_s"] + sched.MARGIN_S - S
         if late > 0:   # the checkout took too long: it would now end after the head's start (§3.3); nothing written
             event(d, "not started: after its checkout it would end %ds after the head's start; stays queued" % late)
