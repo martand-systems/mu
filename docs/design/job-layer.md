@@ -1580,7 +1580,7 @@ the queue lock: node.json is sealed, so a hand edit would make it unreadable).
 
 | Rule | Setting (default) |
 |---|---|
-| Never a job that is not finished: queued, held, running, paused, resuming, draining (no `result.json`), nor one named in an unfinished job's `state.json` (a borrower's lender, an urgent job's victims) | — |
+| Never a job that is not finished: queued, held, running, paused, resuming (no `result.json`); a draining job (its result written while its unit still stops, at most a minute) is inside the 24 h minimum below; nor one named in an unfinished job's `state.json` (a borrower's lender, an urgent job's victims) | — |
 | A finished job loses its bulky parts (`work/`, the git `index`, `tmp/`, `metrics.jsonl`, anything else) and keeps a small record: `job.json`, `state.json`, `result.json` (usage, run times), `events.log`, `usage.json`, the `cancel` and `timelimit` markers, `fetched.json`, `keep.json`, the last part of its `log` (a first line says it is a tail) and `pruned.json` (sealed: when, why, by whom, the bytes before and freed, whether and when it was fetched, what was removed) | `log_tail_kb` (64) |
 | The node records each whole fetch of a job's outputs (`fetch` without `what=result`, after the last byte is sent): `fetched.json` with the first and last time, the count and the keys | — |
 | Due: 7 days after the last fetch; 30 days after the end when never fetched. Jobs that ended before this release have no fetch record: never fetched | `after_fetch_days` (7), `unfetched_days` (30) |
@@ -1609,8 +1609,9 @@ the queue lock: node.json is sealed, so a hand edit would make it unreadable).
   `prune/`; the next clean-up (holder of `/srv/mu/gc.lock`) deletes what is in `prune/`. `result.json` is never
   rewritten. A file system without the exchange call: nothing is pruned, the answer says why.
 - **Cost.** A finished job's size is walked once and cached in `gc.json`; a pass with nothing due reads the job
-  records the runner reads every second anyway, and statvfs. The runner's tick has a 60 s budget for prunes and comes
-  back a minute later when work is left.
+  records the runner reads every second anyway, and statvfs, and takes no lock but `gc.lock`. The start lock is taken
+  only around the prunes themselves (the size walk of a first clean-up never holds back a job start). The runner's
+  tick has a 60 s budget for prunes and comes back a minute later when work is left (or when the start lock was busy).
 - **Disk figure.** The pressure rule decides by the figure jobs are admitted by (`hello.disk`: the smaller of
   `/srv/mu` and the Windows drive the host script recorded, §13.4). When the Windows drive is the smaller, a folder
   deleted inside WSL's virtual disk does not give `C:` its space back unless the disk is sparse; new data reuses those

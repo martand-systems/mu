@@ -503,14 +503,6 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
         cache = read_cache()
         if not dry:
             remove_later(leftovers())
-            if not fault("gc-no-start-lock"):
-                end = time.time() + (0 if by == "runner" else 30)
-                while not N.take_start_lock():
-                    if time.time() >= end:
-                        return {"ok": False, "error": "busy", "message": "an update or a job start holds the start "
-                                "lock (%s)" % N.start_lock_path()}
-                    time.sleep(0.5)
-                started_lock = True
         jobs = N.scan_jobs()
         cands, skipped = candidates(jobs, st, now)
         sizes = dict(cache.get("sizes") or {})
@@ -537,6 +529,16 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
         done, garbage, skip = [], [], []
         if not st["enabled"] and by == "runner":
             plan = []
+        # the start lock only for the prunes themselves (the sizes above were walked without it: a first clean-up of
+        # many folders never holds back a job start); each prune checks its job again under the queue lock
+        if plan and not dry and not fault("gc-no-start-lock"):
+            end = time.time() + (0 if by == "runner" else 30)
+            while not N.take_start_lock():
+                if time.time() >= end:
+                    return {"ok": False, "error": "busy", "message": "an update or a job start holds the start lock "
+                            "(%s)" % N.start_lock_path()}
+                time.sleep(0.5)
+            started_lock = True
         for c, why in plan:
             jid = c["j"]["id"]
             if dry:
