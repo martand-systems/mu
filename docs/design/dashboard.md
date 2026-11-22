@@ -1357,7 +1357,11 @@ workflows that still used tags (`linux-install.yml`, `s2-probe.yml`) from `@v4` 
 `actions/cache/{restore,save}@v6`, `actions/upload-artifact@v7`. Brought in by hand, pinned by commit as every other
 workflow is: checkout v7.0.1 `3d3c42e5…`, upload-artifact v7.0.2 `cf430e03…` (the pins job-layer.yml and dashboard.yml
 already use), cache v6.1.0 `55cc8345…` (released 2026-06-26; its inputs are those of v4). The PR is left open on
-GitHub (not merged), to be closed once this release is on `main`.
+GitHub (not merged), to be closed once this release is on `main`. Found while checking them: `linux-install.yml`
+restored `path: mucache` but saved four narrower paths, and a cache's version is computed from its paths, so nothing
+saved was ever restored ("Cache not found", run 45061273718); the restore now names the same paths. It mattered on
+2026-11-22: openvsp.org timed out from GitHub's runners (not from the Mac) and every image without a cached copy
+failed its install at that download.
 
 ### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 

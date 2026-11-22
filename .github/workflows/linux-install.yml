@@ -39,7 +39,13 @@ jobs:
         if: steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: mucache
+          # the same paths as the save step below: a cache's version is computed from its paths, so with `mucache`
+          # here nothing saved was ever found ("Cache not found", run 45061273718; release 2026.11.12)
+          path: |
+            mucache/downloads
+            mucache/pkgs/*.conda
+            mucache/pkgs/https/conda.anaconda.org/conda-forge/*/*.conda
+            mucache/uv
           key: mucache-${{ matrix.image }}-${{ github.run_id }}
           restore-keys: mucache-${{ matrix.image }}-
       - name: Container image
