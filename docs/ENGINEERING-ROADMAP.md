@@ -16,7 +16,7 @@
   from six sets of cited notes. Sources are listed in §14.
 
 **Changes in v1.1 (2026-11-22):** design optimisation added (findings R21 to R25, §7.17, phase E8, spike ES8, benchmark
-tier 5, decision 16), from a second, smaller research pass recorded in
+tier 5, decision 16), and the owner's rule that solvers compute and the model orchestrates stated as §5.11, from a second, smaller research pass recorded in
 [`docs/research/2026-11-design-optimisation.md`](research/2026-11-design-optimisation.md). The baseline was re-checked
 against `main` at `c59a49d`.
 
@@ -67,9 +67,10 @@ org profile that should hold policy and materials is not visible from this repo.
 | **E5** | Airframe substantiation | Loads generator, vibration and Campbell checks, composite strength route, test predictions, compliance matrix: the first complete stress report for JATAYU |
 | **E6** | Aero, propulsion, thermal | Templated CFD with convergence evidence, propeller and powertrain models, thermal networks |
 | **E7** | Judgement and autonomy | FMEA and design-review gates, drawings and model-based definition, measured promotion of the agent's autonomy by area |
-| **E8** | Design optimisation | Parametric sizing optimisation, and topology optimisation used as a layout hint: every optimised design is rebuilt as real CAD and verified by the normal analysis path. Starts after E4, alongside E5 and E6 |
+| **E8** | Design optimisation | Parametric sizing optimisation, and topology optimisation used as a layout hint: every optimised design is rebuilt as real CAD and verified by the normal analysis path. Starts once E4's linear core is done, alongside E5 and E6 |
 
-**What stays human, permanently on current evidence:** load-case and allowable approval, GD&T authority, completeness of
+**What stays human, permanently on current evidence:** load-case and allowable approval, the statement of any
+optimisation problem, GD&T authority, completeness of
 failure modes, test correlation, anything novel, and the signature.
 
 ---
@@ -219,7 +220,8 @@ says so, a practitioner report or an inference, followed by its consequence here
 from this table; none had independent evidence.
 
 R21 to R25 come from the second research pass, on design optimisation (2026-11-22). Apart from the CalculiX manual and
-the project pages named, its sources were read only as abstracts or search summaries; each row says which.
+the project pages named, its sources were seen only as abstracts or search summaries, and some points rest on the
+researchers' recall. Each row says which; the research note labels every item.
 
 | # | Finding | Consequence for μ |
 |---|---|---|
@@ -244,10 +246,10 @@ the project pages named, its sources were read only as abstracts or search summa
 | R19 | Practitioner reports: a silent OpenCASCADE boolean failure at a tangent face; and one hardware-as-code project whose rules ban agents from lowering thresholds or stubbing checks to get a pass | Automatic checks after every boolean. Thresholds live where the agent's edits are visible as diffs (§5.6) |
 | R20 | No open framework was found that produces loads reports, margins and test predictions for a small UAV; the published multirotor frame studies found rarely state a load factor or failure criterion. This is a limited search, not proof of absence | The E5 package would exceed typical published practice. There is no reference implementation to copy |
 | R21 | CalculiX 2.23's own optimisation is shape sensitivity: surface nodes move along the normal, or material orientations change. Nothing in it is density-based. Responses include mass, strain energy, displacement, eigenfrequency and aggregated stress. The manual leaves the loop (step size, mesh update, stopping) to a script and restricts sensitivity to true 3D elements (manual read) | μ needs its own optimisation driver. CalculiX's sensitivities are a refinement aid, not a topology method (§7.17) |
-| R22 | The only CalculiX-coupled topology optimiser found is the BESO script set: LGPL-3, numpy only, last commit seen April 2025. It is a heuristic; its own wiki says checkerboarding is "not fully solved" and manufacturing constraints are not implemented. No maintained density-based code coupled to CalculiX was found, and the open codes that take unstructured meshes (FEniTop, Kratos) are heavy installs (project pages read; nothing was run) | An in-house density method on μ's own meshes, using the MMA optimiser NLopt already provides, is the proposed route, with BESO as the fallback. A spike decides (ES8) |
-| R23 | Commercial documentation (Altair, Dassault Tosca) describes one sequence: optimise, extract and smooth an iso-surface, interpret it as CAD, re-verify. It warns that smoothing deviates from the optimised field. No open-source route from an organic mesh to clean CAD was found. Published mass savings are mostly optimiser-stage figures (search summaries only) | The density field is a layout hint. The design of record is rebuilt parametric CAD, verified by the normal analysis path, and optimiser-stage numbers are reported apart from verified ones |
-| R24 | Stress-constrained topology optimisation is an open difficulty (singular stresses, aggregation of local constraints). Laminates use other methods (ply thickness and angle, discrete material optimisation), and strength-based optimisation of anisotropic printed parts is less mature than stiffness-based (abstracts and search summaries only) | Optimise stiffness under a volume limit; verify stress, buckling and modes on the rebuilt CAD. Carbon plate and tube stay with laminate sizing |
-| R25 | One 2026 preprint has LLM agents formulate and run topology optimisation with self-refinement; its abstract gives no success rates. A 2022 review by leading researchers in the field found few real advances from neural networks used in place of the iterative solver. No study of agents mis-defining an optimisation problem was found | The agent sets up studies and iterates; the method stays a classical, benchmarked one; a human approves the problem definition before the run |
+| R22 | Open-source topology optimisers exist. The closest fit is BESO, a script set that drives CalculiX from the terminal: LGPL-3, about 5,300 lines of Python needing numpy and matplotlib, last commit April 2025. Read from its source: a stiffness mode (the default), failure-index, buckling and heat modes; a mass goal; sensitivity, morphological and casting-direction filters; several load cases; μ's 10-node tetrahedra among the elements it reads. It is an evolutionary (heuristic) method, and its wiki says checkerboarding is "not fully solved". Others: pyMOTO and PyTopo3D (MIT, voxel grids), FEniTop and Kratos (unstructured meshes, heavy installs). No maintained density-based (SIMP) code coupled to CalculiX was found (BESO source and the pyMOTO and FEniTop pages read; Kratos from search summaries; nothing was run) | Use an existing tool first: BESO, on the solver μ already ships. An in-house density method, using the MMA optimiser NLopt already provides, is the fallback if BESO fails the benchmarks. A spike decides (ES8) |
+| R23 | Altair's and Dassault Tosca's documentation describe extracting and smoothing an iso-surface from the result, and Altair warns that smoothing deviates from the optimised field. That the result is then rebuilt as CAD and re-verified is the researchers' synthesis of practice. No open-source route from an organic mesh to clean CAD was found in a limited search. The few mass-saving figures seen were optimiser-stage (search summaries only) | The density field is a layout hint. The design of record is rebuilt parametric CAD, verified by the normal analysis path, and optimiser-stage numbers are reported apart from verified ones |
+| R24 | Stress-constrained topology optimisation is an open difficulty (the "stress singularity" problem, and the aggregation of local constraints). Laminates use other methods (discrete material optimisation; ply thickness and angle sizing, from the researchers' recall), and strength-based optimisation of anisotropic printed parts is less mature than stiffness-based (abstracts and search summaries only) | Optimise stiffness under a volume limit; verify stress, buckling and modes on the rebuilt CAD. Carbon plate and tube stay with laminate sizing |
+| R25 | One 2026 preprint, not peer reviewed, has LLM agents formulate and run topology optimisation with self-refinement; its abstract gives no success rates, and 3D is reported as open. A 2022 critical review of neural networks in topology optimisation found few real advances, while naming some promising uses. No study of agents mis-defining an optimisation problem was found (abstracts read only) | The agent sets up studies and iterates; the method stays a classical, benchmarked one; a human approves the problem definition before the run |
 
 ---
 
@@ -352,6 +354,19 @@ installs in seconds.
 - Take a dependency where the method is large and the library is maintained and permissively licensed.
 - Batch lock changes: two bumps across this roadmap (§12).
 - GPL and AGPL tools may be called as external commands. They are not imported into `mu`.
+
+### 5.11 Solvers compute; the model orchestrates
+
+The owner's rule, restated 2026-11-22. It underlies §5.2 and §5.5 and applies to everything in this roadmap.
+
+- Every engineering number comes from a deterministic tool: a solver, a geometric kernel, a cited formula, an
+  optimisation algorithm. The language model never produces one, and no learned model stands in for a solver.
+- The model decides which tool to use, in what order, with what inputs, and how to read the outputs. It also does the
+  design work: writing and changing the CAD.
+- Deterministic means repeatable: the same inputs, versions, settings and seed give the same result, within a stated
+  tolerance where a parallel mesher or solver introduces run-to-run noise. The run record holds all of them.
+- Where a statistical model is used inside an optimisation to choose the next design to evaluate, it is optional, it is
+  not a language model, and the reported result still comes from a solver run on that design.
 
 ---
 
@@ -908,14 +923,15 @@ expect hand methods for this in any case.
 - **The rule.** The optimiser proposes; the normal analysis path decides. An optimised design enters the project only as
   real, parametric CAD, verified by E4's templates and checked for manufacturability by E2's. A number produced inside
   an optimisation loop is never reported as a verified result.
-- **Who does what.** The optimisation itself is a published, deterministic algorithm that runs finite-element solves in
-  a loop. No language model takes part in it. Claude Code states the problem (design space, fixed regions, loads,
-  constraints, process), starts the run, reads the result, and does the design work of rebuilding it as CAD. It is the
-  same split as for FEA: the solver computes, the agent sets up and interprets, the human approves. The "surrogate" used
-  in parametric sizing is likewise a classical statistical model, not a language model.
+- **Who does what.** By §5.11, the optimisation is done by a classical numerical algorithm that runs finite-element
+  solves in a loop, repeatable from its recorded settings. No language model takes part in it. Claude Code states the
+  problem (design space, fixed regions, loads, constraints, process), starts the run, reads the result, and does the
+  design work of rebuilding it as CAD. It is the same split as for FEA: the solver computes, the agent sets up and
+  interprets, the human approves.
 - **Why this order.** An optimiser moves a design towards whatever the model gets wrong: a singular stress peak, an
-  unconverged mesh, an optimistic allowable, a missing load case. It is only safe on top of converged quantities and a
-  problem definition a human has approved.
+  unconverged mesh, an optimistic allowable, a missing load case. This is engineering judgement; no published source on
+  it was retrieved. It makes optimisation safe only on top of converged quantities and a problem definition a human
+  has approved.
 
 **Three tools, cheapest and safest first.**
 
@@ -923,57 +939,73 @@ expect hand methods for this in any case.
 |---|---|---|
 | **Parametric sizing** (`mu opt size`) | Varies the parameters of the code-CAD model to minimise mass (or maximise stiffness or a frequency) subject to the part's requirement checks: margins, deflection, first mode, manufacturability | A parameter set. The result is already CAD |
 | **Topology layout study** (`mu opt topo`) | Finds where material should be inside a design space, for stiffness under a volume limit, across several load cases | A density field and an iso-surface: a hint for a human and the agent to rebuild from, never a part |
-| **Shape sensitivity map** (`mu opt shape`) | Uses CalculiX's `*SENSITIVITY` to show where adding or removing surface material changes stress or stiffness most | A coloured map that guides fillet and wall changes in the parametric model |
+| **Shape sensitivity map** (`mu opt shape`) | Uses CalculiX's `*SENSITIVITY` to show where adding or removing surface material changes stiffness or an aggregated stress measure most. Whether it works on μ's 10-node tetrahedra is not stated in the manual, and no published validation of its stress sensitivities was found **(to confirm, ES8)** | A coloured map that guides fillet and wall changes in the parametric model |
 
 **Parametric sizing.**
-- Sampling by Sobol sequence (scipy), a Gaussian-process surrogate with expected improvement (scikit-learn), and a local
-  polish with NLopt or scipy. No new dependency. Optuna is the next step up if this proves insufficient.
+- The default is a classical optimiser from NLopt or scipy, started from a Sobol sample of the parameter space, all
+  repeatable from recorded settings and seed. No new dependency.
+- For expensive solves, a Gaussian-process surrogate (scikit-learn) is an optional accelerator. It only proposes which
+  design to solve next; every reported number is a solver result (§5.11). Optuna is a further option if needed.
 - Every evaluation is an ordinary run with a record, so the search itself is auditable and can use the compute node.
-- Constraints read E4's converged quantities, never a raw peak. Run-to-run mesh variation makes the objective slightly
-  noisy, so tolerances are explicit and the final design is re-verified with the full convergence study.
-- This covers most of the useful cases for JATAYU: wall thicknesses, rib and pocket dimensions, fillet radii, lightening
+- Constraints read E4's converged quantities, never a raw peak. Mesh node counts vary from run to run (§3.3, D9), which
+  makes the objective slightly noisy, so tolerances are explicit and the final design is re-verified with the full
+  convergence study.
+- In our judgement this covers most of the useful cases for JATAYU: wall thicknesses, rib and pocket dimensions, fillet radii, lightening
   hole sizes, tube diameters and ply counts.
 
 **Topology layout study.**
-- **Method.** Density-based (SIMP): minimise compliance under a volume constraint, with a density or Helmholtz filter
-  whose radius is set in millimetres, projection with continuation, and the MMA optimiser from NLopt. Several load cases
-  are combined by weighted sum or worst case. This is the well-posed, widely used form of the problem.
+- **Method.** Maximise stiffness for a target mass, over several load cases, with a filter radius set in millimetres.
+  With BESO this is its stiffness mode with a mass goal. With a density (SIMP) engine it is compliance under a volume
+  constraint, with projection and continuation and the MMA optimiser from NLopt. This is the usual form of the problem.
+  A layout study runs on one fixed mesh, so the mesher's run-to-run variation does not enter it.
 - **Not in the optimiser:** stress, fatigue and buckling constraints. Stress-constrained topology optimisation is still
   difficult to do reliably. Those are verified afterwards on the rebuilt CAD, with buckling of thin optimised members
   as a named check.
 - **Problem definition.** The design space and the regions that must not change (bolt bosses, bearing seats, clamp and
   mating faces) are named solids in the CAD. Loads enter over real contact areas, not points: an optimiser builds
   structure towards a point load or an over-stiff support.
-- **Manufacturing in the loop,** kept to what is simple and robust: a minimum member size, symmetry, and an extrusion
-  (constant through-thickness) constraint for plate-like machined parts. Published filters exist for milling access and
-  for printing overhangs, but they were read only as abstracts and none is in a tool μ could adopt, so they are not
+- **Manufacturing in the loop,** kept to the constraints judged simplest: a filter radius that sets an approximate
+  member size (a guaranteed minimum needs a more elaborate robust formulation), symmetry, and an extrusion (constant
+  through-thickness) constraint for plate-like machined parts. BESO offers a casting-direction filter. Published
+  filters exist for milling access and for
+  printing overhangs, but they were seen only as abstracts and none was found in a tool μ could adopt, so they are not
   planned. E2's manufacturability check on the rebuilt part is the gate.
-- **Engine.** Decided by spike ES8 among three routes: an in-house loop on the Gmsh tetrahedral mesh with scipy sparse
-  solves; CalculiX in the loop with density-binned materials and element energies; or the BESO scripts as an external
-  command. In all three the algorithm is a published one (SIMP or BESO); they differ in who maintains the code. The
-  in-house route means implementing the textbook method once and benchmarking it against published results. It needs
-  no dependency and no adjoint solve for compliance, but no source gave run times at 50,000 to 500,000 elements, so the
-  spike measures them. pyMOTO (MIT, numpy and scipy only) is an existing library to assess in the same spike; it
-  appears to work on voxel grids, not on μ's tetrahedral meshes.
+- **Engine.** Existing tools first; spike ES8 decides on measured results.
+  - **BESO** is the first candidate: an existing open-source optimiser that drives CalculiX, which μ already ships, as
+    an external command. Its source shows a stiffness mode, a casting-direction filter and support for 10-node
+    tetrahedra. Open questions for the spike: whether it runs under Python 3.13 and CalculiX 2.23, the quality of its
+    layouts against the benchmarks (it is a heuristic, and its own wiki says checkerboarding is "not fully solved"),
+    and its run time **(to confirm, ES8)**.
+  - **pyMOTO** (MIT; needs numpy, scipy, sympy and matplotlib, all already pinned) is an existing density-method
+    library. It appears to work on voxel grids, not on μ's tetrahedral meshes.
+  - **An in-house density loop** is the fallback: the standard SIMP method implemented once on μ's own meshes, with
+    scipy sparse solves or CalculiX in the loop with density-binned materials and element energies, and checked
+    against stored results from a reference implementation and the invariants of Tier 5 (§8.1). No minimal open
+    implementation on tetrahedral meshes was found, and no source gave run times at 50,000 to 500,000 elements; the
+    larger sizes may need a sparse direct solver beyond scipy's.
+  - FEniTop and Kratos handle unstructured meshes but are heavy installs, and FEniTop is GPL. Not planned.
 - **From field to part.** The field is shown as an iso-surface with PyVista. The agent then rebuilds the design as
   parametric build123d features that follow it (ribs, pockets, webs, lightening holes), and parametric sizing tunes
-  that model. Commercial tools do the same step by hand or by surface fitting, and no open route to clean CAD from an
-  organic mesh was found.
+  that model. Commercial tools do this step by hand or by surface fitting, and no open route to clean CAD from an
+  organic mesh was found in a limited search.
 
 **Composites and printed parts.**
 - Laminated carbon plate and tube are not density problems. Ply counts, angles and tube sections are sized
   parametrically over the layup schema of §7.2, under its laminate rules. Tubes are sized by calculation (§7.8).
-- Cut-outs in a flat plate can be studied as a 2D layout problem with the laminate's in-plane stiffness. That is a fair
-  first pass only for a quasi-isotropic layup, and ply-level failure and the hole rules of §7.2 and §7.8 still decide.
+- Cut-outs in a flat plate could later be studied as a 2D layout problem with the laminate's in-plane stiffness. That is
+  a fair first pass only for a quasi-isotropic layup, and it is not an E8 deliverable. Ply-level failure and an
+  open-hole strength check would still decide; the hole rules of §7.2 and §7.8 are for fastener holes, and no sourced
+  rule for lightening cut-outs was found.
 - Printed polymer parts are optimised as isotropic for layout, with the print orientation fixed before the run and the
-  interlayer knockdown of §7.9 applied in verification. Parts for powder processes get no enclosed voids.
+  interlayer knockdown of §7.9 applied in verification. Parts for powder processes get no enclosed voids: a design rule
+  applied at the rebuild, not an optimiser constraint.
 
 **The optimisation package.** What the checker receives, before the usual stress report:
 
 | # | Content |
 |---|---|
 | 1 | The study as approved before the run: design space, fixed regions, load cases and their coverage of the part's requirements, objective, constraints, process and direction |
-| 2 | Settings: method, filter radius in millimetres, volume fraction, penalisation and projection schedule, optimiser, versions |
+| 2 | Settings: method, filter radius in millimetres, volume fraction, penalisation and projection schedule, optimiser, seed, versions |
 | 3 | Convergence history of objective and constraints; the share of intermediate ("grey") density |
 | 4 | Sensitivity of the result to filter radius, volume fraction, mesh and starting point, with any change of layout flagged |
 | 5 | Baseline comparison: the existing design against the new one on mass, stiffness, minimum margin, first mode and buckling factor |
@@ -983,7 +1015,8 @@ expect hand methods for this in any case.
 The numeric thresholds for items 3 and 4 are criteria-file entries to calibrate; the research gave none with a source.
 
 - **Proof.** Tier 5 of §8.1, and a seeded row in §8.2.
-- **Human.** Approving the optimisation problem before it runs; judging the rebuilt design; and everything §10 already
+- **Human.** Approving the optimisation problem before it runs (a change to an approved study makes the approval
+  stale, as for any reviewed object); judging the rebuilt design; and everything §10 already
   asks for the verification that follows.
 
 ---
@@ -1006,7 +1039,7 @@ NAFEMS LE10 target than the coarse one, so a test keyed on one node's stress is 
 | **2. Feature** | Hertz contact; a preloaded bolted joint against NASA-STD-5020B; Euler column and plate buckling; an elastoplastic bar; steady conduction and a bimetal strip; forced response of a single-degree-of-freedom system; a composite plate and tube against laminate theory | One case, at least, per template before it is offered | E4, E5 |
 | **3. CFD and aero** | A cavity case against Ghia et al.; Poiseuille; flat plate and NACA 0012 from the NASA Turbulence Modeling Resource; an APC propeller from the UIUC database with MRF | Plumbing and convergence gating. The NASA cases sit two orders of magnitude above small-UAV Reynolds numbers, so they do not validate low-Reynolds physics | E6 |
 | **4. Calculations** | The worked examples printed in ECSS-E-HB-32-23A; reference cases for NASA-STD-5020B (whether it prints numeric examples is to be confirmed); textbook cases for each formula | `mu.calc` reproduces published numbers | E3 |
-| **5. Optimisation** | Sizing: problems with a closed-form optimum (a two-bar truss, a beam section under stress and deflection limits). Topology: the standard MBB beam and short cantilever against stored results from a reference implementation at the same settings, plus invariants: a symmetric problem gives a symmetric result; compliance scales with the square of the load while the layout is unchanged; a finer mesh at the same physical filter radius changes compliance little; the volume constraint is met | The optimisers find known optima and behave as the published method does. Analytic Michell-truss values are added once read from the primary papers, which this research did not retrieve | E8 |
+| **5. Optimisation** | Sizing: problems with a closed-form optimum (a two-bar truss, a beam section under stress and deflection limits). Topology: the standard MBB beam and short cantilever, run as thin slabs, against stored results from the 88-line reference code of Andreassen et al. (run once outside the toolchain, values stored with provenance). That code is 2D with a different update rule, so the comparison is on final compliance within a tolerance ES8 sets. Plus invariants: a symmetric problem gives a symmetric result; compliance scales with the square of the load while the layout is unchanged; a finer mesh at the same physical filter radius changes compliance little; the volume constraint is met | The optimisers find known optima and behave as the published method does. Analytic Michell-truss values are added once read from the primary papers, which this research did not retrieve | E8 |
 
 NAFEMS problem statements are paid publications. Their targets are widely reproduced; licensing for redistribution in
 the repo must be checked before the definitions are committed.
@@ -1022,7 +1055,7 @@ For checks that judge rather than compute, a benchmark must show both that defec
 | Geometry | §7.1's planted faults | The same |
 | Requirement checks | Mutations of a passing model: a scaled hole, a dropped feature, a thinner wall | The share of mutations the project's checks detect |
 | Gate integrity | A run with zero cases, a stubbed function, a lowered threshold | `mu check` reports each |
-| Optimisation | A sizing study whose constraint reads a singular peak; a layout study whose load cases do not cover those bound to the part's requirements; a study with a fixed region removed | The first two are refused as `not_checked`; the third changes the layout and the package's baseline comparison shows it |
+| Optimisation | A sizing study whose constraint reads a singular peak; a layout study whose load cases do not cover those bound to the part's requirements; a study edited after its approval | All three are refused as `not_checked`, the last because its approval is stale |
 
 These also pin text-to-cad's behaviour, so a version bump that changes a verdict fails a benchmark.
 
@@ -1073,8 +1106,8 @@ Benchmarks test μ. This tests the agent using μ.
 ```
  E0 ──► E1 ──┬──► E2 ────────────────────┐
              └──► E3 ──► E4 ──┬──► E5 ───┼──► E7
-                              ├──► E6 ───┤
-                              └──► E8 ───┘
+                              ├──► E6 ───┘
+                              └──► E8
 ```
 
 - E0 and E1 come first because every later result needs a truthful driver and somewhere to put evidence.
@@ -1082,7 +1115,8 @@ Benchmarks test μ. This tests the agent using μ.
 - E4 needs E3's units and joint calculations (materials come from E1). E5 needs E3 and E4.
 - E6 needs E4's typed-study machinery and can run alongside E5.
 - E8 needs E4's typed studies and converged margins, and E2's manufacturability checks for the rebuilt part. Its sizing
-  part can start as soon as E4's linear core is done. Its many runs are a natural use of the compute node.
+  part can start as soon as E4's linear core is done; the package's buckling and modal comparisons need E4's later
+  templates. Nothing depends on E8. Its many runs are a natural use of the compute node.
 - None of E0 to E3 needs remote compute: PLAN.md already lists checks and reports as local. E4's convergence studies and
   E6 benefit from the compute node, which has run jobs through `mu submit` since v2026.11.8.
 - Against `docs/ROADMAP.md` (pairing fixes, then the dashboard, then the shell experience): E0 touches only μ's
@@ -1188,7 +1222,7 @@ Sizes are relative: **S** a few focused sessions, **M** several, **L** many, wit
 |---|---|
 | Spike ES8 | The topology engine is chosen on measured evidence and recorded |
 | `mu opt size`: parametric sizing on a typed study, every evaluation a run record | The Tier 5 sizing cases reach their known optima. A JATAYU machined part loses mass with every margin still non-negative after full re-verification |
-| `mu opt topo`: a density layout study with design and fixed regions from named solids, several load cases, a length scale in millimetres, symmetry and extrusion constraints | The Tier 5 MBB and cantilever cases match their stored reference values and pass the invariants on both platforms |
+| `mu opt topo`: a layout study on the engine ES8 picks, with design and fixed regions from named solids, several load cases, a filter radius in millimetres, and the symmetry, extrusion or casting-direction constraints the engine offers | The Tier 5 MBB and cantilever cases agree with their stored reference values within the tolerance ES8 sets, and pass the invariants on both platforms |
 | The optimisation package of §7.17, with the study approved before the run | A checker can tell optimiser-stage claims from verified ones on the first page |
 | One part taken end to end: layout study, rebuilt as parametric CAD, sized, verified by E4, checked by E2 | A JATAYU hub, clamp or bracket is redesigned this way and checked by a human, with the mass saved after verification recorded |
 | `mu opt shape`, if ES8 shows CalculiX's sensitivity step works on μ's elements | A stress-concentration case shows the map pointing at the right faces |
@@ -1209,7 +1243,7 @@ E4, before E5 commits to a route; ES6 in E7; ES8 at the start of E8.
 | **ES5** | Map named build123d faces to Gmsh surfaces after fragmenting, on parts with curved and split faces | Fall back to geometric predicates generated from the face, with a resolution check |
 | **ES6** | Write semantic PMI through OCCT, read it back with an independent parser, check against the NIST test models | Drawings and GD&T stay fully manual for now |
 | **ES7** | Ten agent-evaluation tasks end to end, once E1's project format exists | Fix the harness before the baseline is trusted |
-| **ES8** | The topology engine: an in-house density loop on a Gmsh tetrahedral mesh; CalculiX in the loop with binned materials and element energies; the BESO scripts as an external command. Measured on the MBB benchmark and one JATAYU bracket: agreement with the reference, run time at 50,000 to 500,000 elements on the laptop and the office PC, and whether CalculiX's sensitivity step works on 10-node tetrahedra | Use BESO as a hint generator with its heuristic status stated in every package, and keep parametric sizing as the main tool |
+| **ES8** | The topology engine, existing tools first. Run BESO on the MBB benchmark in its stiffness mode and on one JATAYU bracket meshed with 10-node tetrahedra: does it run under Python 3.13 and CalculiX 2.23, how do its layouts and final stiffness compare with the reference at equal mass, is a run repeatable, and how long does it take at 50,000 to 500,000 elements on the laptop and the office PC. Then pyMOTO on the same cases. An in-house density loop is prototyped only if neither passes. Also: whether CalculiX's sensitivity step works on 10-node tetrahedra | If BESO's layouts fail the benchmarks, build the in-house loop. If no route works, E8 delivers parametric sizing only. If the sensitivity step fails, `mu opt shape` is dropped |
 
 ---
 
@@ -1243,7 +1277,7 @@ guidance were not researched, and no reliable source was found on the Indian pos
 
 | When | The human | Why |
 |---|---|---|
-| Before geometry | Approves the plan: requirements, criteria, materials, load cases, analysis list | Catches a misread intent before work exists. Found independently in research and practice |
+| Before geometry, and before any optimisation run | Approves the plan: requirements, criteria, materials, load cases, analysis list; and the optimisation study, if there is one | Catches a misread intent before work exists. Found independently in research and practice |
 | During | Answers when a command returns `not_checked` for a missing input or a deviation is needed | The agent asks; it does not assume |
 | After | Checks the package and signs the review record | The independent verification |
 
@@ -1283,7 +1317,7 @@ Trust rises as the agent is usually right, which is when over-reliance is most l
 | Anything outside a template's envelope, and any new method | "New analytical techniques" is the line UK-SPEC draws |
 | Test planning decisions and correlation judgement | The link to reality |
 | The signature | Every published position |
-| The optimisation problem: objective, constraints, design space, load-case coverage | An optimiser exploits whatever is wrong or missing in its problem statement |
+| The optimisation problem: objective, constraints, design space, load-case coverage | An optimiser exploits whatever is wrong or missing in its problem statement (engineering judgement) |
 
 ---
 
@@ -1305,7 +1339,7 @@ Trust rises as the agent is usually right, which is when over-reliance is most l
 | Cost of iteration | The literature's strong agent needed about an hour per hard task. Budget per task; many cheap solver runs are expected |
 | An optimiser amplifies model error: it drives the design towards singular peaks, unconverged meshes, optimistic allowables and missing load cases | Constraints use E4's converged quantities only; a human approves the study before the run; every optimised design is re-verified by the normal path; optimiser-stage numbers are never reported as verified |
 | A topology result that cannot be made, or that loses its gain when rebuilt as CAD | The field is only a layout hint; the design of record is rebuilt parametric CAD; mass saved is quoted after verification. No independent figure for the typical loss was found |
-| Evidence gaps in the research itself | Listed in the research report: several vendors and standards were not read, and a search budget ran out part-way. §14 lists the sources this roadmap names without having read the primary text |
+| Evidence gaps in the research itself | Listed in the two research documents: several vendors and standards were not read, and a search budget ran out part-way. §14 lists the sources this roadmap names without having read the primary text |
 
 ---
 
@@ -1319,7 +1353,7 @@ Principle from §5.10. Every lock change is one new environment layer on every m
 | **2, in E5** | pyLife; FLife | Stress-life fatigue, rainflow; spectral vibration fatigue | Apache-2.0; MIT | Both active in 2026. Check their transitive dependencies against the OCP and VTK pins |
 | Data only | CalculiX test suite | Tier 0 | Ships with the CalculiX source | A small pinned archive in `apps.toml`; no code is linked |
 | Decided by a spike | A second solver for shells; a section-polar code; propeller tools | ES3; E6 | Varies | Each is a new application on two platforms. Not assumed |
-| None by default, in E8 | Nothing | Design optimisation uses NLopt, scipy and scikit-learn, already pinned | | Optuna (MIT) only if the in-house surrogate loop proves insufficient. The BESO scripts (LGPL-3) only as an external command, pinned by commit, if ES8 picks them |
+| In E8 | The BESO scripts, as an external command pinned by commit in `pins.toml` | Topology layout studies | LGPL-3 | Needs numpy and matplotlib, both already pinned; no lock change. Sizing optimisation uses NLopt, scipy and scikit-learn, already pinned. Conditional on ES8, each a lock change to fold into bump 2 if decided in time: pyMOTO (MIT); Optuna (MIT); a sparse direct solver for a large in-house study |
 
 Deliberately **not** added:
 
@@ -1330,7 +1364,7 @@ Deliberately **not** added:
 | pygccx, py-fatigue, anastruct (GPL); draftwright, pycba (AGPL) | Read for ideas or invoked as external commands; never imported |
 | A templating or PDF library | Reports are Markdown plus python-docx, both already pinned |
 | A requirements tool | In-house TOML unless a customer needs ReqIF |
-| FEniCSx-based or Kratos topology codes; torch-based optimisers; the `mmapy` MMA package (GPL) | Heavy installs or licence. NLopt's MMA and an in-house loop instead |
+| FEniCSx-based or Kratos topology codes; torch-based optimisers; the `mmapy` MMA package (GPL) | Heavy installs or licence. BESO first; NLopt's MMA in an in-house loop as the fallback |
 
 Already pinned and sufficient for most of E0 to E4: numpy, scipy, sympy, pandas, shapely, trimesh, networkx, pydantic,
 python-docx, matplotlib, casadi, nlopt, ezdxf, the Gmsh API, PyVista, CalculiX.
@@ -1354,7 +1388,7 @@ Each has a default, so work can start on E0 without waiting.
 | 9 | **Project scripts.** Which JATAYU scripts (tolerance, checks, mass, report) are generic enough to move into μ, as `felib.py` did? | Review them in E1; the project repository was not visible to this review |
 | 10 | **text-to-cad's companion skills.** Adopt, or strip the references from the vendored skill? | Strip the references; μ ships its own skills |
 | 11 | **Agent evaluation budget.** How much agent time per release? | Ten tasks per release |
-| 12 | **The raw research notes** (about 600 KB, with every source link). The report is in `docs/research/` | The notes stay out of the repo unless wanted |
+| 12 | **The raw research notes** (about 600 KB for the first pass and 57 KB for the second, with every source link). The report is in `docs/research/` | The notes stay out of the repo unless wanted |
 | 13 | **Policy without an org profile.** Should μ ship a short fallback summary of the validation policy for projects that have no org profile? This would change PLAN.md §8 | No. `mu context` warns when a project has no org profile |
 | 14 | **Where this fits in the order of `docs/ROADMAP.md`** (pairing fixes, dashboard, shell experience) | E0 alongside the dashboard work, since it changes nothing on the node. E1 and later when the owner places them, built on the dashboard's and the shell's status data |
 | 15 | **`cad run --with` and script-header dependencies.** The vendored skill allows them; μ's toolchain is sealed and offline-first | Not allowed under μ; the skill is edited to say so |
@@ -1436,6 +1470,7 @@ leans on most:
 - [pyMOTO](https://github.com/aatmdelissen/pyMOTO); [FEniTop](https://github.com/missionlab/fenitop);
   [PyTopo3D](https://arxiv.org/html/2504.05604v1)
 - [Altair on interpreting topology results](https://help.altair.com/hwsolvers/os/topics/solvers/os/ossmooth_design_interpretation_r.htm);
+  [Tosca on smoothing results](https://docs.software.vt.edu/abaqusv2024/English/TsoUserMap/tso-c-usr-validation-smooth-resTopo.htm);
   [Langelaar, overhang filter](https://link.springer.com/article/10.1007/s00158-016-1522-2);
   [Lazarov et al., length scale and manufacturability](https://core.ac.uk/display/84003548);
   [Lund, discrete material optimisation](https://vbn.aau.dk/ws/files/266072783/Lund_2017_SMO_DMTO_Failure_preprint.pdf)
@@ -1461,7 +1496,9 @@ relies on it.
 | NASA SP-8007 knockdown values; MMPDS | Not retrieved; MMPDS is paid |
 | Topology optimisation literature: Sigmund and Maute (2013), Le et al. (2010), Lazarov et al. (2016), Langelaar's overhang and milling filters, discrete material optimisation | Abstracts or search summaries only |
 | Analytic Michell and Rozvany benchmark values; ISO/ASTM 52910 and 52911 | Not retrieved |
-| The BESO scripts, pyMOTO and the other optimisation codes | Project pages only. None was run |
+| The BESO scripts | Source and configuration read at commit `5056d30`. Not run |
+| pyMOTO and the other optimisation codes | Project pages or search summaries. None was run |
+| Altair and Tosca documentation; the GE bracket figures; NASA-STD-6030; the two papers on AI and topology optimisation | Search summaries or abstracts only |
 
 ---
 
