@@ -831,13 +831,20 @@ def time_view(j):
             "budget_left_s": left}
 
 
+def utc_hm(iso):
+    """'2026-11-14T14:45:05Z' -> '14:45 UTC': the node does not know the workstation's time zone, so its own words
+    say which zone they use (release 2026.11.12; a workstation of that release rebuilds them in its local time from
+    the ISO fields, qctl.pause_note). '?' when unknown."""
+    return "%s UTC" % iso[11:16] if isinstance(iso, str) and len(iso) >= 16 else "?"
+
+
 def note_of(pv):
     if not pv:
         return None
-    hh = (pv.get("until") or "")[11:16]
+    hh = utc_hm(pv.get("until"))
     if pv.get("resume_asked"):
         return "resuming: waits for %s (ends by %s)" % (" ".join(x[-6:] for x in pv.get("lent_to") or []),
-                                                        (pv.get("resumes_by") or "")[11:16])
+                                                        utc_hm(pv.get("resumes_by")))
     if pv.get("why") == "auto":
         return "paused for %s until %s" % ((pv.get("for_job") or "")[-6:], hh)
     return "paused until %s by %s" % (hh, pv.get("by"))
@@ -1014,7 +1021,7 @@ def verb_pause(key, args):
                         "mem_bytes": max(0, (g.get("mem_bytes") or 0) - ((pv or {}).get("held_mem_bytes") or 0)),
                         "until": (pv or {}).get("until")},
                "delays": [], "note": note_of(pv),
-               "next": "it resumes by itself at %s; to resume sooner: mu resume %s" % (((pv or {}).get("until") or "")[11:16], jid)}
+               "next": "it resumes by itself at %s; to resume sooner: mu resume %s" % (utc_hm((pv or {}).get("until")), jid)}
         if raised:
             out["deadline_raised_to"] = n.wall_of(v, raised)
         if fault("drop-field"):

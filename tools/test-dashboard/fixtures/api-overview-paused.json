@@ -116,7 +116,7 @@
    "mine": true,
    "name": "cfd-wing",
    "node": "office-pc",
-   "note": "resuming: waits for lyms3c (ends by 09:54)",
+   "note": "resuming: waits for lyms3c (ends by 09:54 UTC)",
    "pausable": true,
    "paused": {
     "by": "avi-mac",
@@ -197,7 +197,7 @@
    "mine": true,
    "name": "frame-fea",
    "node": "office-pc",
-   "note": "paused until 10:03 by avi-mac",
+   "note": "paused until 10:03 UTC by avi-mac",
    "pausable": true,
    "paused": {
     "by": "avi-mac",
@@ -595,6 +595,7 @@
     "stats",
     "watch",
     "metrics",
+    "gc",
     "pause"
    ],
    "hello": {

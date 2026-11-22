@@ -2,8 +2,9 @@
  "attempt": 1,
  "band": "normal",
  "cancel_requested": false,
- "ended_at": "2026-11-15T16:11:08Z",
+ "ended_at": "2026-11-22T18:59:37Z",
  "exit_code": 0,
+ "fetched": null,
  "grant": {
   "class": "normal",
   "cores": 2,
@@ -12,6 +13,7 @@
   "time_s": 3600
  },
  "job_id": "20261114-110000-d0n3d0",
+ "kept": null,
  "key": "avi-mac",
  "log_size": 0,
  "name": "d0n3d0",
@@ -23,18 +25,19 @@
   {
    "by": "avi-mac",
    "for_job": null,
-   "from": "2026-11-15T16:11:08Z",
+   "from": "2026-11-22T18:59:37Z",
    "lent_mem_bytes": 327155712,
-   "to": "2026-11-15T16:11:08Z",
+   "to": "2026-11-22T18:59:37Z",
    "why": "hand"
   }
  ],
  "position": null,
  "project": null,
  "project_id": "p1-0123456789ab",
+ "pruned": null,
  "queued_at": null,
  "run_s": 0.2,
- "started_at": "2026-11-15T16:11:08Z",
+ "started_at": "2026-11-22T18:59:37Z",
  "state": "succeeded",
  "unit": "mu-job-20261114-110000-d0n3d0.service",
  "usage": null

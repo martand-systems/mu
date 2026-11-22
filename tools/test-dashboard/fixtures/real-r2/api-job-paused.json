@@ -12,13 +12,13 @@
  },
  "index": null,
  "job": {
-  "as_of": 1794759069.0,
+  "as_of": 1795373978.0,
   "attempt": 1,
   "band": "normal",
   "cancel_requested": false,
   "class": "normal",
   "ended_at": null,
-  "ends_by": 1794781578.0,
+  "ends_by": 1795396487.0,
   "exit_code": null,
   "grant": {
    "borrowed": [],
@@ -36,20 +36,20 @@
   "mine": false,
   "name": "k3f9qa",
   "node": "office-pc",
-  "note": "paused until 16:26 by avi-mac",
+  "note": "paused until 19:14 UTC by avi-mac",
   "pausable": true,
   "paused": {
    "by": "avi-mac",
    "for_job": null,
-   "held_mem_bytes": 6442450944,
+   "held_mem_bytes": 5905580032,
    "lent_to": [
     "20261114-142955-2icaxr"
    ],
    "phase": "frozen",
    "resume_asked": null,
    "resumes_by": null,
-   "since": 1794759069.0,
-   "until": 1794759969.0,
+   "since": 1795373977.0,
+   "until": 1795374877.0,
    "why": "hand"
   },
   "paused_s": null,
@@ -61,7 +61,7 @@
   "run_s": null,
   "short": "k3f9qa",
   "stale": false,
-  "started_at": 1794759068.0,
+  "started_at": 1795373977.0,
   "state": "running",
   "time": {
    "budget_left_s": 14400,
@@ -77,7 +77,7 @@
   "old_node": false,
   "state": "online"
  },
- "now": 1794759071.0,
+ "now": 1795373980.0,
  "ok": true,
  "record": null,
  "run": null

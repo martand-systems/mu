@@ -750,6 +750,7 @@
     "stats",
     "watch",
     "metrics",
+    "gc",
     "pause"
    ],
    "hello": {

@@ -2,21 +2,21 @@
  "api": 1,
  "jobs": [
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "borrowing",
    "ended_at": null,
-   "ends_by": 1794759739.0,
+   "ends_by": 1795374648.0,
    "exit_code": null,
    "grant": {
     "borrowed": [
      {
       "cpus": "0-3",
       "from": "20261114-120102-k3f9qa",
-      "mem_bytes": 0,
-      "until": 1794759969.0
+      "mem_bytes": 536870912,
+      "until": 1795374877.0
      }
     ],
     "class": "borrowing",
@@ -45,32 +45,32 @@
    "run_s": null,
    "short": "2icaxr",
    "stale": false,
-   "started_at": 1794759069.0,
+   "started_at": 1795373978.0,
    "state": "running",
    "time": {
     "budget_left_s": 0,
     "limit_s": 600,
     "paused_s": 0,
-    "run_s": 0
+    "run_s": 2
    },
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "borrowing",
    "ended_at": null,
-   "ends_by": 1794759439.0,
+   "ends_by": 1795374348.0,
    "exit_code": null,
    "grant": {
     "borrowed": [
      {
       "cpus": "4-5",
       "from": "20261114-121500-r7mm2x",
-      "mem_bytes": 0,
-      "until": 1794759969.0
+      "mem_bytes": 268435456,
+      "until": 1795374877.0
      }
     ],
     "class": "borrowing",
@@ -99,24 +99,24 @@
    "run_s": null,
    "short": "b8b8b8",
    "stale": false,
-   "started_at": 1794759069.0,
+   "started_at": 1795373978.0,
    "state": "running",
    "time": {
     "budget_left_s": 0,
     "limit_s": 300,
     "paused_s": 0,
-    "run_s": 0
+    "run_s": 2
    },
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": 1794781578.0,
+   "ends_by": 1795396487.0,
    "exit_code": null,
    "grant": {
     "borrowed": [],
@@ -134,20 +134,20 @@
    "mine": false,
    "name": "k3f9qa",
    "node": "office-pc",
-   "note": "paused until 16:26 by avi-mac",
+   "note": "paused until 19:14 UTC by avi-mac",
    "pausable": true,
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 6442450944,
+    "held_mem_bytes": 5905580032,
     "lent_to": [
      "20261114-142955-2icaxr"
     ],
     "phase": "frozen",
     "resume_asked": null,
     "resumes_by": null,
-    "since": 1794759069.0,
-    "until": 1794759969.0,
+    "since": 1795373977.0,
+    "until": 1795374877.0,
     "why": "hand"
    },
    "paused_s": null,
@@ -159,7 +159,7 @@
    "run_s": null,
    "short": "k3f9qa",
    "stale": false,
-   "started_at": 1794759068.0,
+   "started_at": 1795373977.0,
    "state": "running",
    "time": {
     "budget_left_s": 14400,
@@ -170,13 +170,13 @@
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": 1794767178.0,
+   "ends_by": 1795382087.0,
    "exit_code": null,
    "grant": {
     "borrowed": [],
@@ -194,23 +194,23 @@
    "mine": false,
    "name": "r7mm2x",
    "node": "office-pc",
-   "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+   "note": "resuming: waits for b8b8b8 (ends by 19:05 UTC)",
    "pausable": false,
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 2147483648,
+    "held_mem_bytes": 1610612736,
     "lent_to": [
      "20261114-143010-b8b8b8"
     ],
     "phase": "frozen",
     "resume_asked": {
-     "at": 1794759069.0,
+     "at": 1795373978.0,
      "by": "avi-mac"
     },
-    "resumes_by": 1794759439.0,
-    "since": 1794759069.0,
-    "until": 1794759969.0,
+    "resumes_by": 1795374348.0,
+    "since": 1795373978.0,
+    "until": 1795374877.0,
     "why": "hand"
    },
    "paused_s": null,
@@ -222,7 +222,7 @@
    "run_s": null,
    "short": "r7mm2x",
    "stale": false,
-   "started_at": 1794759068.0,
+   "started_at": 1795373977.0,
    "state": "running",
    "time": {
     "budget_left_s": 7200,
@@ -233,13 +233,13 @@
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": 1794766338.0,
+   "ends_by": 1795381247.0,
    "exit_code": null,
    "grant": {
     "borrowed": [],
@@ -269,18 +269,18 @@
    "run_s": null,
    "short": "f1ll3r",
    "stale": false,
-   "started_at": 1794759068.0,
+   "started_at": 1795373977.0,
    "state": "running",
    "time": {
     "budget_left_s": 7200,
     "limit_s": 7200,
     "paused_s": 0,
-    "run_s": 0
+    "run_s": 2
    },
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "urgent",
    "cancel_requested": false,
@@ -315,7 +315,7 @@
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
@@ -325,7 +325,7 @@
    "exit_code": null,
    "grant": null,
    "held": {
-    "at": 1794759069.0,
+    "at": 1795373978.0,
     "by": "avi-mac"
    },
    "job_id": "20261114-130200-h3ld00",
@@ -353,7 +353,7 @@
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "low",
    "cancel_requested": false,
@@ -388,12 +388,12 @@
    "usage": null
   },
   {
-   "as_of": 1794759069.0,
+   "as_of": 1795373978.0,
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
    "class": "normal",
-   "ended_at": 1794759068.0,
+   "ended_at": 1795373977.0,
    "ends_by": null,
    "exit_code": 0,
    "grant": {
@@ -424,7 +424,7 @@
    "run_s": 0.2,
    "short": "d0n3d0",
    "stale": false,
-   "started_at": 1794759068.0,
+   "started_at": 1795373977.0,
    "state": "succeeded",
    "time": null,
    "usage": null
@@ -441,7 +441,7 @@
    "perf": 4,
    "physical": 8
   },
-  "cpu_pct": 34.9,
+  "cpu_pct": 32.7,
   "host": "fixture-mac",
   "load": [
    2.1,
@@ -449,40 +449,40 @@
    1.7
   ],
   "mem": {
-   "available": 8058209772,
+   "available": 7975357617,
    "pressure": "ok",
    "total": 17179869184,
-   "used": 9121659412
+   "used": 9204511567
   },
   "mu_version": "v2026.11.9",
   "name": "This Mac",
   "per_core": [
-   43.0,
-   40.2,
-   34.7,
-   38.4,
-   36.1,
-   44.7,
-   32.7,
-   37.1
+   27.0,
+   22.0,
+   40.4,
+   34.6,
+   35.1,
+   18.3,
+   22.8,
+   29.9
   ],
   "sampler": "fake",
   "series": {
    "cpu_pct": [
     [
-     1794759071.0,
-     34.9
+     1795373980.0,
+     32.7
     ]
    ],
    "mem_used": [
     [
-     1794759071.0,
-     9121659412
+     1795373980.0,
+     9204511567
     ]
    ]
   },
   "stale": false,
-  "t": 1794759071.0
+  "t": 1795373980.0
  },
  "more": {
   "office-pc": false
@@ -508,6 +508,7 @@
     "stats",
     "watch",
     "metrics",
+    "gc",
     "pause"
    ],
    "hello": {
@@ -520,7 +521,7 @@
     "cores_physical": 8,
     "cpu_model": "13th Gen Intel(R) Core(TM) i7-13700",
     "disk": {
-     "free_gb": 207,
+     "free_gb": 215,
      "min_free_gb": 0
     },
     "kernel": "6.6.87.2-microsoft-standard-WSL2",
@@ -535,13 +536,13 @@
      "running": 5
     },
     "runner": "inactive",
-    "t": 1794759069.0,
+    "t": 1795373978.0,
     "wsl": false
    },
    "jobs_listed": 9,
    "link": "relay",
    "list_stale": false,
-   "list_t": 1794759069.0,
+   "list_t": 1795373978.0,
    "more": false,
    "name": "office-pc",
    "offline_since": null,
@@ -551,14 +552,14 @@
    "series": {
     "cpu_pct": [
      [
-      1794759067.2,
-      77.4
+      1795373976.2,
+      77.3
      ]
     ]
    },
    "state": "online",
    "stats": {
-    "cpu_pct": 77.4,
+    "cpu_pct": 77.3,
     "disk": {
      "free_gb": 89,
      "min_free_gb": 20
@@ -569,46 +570,46 @@
      19.8
     ],
     "mem": {
-     "avail": 4914352452,
+     "avail": 4774763118,
      "cached": 2100000000,
      "shmem": 400000000,
      "total": 25769803776,
-     "used": 20855451324
+     "used": 20995040658
     },
     "node_stale": false,
     "per_core": [
+     72,
+     76,
+     79,
+     79,
+     76,
+     79,
      81,
+     75,
+     79,
+     75,
+     72,
+     75,
+     74,
+     80,
      78,
-     80,
-     80,
-     72,
-     76,
-     79,
-     77,
-     79,
-     81,
-     72,
-     74,
-     81,
-     80,
-     75,
-     75,
-     81,
-     74,
-     72,
-     80,
-     79,
-     81,
-     74,
      73,
-     76,
-     76,
-     77,
+     81,
+     81,
      82,
-     74,
-     73,
+     81,
+     72,
      75,
-     77
+     76,
+     74,
+     75,
+     79,
+     79,
+     80,
+     80,
+     80,
+     79,
+     74
     ],
     "psi": {
      "cpu_some10": 41.2,
@@ -622,12 +623,12 @@
      "running": 3
     },
     "stale": false,
-    "t": 1794759067.2,
+    "t": 1795373976.2,
     "uptime_s": 86400
    }
   }
  ],
- "now": 1794759071.0,
+ "now": 1795373980.0,
  "ok": true,
  "summary": {
   "held": 1,

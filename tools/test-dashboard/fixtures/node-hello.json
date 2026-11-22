@@ -18,6 +18,7 @@
   "stats",
   "watch",
   "metrics",
+  "gc",
   "pause"
  ],
  "hw": {

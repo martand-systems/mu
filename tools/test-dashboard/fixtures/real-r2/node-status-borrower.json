@@ -4,15 +4,15 @@
  "cancel_requested": false,
  "class": "borrowing",
  "ended_at": null,
- "ends_by": "2026-11-15T16:22:19Z",
+ "ends_by": "2026-11-22T19:10:48Z",
  "exit_code": null,
  "grant": {
   "borrowed": [
    {
     "cpus": "0-3",
     "from": "20261114-120102-k3f9qa",
-    "mem_bytes": 0,
-    "until": "2026-11-15T16:26:09Z"
+    "mem_bytes": 536870912,
+    "until": "2026-11-22T19:14:37Z"
    }
   ],
   "class": "borrowing",
@@ -45,7 +45,7 @@
   "time_s": 600,
   "why": "4 cores, 0.5 GB, 10m (cores flag, mem flag, time flag)"
  },
- "started_at": "2026-11-15T16:11:09Z",
+ "started_at": "2026-11-22T18:59:38Z",
  "state": "running",
  "time": {
   "budget_left_s": 0,

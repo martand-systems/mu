@@ -8,6 +8,8 @@
   mu node disable                                    stop and remove it (jobs are kept)
   mu node selftest                                   prove that a user unit's MemoryMax is enforced (§10)
   mu node info                                       the `hello` answer, here
+  mu node settings [gc.KEY=VALUE ...] [min_free_gb=G]  show or change the node's settings in node.json (the clean-up of
+                                                     finished job folders: docs/design/job-layer.md §24)
   mu node host-script                                the Windows path of the default release's mu-wsl2-host.ps1, for an
                                                      administrator's PowerShell (docs/design/pairing.md §9.1)
 
@@ -123,7 +125,7 @@ ARG_RULES = {"id": proto.JOB_ID, "project": proto.PROJECT_ID, "repo": proto.REPO
              # queue control (scheduler.md §20.4): from and others are claims made by code mu owns, like by=
              "before": proto.JOB_ID, "after": proto.JOB_ID, "to": re.compile(r"^(front|back)$"),
              "class": re.compile(r"^(urgent|high|normal|low)$"), "from": proto.PROJECT_ID, "others": re.compile(r"^[01]$")}
-FEATURES = ("sched", "usage", "queue-control", "update", "stats", "watch", "metrics")
+FEATURES = ("sched", "usage", "queue-control", "update", "stats", "watch", "metrics", "gc")
 ARG_RULES["interval"] = re.compile(r"^[0-9]{1,2}$")
 LOCK_WAIT_S = 120             # a verb waits this long for the queue lock (the runner holds it through checkouts)
 SAMPLE_EVERY = 5              # ticks between two samples of the running jobs (§7.1)
@@ -142,6 +144,8 @@ VALVE_AFTER_S = 60            # a borrower still alive this long past its lender
 PAUSE_COUNT_MAX = 20          # pauses per attempt (review 2026-11-15: 200 pause/resume cycles cost 4,200 systemd calls)
 BACKSTOP_ROOM_S = DEAD_MAN_S + 60   # RuntimeMaxSec's room past t + budget for a thaw after D (the dead-man's at D + 120)
 ARG_RULES["for"] = re.compile(r"^[0-9]{1,5}$")
+ARG_RULES["dry"] = re.compile(r"^[01]$")      # gc dry=1 (release 2026.11.12, the clean-up: src/mu/nodegc.py)
+ARG_RULES["off"] = re.compile(r"^[01]$")      # keep off=1
 
 
 class NodeError(Exception):
@@ -875,7 +879,8 @@ def hello_answer(key, node):
                "cores": len(cap["cpus"]) - pl["allocated"]["cores"],
                "mem_bytes": max(0, cap["mem_bytes"] - pl["allocated"]["mem_bytes"])},
            "owners": own, "you_are_owner": key in own, "warnings": owner_warnings(own),
-           "update": {"running": unit_props(UPDATE_UNIT).get("ActiveState") in ("active", "activating")}}
+           "update": {"running": unit_props(UPDATE_UNIT).get("ActiveState") in ("active", "activating")},
+           "gc": nodegc.summary()}   # the clean-up of finished job folders (release 2026.11.12): gc.json, no walk
     if node.get("order_restored_at"):
         out["queue"]["order_restored_at"] = node["order_restored_at"]
     return out
@@ -1265,7 +1270,12 @@ def run_in_session(j):
 
 def verb_status(key, args):
     j = load_job(args.get("id", ""))
-    return status_of(j, None if j["result"] else view())
+    out = status_of(j, None if j["result"] else view())
+    if j["result"]:   # the clean-up's marks (release 2026.11.12): pruned, kept, fetched
+        out.update(nodegc.public(j["dir"]))
+    elif nodegc.kept(j["dir"]):
+        out["kept"] = nodegc.public(j["dir"])["kept"]
+    return out
 
 
 def verb_list(key, args):
@@ -1282,6 +1292,7 @@ def verb_list(key, args):
     for s in finished:   # a finished job's pause history (up to 20 entries) is status's alone (contract §3.1)
         if not fault("list-keeps-pauses"):
             s.pop("pauses", None)
+        s.update(nodegc.public(job_dir(s["job_id"])))   # the clean-up's marks, for the jobs sent only
     return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
             "rev": nodestats.read_rev() if rev is None else rev}
 
@@ -1333,6 +1344,34 @@ def verb_fetch(key, args):
     if not j["result"]:
         raise NodeError(proto.NODE_USAGE, "not-finished", "mu status %s --wait" % j["id"],
                         message="job %s has no result yet" % j["id"])
+    # a shared lock on job.json while the outputs are read: the clean-up (nodegc.prune_one) needs it exclusively, so
+    # it never swaps a folder that is being sent; a folder swapped while this waited is read again (its new inode)
+    for _ in range(3):
+        lk = os.open(os.path.join(j["dir"], "job.json"), os.O_RDONLY)
+        fcntl.flock(lk, fcntl.LOCK_SH)
+        try:
+            same = os.fstat(lk).st_ino == os.stat(os.path.join(j["dir"], "job.json")).st_ino
+        except OSError:
+            same = False
+        if same:
+            break
+        os.close(lk)
+    else:
+        raise NodeError(proto.NODE_UNAVAILABLE, "busy", "retry in a minute", message="job %s's folder kept changing "
+                        "while the fetch waited for it" % j["id"])
+    try:
+        return send_fetch(key, args, load_job(j["id"]))
+    finally:
+        os.close(lk)
+
+
+def send_fetch(key, args, j):
+    pr = nodegc.pruned(j["dir"])
+    if pr and not fault("fetch-pruned-served"):
+        raise NodeError(proto.NODE_NO_SUCH, "pruned", "mu status %s" % j["id"], message="job %s was cleaned up on the "
+                        "node at %s (%s): its outputs and working copy were removed" % (j["id"], pr.get("at"),
+                                                                                         pr.get("why")),
+                        pruned={k: pr.get(k) for k in ("at", "why", "by", "bytes_freed", "fetched")})
     with open(os.path.join(j["dir"], "result.json"), "rb") as f:
         rdata = f.read()
     import io
@@ -1363,6 +1402,8 @@ def verb_fetch(key, args):
             tf.addfile(ti, io.BytesIO(b))
     tf.close()
     out.flush()
+    if args.get("what") != "result":   # the outputs went out whole: the clean-up counts from here (fetched.json)
+        nodegc.note_fetch(j["dir"], j["id"], key)
     return None
 
 
@@ -2199,8 +2240,8 @@ def step(first=False, stop=None, started=None):
         ap = pausectl.auto_candidate(pl, by_id, running, cap, node) if not disk else None
         if pl["starts"] or ap:
             if not take_start_lock():
-                journal_once("start-lock", "runner: an update holds %s: no job starts until the default has moved"
-                             % start_lock_path())
+                journal_once("start-lock", "runner: an update or a clean-up holds %s: no job starts until it is "
+                             "done" % start_lock_path())
                 return busy
             try:
                 dv = default_version()
@@ -2577,6 +2618,10 @@ def run_runner():
             busy = True
         first = False
         set_busy(busy)
+        try:   # the clean-up of finished job folders: between two passes (no job is starting), at most once an hour
+            nodegc.tick(stop)
+        except Exception:  # noqa
+            journal_once("gc", "runner: clean-up: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
         n += 1
         if n % SAMPLE_EVERY == 0:
             try:
@@ -2872,6 +2917,61 @@ def cmd_disable(as_json):
     return 0
 
 
+def cmd_settings(args, as_json):
+    """`mu node settings [gc.KEY=VALUE ...] [min_free_gb=G]`: node.json's settings that people may change, checked,
+    written under the queue lock (node.json is sealed: a hand edit makes it unreadable). Shows them all."""
+    if not os.path.isdir(ROOT) or not os.access(ROOT, os.W_OK):
+        return node_main_error("%s is missing or not writable" % ROOT, "as root, once: mu-wsl2-distro install", as_json, 69)
+    gc_new, other = {}, {}
+    for a in args:
+        k, sep, v = a.partition("=")
+        try:
+            if not sep:
+                raise ValueError("give KEY=VALUE, e.g. gc.after_fetch_days=7")
+            if k.startswith("gc."):
+                kk, vv = nodegc.parse_setting(k[3:], v)
+                gc_new[kk] = vv
+            elif k == "min_free_gb":
+                if not re.match(r"^[0-9]{1,6}$", v):
+                    raise ValueError("min_free_gb takes a whole number of GB")
+                other[k] = int(v)
+            else:
+                raise ValueError("unknown setting %s (gc.KEY or min_free_gb)" % k)
+        except ValueError as e:
+            return node_main_error(str(e), "mu node settings (shows them)", as_json, 2)
+    changed = []
+    if gc_new or other:
+        with Lock():
+            n = node_info()
+            g = dict(n.get("gc") or {}) if isinstance(n.get("gc"), dict) else {}
+            for k, v in gc_new.items():
+                if g.get(k, nodegc.DEFAULTS[k]) != v:
+                    changed.append("gc.%s=%s" % (k, json.dumps(v)))
+                g[k] = v
+            n["gc"] = g
+            for k, v in other.items():
+                if n.get(k) != v:
+                    changed.append("%s=%s" % (k, v))
+                n[k] = v
+            n.setdefault("protocol", proto.PROTOCOL)
+            durable.write_record(p("node.json"), n)
+        if changed:
+            journal("settings: %s (mu node settings, uid %d)" % (" ".join(changed), os.getuid()))
+    n = node_info()
+    out = {"ok": True, "changed": changed, "gc": nodegc.settings(n), "gc_defaults": nodegc.DEFAULTS,
+           "min_free_gb": n.get("min_free_gb", DEFAULT_MIN_FREE_GB), "log_cap_gb": n.get("log_cap_gb", DEFAULT_LOG_CAP_GB)}
+    if as_json:
+        proto.emit_json(out)
+    else:
+        for k, v in sorted(out["gc"].items()):
+            print("gc.%-24s %s%s" % (k, json.dumps(v), "" if v == nodegc.DEFAULTS[k] else "  (default %s)" %
+                                     json.dumps(nodegc.DEFAULTS[k])))
+        print("%-27s %s" % ("min_free_gb", out["min_free_gb"]))
+        if changed:
+            print("changed: %s" % " ".join(changed))
+    return 0
+
+
 def cmd_selftest(as_json):
     if not os.path.isdir(ROOT):
         sys.stderr.write("note: %s does not exist yet: the result is not recorded\n" % ROOT)
@@ -2943,6 +3043,8 @@ def main(args):
         return cmd_selftest(as_json)
     if sub == "host-script":
         return cmd_host_script(as_json)
+    if sub == "settings":
+        return cmd_settings(rest[1:], as_json)
     if sub == "info":
         a = hello_answer("local", node_info())
         if as_json:
@@ -2959,4 +3061,6 @@ def main(args):
 
 
 from mu import nodestats  # noqa: E402
+from mu import nodegc  # noqa: E402
 VERBS.update(nodestats.VERBS)
+VERBS.update(nodegc.VERBS)

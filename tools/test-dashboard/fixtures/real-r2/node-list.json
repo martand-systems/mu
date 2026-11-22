@@ -4,8 +4,9 @@
    "attempt": 1,
    "band": "normal",
    "cancel_requested": false,
-   "ended_at": "2026-11-15T16:11:08Z",
+   "ended_at": "2026-11-22T18:59:37Z",
    "exit_code": 0,
+   "fetched": null,
    "grant": {
     "class": "normal",
     "cores": 2,
@@ -14,6 +15,7 @@
     "time_s": 3600
    },
    "job_id": "20261114-110000-d0n3d0",
+   "kept": null,
    "key": "avi-mac",
    "log_size": 0,
    "name": "d0n3d0",
@@ -24,9 +26,10 @@
    "position": null,
    "project": null,
    "project_id": "p1-0123456789ab",
+   "pruned": null,
    "queued_at": null,
    "run_s": 0.2,
-   "started_at": "2026-11-15T16:11:08Z",
+   "started_at": "2026-11-22T18:59:37Z",
    "state": "succeeded",
    "unit": "mu-job-20261114-110000-d0n3d0.service",
    "usage": null
@@ -37,7 +40,7 @@
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": "2026-11-15T22:26:18Z",
+   "ends_by": "2026-11-23T01:14:47Z",
    "exit_code": null,
    "grant": {
     "class": "normal",
@@ -50,21 +53,21 @@
    "key": "avi-mac",
    "log_size": 0,
    "name": "k3f9qa",
-   "note": "paused until 16:26 by avi-mac",
+   "note": "paused until 19:14 UTC by avi-mac",
    "ok": true,
    "pausable": true,
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 6442450944,
+    "held_mem_bytes": 5905580032,
     "lent_to": [
      "20261114-142955-2icaxr"
     ],
     "phase": "frozen",
     "resume_asked": null,
     "resumes_by": null,
-    "since": "2026-11-15T16:11:09Z",
-    "until": "2026-11-15T16:26:09Z",
+    "since": "2026-11-22T18:59:37Z",
+    "until": "2026-11-22T19:14:37Z",
     "why": "hand"
    },
    "position": null,
@@ -83,7 +86,7 @@
     "time_s": 21600,
     "why": "4 cores, 6.0 GB, 6h (cores flag, mem flag, time flag)"
    },
-   "started_at": "2026-11-15T16:11:08Z",
+   "started_at": "2026-11-22T18:59:37Z",
    "state": "running",
    "time": {
     "budget_left_s": 14400,
@@ -99,7 +102,7 @@
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": "2026-11-15T18:26:18Z",
+   "ends_by": "2026-11-22T21:14:47Z",
    "exit_code": null,
    "grant": {
     "class": "normal",
@@ -112,24 +115,24 @@
    "key": "avi-mac",
    "log_size": 0,
    "name": "r7mm2x",
-   "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+   "note": "resuming: waits for b8b8b8 (ends by 19:05 UTC)",
    "ok": true,
    "pausable": false,
    "paused": {
     "by": "avi-mac",
     "for_job": null,
-    "held_mem_bytes": 2147483648,
+    "held_mem_bytes": 1610612736,
     "lent_to": [
      "20261114-143010-b8b8b8"
     ],
     "phase": "frozen",
     "resume_asked": {
-     "at": "2026-11-15T16:11:09Z",
+     "at": "2026-11-22T18:59:38Z",
      "by": "avi-mac"
     },
-    "resumes_by": "2026-11-15T16:17:19Z",
-    "since": "2026-11-15T16:11:09Z",
-    "until": "2026-11-15T16:26:09Z",
+    "resumes_by": "2026-11-22T19:05:48Z",
+    "since": "2026-11-22T18:59:38Z",
+    "until": "2026-11-22T19:14:37Z",
     "why": "hand"
    },
    "position": null,
@@ -148,7 +151,7 @@
     "time_s": 7200,
     "why": "2 cores, 2.0 GB, 2h (cores flag, mem flag, time flag)"
    },
-   "started_at": "2026-11-15T16:11:08Z",
+   "started_at": "2026-11-22T18:59:37Z",
    "state": "running",
    "time": {
     "budget_left_s": 7200,
@@ -164,7 +167,7 @@
    "cancel_requested": false,
    "class": "normal",
    "ended_at": null,
-   "ends_by": "2026-11-15T18:12:18Z",
+   "ends_by": "2026-11-22T21:00:47Z",
    "exit_code": null,
    "grant": {
     "class": "normal",
@@ -197,7 +200,7 @@
     "time_s": 7200,
     "why": "2 cores, 1.0 GB, 2h (cores flag, mem flag, time flag)"
    },
-   "started_at": "2026-11-15T16:11:08Z",
+   "started_at": "2026-11-22T18:59:37Z",
    "state": "running",
    "time": {
     "budget_left_s": 7200,
@@ -214,7 +217,7 @@
    "ended_at": null,
    "exit_code": null,
    "held": {
-    "at": "2026-11-15T16:11:09Z",
+    "at": "2026-11-22T18:59:38Z",
     "by": "avi-mac",
     "owner": true
    },
@@ -255,15 +258,15 @@
    "cancel_requested": false,
    "class": "borrowing",
    "ended_at": null,
-   "ends_by": "2026-11-15T16:22:19Z",
+   "ends_by": "2026-11-22T19:10:48Z",
    "exit_code": null,
    "grant": {
     "borrowed": [
      {
       "cpus": "0-3",
       "from": "20261114-120102-k3f9qa",
-      "mem_bytes": 0,
-      "until": "2026-11-15T16:26:09Z"
+      "mem_bytes": 536870912,
+      "until": "2026-11-22T19:14:37Z"
      }
     ],
     "class": "borrowing",
@@ -296,7 +299,7 @@
     "time_s": 600,
     "why": "4 cores, 0.5 GB, 10m (cores flag, mem flag, time flag)"
    },
-   "started_at": "2026-11-15T16:11:09Z",
+   "started_at": "2026-11-22T18:59:38Z",
    "state": "running",
    "time": {
     "budget_left_s": 0,
@@ -312,15 +315,15 @@
    "cancel_requested": false,
    "class": "borrowing",
    "ended_at": null,
-   "ends_by": "2026-11-15T16:17:19Z",
+   "ends_by": "2026-11-22T19:05:48Z",
    "exit_code": null,
    "grant": {
     "borrowed": [
      {
       "cpus": "4-5",
       "from": "20261114-121500-r7mm2x",
-      "mem_bytes": 0,
-      "until": "2026-11-15T16:26:09Z"
+      "mem_bytes": 268435456,
+      "until": "2026-11-22T19:14:37Z"
      }
     ],
     "class": "borrowing",
@@ -353,7 +356,7 @@
     "time_s": 300,
     "why": "2 cores, 0.2 GB, 5m (cores flag, mem flag, time flag)"
    },
-   "started_at": "2026-11-15T16:11:09Z",
+   "started_at": "2026-11-22T18:59:38Z",
    "state": "running",
    "time": {
     "budget_left_s": 0,
@@ -394,14 +397,14 @@
     "why": "8 cores, 8.0 GB, 6h (cores flag, mem flag, time flag)"
    },
    "started_at": null,
-   "starts_by": "2026-11-15T22:26:18Z",
+   "starts_by": "2026-11-23T01:14:47Z",
    "state": "queued",
    "unit": null,
    "waiting_for": {
     "resources": {
      "cores": 8,
      "free_cores": 0,
-     "free_mem_bytes": 6710886400,
+     "free_mem_bytes": 7516192768,
      "mem_bytes": 8589934592
     }
    }
@@ -445,7 +448,7 @@
      "behind": "20261114-143100-urg3nt",
      "cores": 8,
      "free_cores": 0,
-     "free_mem_bytes": 6710886400,
+     "free_mem_bytes": 7516192768,
      "mem_bytes": 1073741824
     }
    }

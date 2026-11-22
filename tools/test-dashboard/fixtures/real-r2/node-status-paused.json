@@ -4,7 +4,7 @@
  "cancel_requested": false,
  "class": "normal",
  "ended_at": null,
- "ends_by": "2026-11-15T22:26:18Z",
+ "ends_by": "2026-11-23T01:14:47Z",
  "exit_code": null,
  "grant": {
   "class": "normal",
@@ -17,21 +17,21 @@
  "key": "avi-mac",
  "log_size": 0,
  "name": "k3f9qa",
- "note": "paused until 16:26 by avi-mac",
+ "note": "paused until 19:14 UTC by avi-mac",
  "ok": true,
  "pausable": true,
  "paused": {
   "by": "avi-mac",
   "for_job": null,
-  "held_mem_bytes": 6442450944,
+  "held_mem_bytes": 5905580032,
   "lent_to": [
    "20261114-142955-2icaxr"
   ],
   "phase": "frozen",
   "resume_asked": null,
   "resumes_by": null,
-  "since": "2026-11-15T16:11:09Z",
-  "until": "2026-11-15T16:26:09Z",
+  "since": "2026-11-22T18:59:37Z",
+  "until": "2026-11-22T19:14:37Z",
   "why": "hand"
  },
  "position": null,
@@ -50,7 +50,7 @@
   "time_s": 21600,
   "why": "4 cores, 6.0 GB, 6h (cores flag, mem flag, time flag)"
  },
- "started_at": "2026-11-15T16:11:08Z",
+ "started_at": "2026-11-22T18:59:37Z",
  "state": "running",
  "time": {
   "budget_left_s": 14400,

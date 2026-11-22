@@ -4,7 +4,7 @@
 # to the toolchain the current folder uses: $MU_VERSION, else the nearest mu.toml ([mu] version), else the default.
 # The job layer's commands (compute, submit, status, log, fetch, cancel, relay, node, and the scheduler's queue, hold,
 # release, move, priority, pause, resume) and the dashboard always run on the default toolchain.
-MU_DISPATCHER_REV=13   # bump on every change (installers only replace an older dispatcher)
+MU_DISPATCHER_REV=14   # bump on every change (installers only replace an older dispatcher)
 set -euo pipefail
 case "$(uname -s)" in Darwin) MU_HOME="${MU_HOME:-$HOME/Library/Mu}" ;; *) MU_HOME="${MU_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/mu}" ;; esac
 case "$(uname -s)" in Darwin) MU_CACHE="${MU_CACHE:-$HOME/Library/Caches/Mu}" ;; *) MU_CACHE="${MU_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mu}" ;; esac
@@ -411,6 +411,7 @@ ${B}Compute jobs${N} (always the default version; every command takes --json and
   mu log JOB [-f] [--tail N] [--offset B]   the job's output
   mu fetch JOB [--into DIR] [--max-size 50M]   the declared outputs + runs/JOB.json
   mu cancel JOB            stop a queued or running job          mu node ...   the node's own side (enable, selftest)
+  mu forget JOB            drop this clone's record of a job that never reached the node (or ended there); local only
   mu queue [--mine]        the whole node's queue, in the order jobs start (every project, every workstation)
   mu hold|release JOB      keep a queued job in place without starting it / let it go
   mu move JOB --before J|--after J|--front|--back · mu priority JOB urgent|high|normal|low
@@ -418,9 +419,11 @@ ${B}Compute jobs${N} (always the default version; every command takes --json and
   mu pause JOB [--for D] · mu resume JOB [--timeout S]   freeze a running job (its cores lent meanwhile;
                            at most 2 h, resumes by itself) / thaw it; another project's only with --others
   mu compute update NODE   install the latest release on the node now, beside its running jobs
+  mu compute gc NODE [--dry-run]   clean up the node's finished job folders now (owner key; it does so by itself:
+                           7 days after a fetch, 30 days unfetched, earlier when the disk runs low) · mu keep JOB [--off]
   mu dashboard [open|on|off]   a local page of jobs, nodes and this Mac's load (read-only; mu dashboard --help)
   Exit codes: 0 ok, 2 usage, 3 version, 4 unreachable, 5 refused, 6 node cannot, 7 job failed, 8 integrity,
-  9 no such, 10 still running
+  9 no such, 10 still running, 11 outputs cleaned up on the node
 
 ${B}Tools${N} (from the version this folder uses)
 H
@@ -1305,8 +1308,8 @@ case "$cmd" in
   remove|uninstall|rm)    cmd_remove "$@" ;;
   gc)                     cmd_gc "$@" ;;
   autoupdate|auto-update) cmd_autoupdate "$@" ;;
-  compute|submit|status|log|fetch|cancel|relay|node|dashboard) infra "$cmd" "$@" ;;
-  queue|hold|release|move|priority|pause|resume) infra "$cmd" "$@" ;;   # the scheduler's queue control (docs/design/scheduler.md §20, §22)
+  compute|submit|status|log|fetch|cancel|forget|relay|node|dashboard) infra "$cmd" "$@" ;;
+  queue|hold|release|move|priority|pause|resume|keep) infra "$cmd" "$@" ;;   # queue control (scheduler.md §20, §22); keep: job-layer §24
   --version)              resolve; printf 'μ %s (dispatcher rev %s)\n' "$V" "$MU_DISPATCHER_REV" ;;
   *)                      resolve; require_installed "$V"; exec "$TC/$V/recipe/bin/mu-toolchain" "$cmd" "$@" ;;
 esac

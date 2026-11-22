@@ -13,7 +13,9 @@ Sections: [1 Summary](#1-summary) · [2 Architecture](#2-architecture) · [3 Whe
 [12 Versions](#12-toolchain-versions) · [13 Root steps](#13-what-needs-root-on-the-node) · [14 Security](#14-who-can-do-what) ·
 [15 Stages](#15-stages) · [16 Tests](#16-tests-and-how-each-is-shown-to-fail) · [17 Verified](#17-verified-by-experiment) ·
 [18 Read](#18-read-in-sources-not-run) · [19 PC](#19-still-unverified-until-the-pc) · [20 Changes](#20-changes-from-the-design-note-and-from-plan-v6) ·
-[21 Implemented](#21-implemented-stage-1-in-ci) · [22 Host script](#22-the-host-script-13-in-mu-wsl2-distrosh-in-ci)
+[21 Implemented](#21-implemented-stage-1-in-ci) · [22 Host script](#22-the-host-script-13-in-mu-wsl2-distrosh-in-ci) ·
+[23 Review](#23-review) · [24 Clean-up](#24-the-clean-up-of-finished-job-folders-release-20261112) ·
+[25 Unsent records](#25-records-that-never-reached-the-node-release-20261112) · [26 Times](#26-times-for-people-release-20261112)
 
 ## 1. Summary
 
@@ -140,6 +142,7 @@ Every command takes `--json` (one JSON object on stdout, nothing else there) and
 | 8 | integrity: a fetched output does not match the result record | fetch again; if it repeats, the node's copy changed after the job |
 | 9 | no such node or job | `mu compute list`, `mu status` |
 | 10 | still running after `--timeout` (`mu status <id> --wait --timeout S`, `mu submit --wait --timeout S`); the job goes on | ask again: `mu status <id> --wait --timeout S`, or `mu log <id> --tail 20` |
+| 11 | the job's outputs were removed by the node's clean-up (`mu fetch`, error `pruned`; release 2026.11.12, §24) | run the job again if the outputs are needed; `mu log <id>` still has the last 64 kB of its log |
 
 Every error carries `exit`, `error`, `message` and `next` in its JSON. `next` is always the workstation's own text
 for that error: what a node says goes to `node_message` (cleaned of control characters, capped), never to `next`,
@@ -158,6 +161,9 @@ submit --resume <id>`. The dispatcher's own refusals (no toolchain, no job layer
 | `mu log <job-id> [--tail N] [--offset B] [-f]` | `log` | Prints the job's log from byte `B`. `--json` (not with `-f`) answers `{job_id, offset, next_offset, text, state, eof}`, so a caller polls with `--offset next_offset`. `-f` follows until the job has a result and resumes from its own byte count after a lost link |
 | `mu fetch <job-id> [--into DIR] [--max-size 50M] [--output GLOB]…` | `fetch` | §11. Writes the declared outputs and `runs/<job-id>.json`. The declared globs come from this clone's record of the job (`.mu/jobs/<id>.json`), never from the node; a clone without that record needs `--output` (exit 2 `no-local-record`). Refuses a job without a result (exit 2: "still running") |
 | `mu cancel <job-id> [--local]` | `cancel` | §8.4. A job this clone never got accepted (record in state `sending`, and the node answers `no-such-job`, or `--local`): its record and snapshot ref are removed |
+| `mu forget <job-id>` | `status` | §25 (release 2026.11.12). Drops this clone's record and snapshot ref; refused (exit 2 `node-has-job`) while the node has the job unfinished. Nothing changes on the node |
+| `mu keep <job-id> [--off] [--others]` | `keep` | §24. Exempts a job from the node's clean-up, or ends that; the job's own workstation, another's only with `--others` from an owner key |
+| `mu compute gc <node> [--dry-run]` | `gc` | §24. The node's clean-up now (owner key only); `--dry-run` lists what it would remove |
 
 `mu submit`, in order. Each refusal happens before anything is sent.
 
@@ -483,7 +489,7 @@ or a shell's 126, 127 and 128+n. A verb never exits 255, 1 or 2.
 | 0 | (`ok: true`) |
 | 64 | the gate's codes; `unknown-verb`, `bad-argument`, `bad-spec` |
 | 65 | `protocol-mismatch` |
-| 66 | `no-such-job`, `no-such-snapshot` |
+| 66 | `no-such-job`, `no-such-snapshot`, `pruned` (`fetch` of a job whose folder was cleaned up, §24; the client exits 11) |
 | 69 | `disk-low`, `limits-unavailable`, `not-enabled` (the runner is not running) |
 | 70 | `internal` (with a line for the journal) |
 | 77 | `not-allowed` (**planned**, with queue control: scheduler.md §20.4, §20.9; not built) |
@@ -505,6 +511,8 @@ Arguments are `key=value`. Every answer except `log` and `fetch` is one JSON obj
 | `log id=<job-id> offset=<B> [max=<bytes>] [follow=1]` | | raw bytes of the log from `B`. With `follow=1` it keeps sending until the job has a result and the file's end is reached |
 | `fetch id=<job-id> [what=result]` | | a tar stream (§11): `result.json`, then every output. With `what=result`, `result.json` alone |
 | `cancel id=<job-id>` | | `{ok, job_id, state}` |
+| `keep id=<job-id> [off=1] [from=<project-id>] [others=1]` | | `{ok, job_id, changed, state, kept, pruned, fetched}` (§24) |
+| `gc [dry=1]` | | owner keys only: the clean-up's answer (§24.4); `not-allowed` (77) for another key |
 
 Every call is written to the journal with the key's name, the verb and the job id (never stdin).
 
@@ -558,8 +566,9 @@ caller's `-- bash -c '…'`.
 ```
 
 A finished job's folder is its archive; the run record points at `office-pc:/srv/mu/jobs/<job-id>/work`. Nothing
-is deleted in stage 1 (`mu compute gc` is stage 2); `submit` refuses below `min_free_gb` (default 20) with
-`disk-low` and the ten largest job folders.
+was deleted in stage 1; since release 2026.11.12 the runner cleans up finished job folders (§24: 7 days after a fetch,
+30 days unfetched, earlier under disk pressure), keeping a small record. `submit` refuses below `min_free_gb` (default
+20) with `disk-low` and the ten largest job folders.
 
 ### 8.2 `mu node enable` (as `mu`, no root)
 
@@ -1559,3 +1568,162 @@ under load, as before; not in the workflow).
 
 Not tested, in plain words: the egress filter, the refresh timer and the ready line on WSL's kernel (only the
 runner's); a real change of the relay's address; fsync under a power cut; the fetch of a real job from the PC.
+
+## 24. The clean-up of finished job folders (release 2026.11.12)
+
+**Why.** Nothing deleted a finished job's folder: on the office PC `/srv/mu/jobs` held 27 GB after one week, and `C:`
+was at 38 GB free against the 20 GB jobs need (`min_free_gb`). The lead decided the rules of §24.1 on 2026-11-23; they
+are node settings with these defaults (`node.json` `gc`; `mu node settings gc.KEY=VALUE` changes them, checked, under
+the queue lock: node.json is sealed, so a hand edit would make it unreadable).
+
+### 24.1 The rules
+
+| Rule | Setting (default) |
+|---|---|
+| Never a job that is not finished: queued, held, running, paused, resuming, draining (no `result.json`), nor one named in an unfinished job's `state.json` (a borrower's lender, an urgent job's victims) | — |
+| A finished job loses its bulky parts (`work/`, the git `index`, `tmp/`, `metrics.jsonl`, anything else) and keeps a small record: `job.json`, `state.json`, `result.json` (usage, run times), `events.log`, `usage.json`, the `cancel` and `timelimit` markers, `fetched.json`, `keep.json`, the last part of its `log` (a first line says it is a tail) and `pruned.json` (sealed: when, why, by whom, the bytes before and freed, whether and when it was fetched, what was removed) | `log_tail_kb` (64) |
+| The node records each whole fetch of a job's outputs (`fetch` without `what=result`, after the last byte is sent): `fetched.json` with the first and last time, the count and the keys | — |
+| Due: 7 days after the last fetch; 30 days after the end when never fetched. Jobs that ended before this release have no fetch record: never fetched | `after_fetch_days` (7), `unfetched_days` (30) |
+| Disk pressure: while the free space where the jobs live is under `min_free_gb` + 10 GB, prune early: fetched jobs first (oldest fetch first), then never-fetched jobs that ended over 7 days ago (oldest end first), until the line is passed | `pressure_extra_gb` (10), `pressure_unfetched_days` (7) |
+| Never a job that ended under 24 h ago, by any rule | `min_age_h` (24) |
+| `mu keep JOB` exempts a job (`keep.json`), `mu keep JOB --off` ends that: the job's own workstation; another's only with `--others` from an owner key (the hold rule, scheduler.md §20.4) | — |
+| From the runner at most once an hour, between job starts (it holds the start lock of release 1, so never during a start or a version switch); cheap when nothing is due | `every_s` (3600), `enabled` (true) |
+| Atomic and crash-safe: a crash leaves the whole folder or the pruned one under the job's name, never a record naming outputs that are gone | — |
+| Each prune is journalled and in `/srv/mu/audit.log` (`gc: pruned id=… by=… (why): N bytes freed`), and in the job's `events.log` | — |
+
+### 24.2 As built
+
+- **`src/mu/nodegc.py`** (new, stdlib): the selection, the swap, `run()`, the runner's `tick()`, the verbs `gc` and
+  `keep`, `hello.gc`. `node.py` changes only at its edges: `fetch` records the fetch and refuses a pruned job
+  (`pruned`, 66, with when and why), `status` and `list` add `pruned`, `kept` and `fetched` for finished jobs (list:
+  only for the jobs it sends), `hello` names the feature `gc` and carries `gc` (the settings and the last run's
+  figures from `/srv/mu/gc.json`; no folder is walked for it), `mu node settings`, the runner's loop calls `tick()`
+  after `set_busy()`, outside the queue lock.
+- **The swap.** Under the queue lock, with an exclusive `flock` on the job's `job.json` (a fetch holds a shared one
+  while it sends outputs, so a folder is never swapped under a fetch; a fetch that waited re-opens the folder and finds
+  it pruned): the kept files are copied (fsynced) into `/srv/mu/prune/<id>.<pid>` with the log's tail and
+  `pruned.json`, then one `renameat2(RENAME_EXCHANGE)` (Linux; `renamex_np(RENAME_SWAP)` on macOS for the unit tests)
+  swaps that folder with `jobs/<id>`, then `jobs/` is fsynced. The old folder, now in `prune/`, is renamed `.old` and
+  deleted by a detached `nice -n 19 ionice -c3 rm -rf` (the runner's loop never waits for a large delete). A crash
+  before the swap leaves the whole folder and a pruned copy in `prune/`; after it, the pruned folder and the old one in
+  `prune/`; the next clean-up (holder of `/srv/mu/gc.lock`) deletes what is in `prune/`. `result.json` is never
+  rewritten. A file system without the exchange call: nothing is pruned, the answer says why.
+- **Cost.** A finished job's size is walked once and cached in `gc.json`; a pass with nothing due reads the job
+  records the runner reads every second anyway, and statvfs. The runner's tick has a 60 s budget for prunes and comes
+  back a minute later when work is left.
+- **Disk figure.** The pressure rule decides by the figure jobs are admitted by (`hello.disk`: the smaller of
+  `/srv/mu` and the Windows drive the host script recorded, §13.4). When the Windows drive is the smaller, a folder
+  deleted inside WSL's virtual disk does not give `C:` its space back unless the disk is sparse; new data reuses those
+  blocks before the disk grows. So the space freed inside the file system since its highest use (`gc.json used_peak`)
+  counts as free for this rule, and a pass stops once the space it freed (by the cached sizes) lifts the figure over
+  the line. **Job admission (`disk-low`, the start check) is unchanged and still reads `C:` itself**: on a virtual disk
+  that is not sparse, pruning does not lift that figure (§24.5).
+- **Workstation.** `mu compute status` prints `job folders: … in N finished job(s) · the clean-up would free … now (N
+  due) and up to … under disk pressure · as of … · last clean-up …`. `mu compute gc NODE [--dry-run]`, `mu keep JOB
+  [--off] [--others]` (both refuse a node without the feature, exit 6 `node-too-old`). `mu status JOB` of a pruned job:
+  `cleaned up on NODE on <local date> (why): its outputs and working copy were removed; they had been fetched N
+  time(s), last on … | they had never been fetched`. `mu fetch` of one: exit **11** `pruned` with the same facts (and
+  whether this clone has `runs/<id>.json`), before any fetch call; an older status without `pruned` reaches the
+  node's refusal, also mapped to 11. `mu log` of one: the kept tail, and on stderr `note: job … was cleaned up on …:
+  this is the last 64.0 kB of its log (of …)`; `--json` adds `tail: true` and `pruned`.
+- Dispatcher rev 14 (`bin/mu`, `install/install.sh`): `keep` and `forget` reach the job layer; `mu help` lists them
+  and exit 11.
+
+### 24.3 Where it differs from the decision, and why
+
+| Decision | Built | Why |
+|---|---|---|
+| "or that a running job depends on" | a job id named anywhere in an unfinished job's `state.json` | jobs depend on each other only through release 2's lending and auto-pause, which record the other job's id there |
+| keep "the last ~64 kB of the log" | the last 64 kB from the first line start after the cut, after one line saying it is a tail; `events.log` kept whole up to 1 MB | no half line or half UTF-8 character; offsets of the kept log are its own (`log_size` is the kept file's), so `mu log --offset` stays consistent |
+| a fetch counts | a whole fetch (`fetch` without `what=result`) once its last byte is sent | `what=result` is asked before every fetch and by `--max-size` refusals; the node cannot see whether the Mac kept the files |
+| — | a job fetched under 10 minutes ago is never a candidate | a fetch's own `flock` is the guard; this keeps a slow first byte out of the race |
+| `mu compute gc` "(owner key)" | owner keys only, also for `--dry-run` | the answer lists every workstation's jobs |
+
+### 24.4 Tests (`tools/test-jobs/unit_gc.py`, sections `gc-node` and `gc-client`, in `run.sh`)
+
+Each check with its fault, run again by `run.sh` with the fault on, which must fail on that check
+(`must_fail_tagged`). `gc-node` runs the node's code against stubs of systemd, with the verbs through `mu node serve`
+in a process of their own: due by age (`gc-fetch-ignored`); never an unfinished job (`gc-ignores-unfinished`, a job
+held 40 days), a kept one (`gc-ignores-keep`), a referenced one (`gc-ignores-refs`); the pruned folder's contents,
+`result.json` byte-equal, the log's tail and its first line; status, log and fetch of a pruned job
+(`fetch-pruned-served`); the journal; a second pass walks nothing; the old folders deleted; pressure order and stop
+(`gc-pressure-order`, `gc-pressure-all`), the 24 h minimum (`gc-no-min-age`); a process killed before and after the
+swap leaves the whole folder or the pruned one and a record that does not lie (`prune-in-place`: deleting in place,
+killed after `work/` went, leaves a `result.json` naming outputs that are gone and no `pruned.json`); the fetch
+record (`fetch-not-recorded`) and the fetch lock (`gc-ignores-fetch-lock`); `keep` by the job's workstation, refused to
+another (77) and to an owner without `--others` (64), with `--others`, `--off`, of a pruned job (`keep-any-key`);
+`gc` refused to a non-owner (`gc-any-key`), `dry=1`, a real run that spares the kept job; the tick at most hourly
+(`gc-hourly-ignored`) and not while an update holds the start lock (`gc-no-start-lock`); hello; `mu node settings`.
+`gc-client`: the real CLI against `fake-node-ssh.py`: `mu fetch` exit 11 (`fetch-ignores-pruned`), the node's own
+refusal mapped to 11, `mu log`'s note and `--json`, `mu status`'s words, `mu keep`, a node without the feature,
+`mu compute gc --dry-run`.
+
+### 24.5 Not tested, and open
+
+- **Nothing of this has run on the office PC.** The first clean-up there will measure every finished folder once (27
+  GB: seconds to minutes, once). On the PC today no job is due by age (the oldest ended a week ago and no fetch was
+  recorded before this release, so the 30-day rule applies), and the pressure rule starts below 30 GB free.
+- **Whether pruning gives space back to `C:`**: only if WSL's virtual disk is sparse (`wsl --manage mu-compute
+  --set-sparse true`, or `sparseVhd` in `.wslconfig`). Otherwise the freed blocks stay in the VHDX for later jobs and
+  `C:`'s free figure (what `disk-low` and the start check read) does not rise. The owner should decide: make the disk
+  sparse at the next visit, or compact it (`Optimize-VHD`) by hand. The pressure rule counts the reuse (§24.2), so it
+  does not prune everything in that case; with a sparse disk it may count the same space twice and prune less.
+- The exchange call on WSL's ext4 (CI's runner ext4 and macOS APFS are tested); `ionice` in WSL.
+- The detached `rm` outliving the runner's restart is assumed, not tested (the next clean-up deletes leftovers anyway).
+- The dashboard shows a pruned job's row and log tail; its chart is empty (`metrics.jsonl` is removed). Not
+  tested in a browser.
+
+## 25. Records that never reached the node (release 2026.11.12)
+
+**Why.** In a JATAYU clone, 8 records of 2026-11-15 still said `sending`: their upload never finished, the node had
+no such job, and `mu status` showed each as "not accepted yet" for ever, as if a submit were still running.
+
+**As built** (`src/mu/jobs.py`):
+- A submit writes its pid and host into the record and holds an `flock` on `.mu/jobs/.<id>.lock` from before the
+  record is written until it ends (also `--resume`); `mu status` tells a submit still pushing a large snapshot from
+  one that died by that lock (and, for older records without one, by a live pid of this host).
+- `mu status` (the project's list) reconciles a `sending` record that is older than 10 minutes, whose submit is gone
+  and that the node does not list: it asks `status id=`; `no-such-job` makes the record `unsent` (written durably,
+  with `unsent_at`); a job the node knows (the submit's answer was lost) takes the node's state. The node is only asked;
+  nothing is changed or deleted there. A record of a node that does not answer stays `sending`.
+- Each unsent job is one row, `not sent · <next>`, the next step being `mu submit --resume ID` (same id, same snapshot)
+  when `refs/mu/snap/ID` is still there, else only `mu forget ID`. The call that changes records says so once
+  (`note: N job(s) were never accepted …`; `--json`: `reconciled: [ids]`); later listings only list the rows.
+  `mu status ID` of one: exit 9, error `not-sent`, with the same next step. `mu submit --resume` of one whose
+  snapshot is gone: exit 2 `no-snapshot`.
+- **`mu forget ID`** (new, routed by dispatcher rev 14): drops the record, its lock file and its snapshot ref; local
+  only. It asks the node first: refused (exit 2 `node-has-job`) while the node has the job unfinished (`mu cancel`
+  first), and while a submit is sending it; allowed when the node has no such job or the job has finished (then its
+  `runs/ID.json`, if any, stays); a node that is not paired any more is not asked. An unreachable node: exit 4,
+  nothing forgotten. `--json` everywhere.
+- Tests (`unit_gc.py` `sending`, the real CLI against the fake node): an old record without a submit becomes unsent
+  (`no-unsent`); a fresh one and one whose lock is held stay `sending` and are not asked about; a record the node knows
+  takes its state; only `list` and `status` reach the node; the second `mu status` reconciles nothing new; `mu status
+  ID` exit 9; `--resume` without a snapshot; `mu forget` of an unsent job, refused for an unfinished one
+  (`forget-unfinished`), allowed for a finished one.
+- **Not tested:** the JATAYU clone's 8 records themselves (the rules are the test's; the records are on the owner's
+  Mac and were not touched); two clones of one project on two Macs (the lock is per clone).
+
+## 26. Times for people (release 2026.11.12)
+
+**Why.** `mu pause` printed "paused until 01:40" (the Mac's time, Asia/Kathmandu) and on the next line "it resumes by
+itself at 19:55": the node's `next`, written in UTC, passed through.
+
+**Rule.** Every time a person reads is the workstation's local time, in `mu queue`'s form (`14:20` within 20 h,
+else `14 Nov 14:20`; a date adds the year when it is not this year's): `proto.local_hm` and `proto.local_when`.
+`--json` keeps ISO UTC in every time field.
+
+**As built.** `mu pause` and `mu resume` build `next` themselves from `paused.until` / `resumes_by` (the rule of §4.2
+that `next` is the workstation's text now holds for them too); a paused or resuming job's `note` is rebuilt from
+`paused` on the workstation (`qctl.localise`, also in `--json`, since `note` is words) and `mu status` no longer
+repeats it beside the PAUSED words; `mu compute list` shows `last answer` in local time. The node's own words for a
+pause (`note`, `next`) now say their zone (`until 19:55 UTC`), for workstations of an older release; the dashboard's
+fixtures follow (`dashfake.py`, `fixtures/`, `fixtures/real-r2/`). The sweep of `qctl.py`, `pausectl.py` and
+`jobs.py` found no other UTC time in words (the node's other notes carry none; `invite.py` already used local time).
+Test: `unit_gc.py` `tz` runs `mu pause`, `resume`, `status` (one job and the list), `queue` and `compute list` under
+`TZ=Asia/Kathmandu` against the fake node and fails on any UTC `HH:MM` of the fixtures' times in the words, or a
+local one missing (faults `node-time-words`: the node's words passed through, as before; `utc-words`: the formatter on
+UTC); `--json`'s `paused.until` stays the ISO value.
+
+**Not tested:** the dashboard page (it formats times in the browser's zone itself; its paused rows show the page's own
+words, not the node's note).

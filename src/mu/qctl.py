@@ -4,6 +4,8 @@
   mu move JOB --before J2 | --after J2 | --front | --back
   mu priority JOB urgent|high|normal|low
   mu compute update NODE [--wait] [--timeout S]     install the latest μ release on the node, beside running jobs
+  mu compute gc NODE [--dry-run]                    the node's clean-up of finished job folders, now (owner key)
+  mu keep JOB [--off]                               exempt a job from that clean-up, or end the exemption
 Every arranging command takes --on NODE, --json and --others (arrange another project's job: only when the owner
 asked). The node decides who may do what (the job's workstation or an owner key) and the --others guard, under its
 queue lock. Standard library only."""
@@ -21,15 +23,32 @@ def gb(n):
 
 
 def hhmm(iso):
-    """'2026-11-14T14:20:00Z' -> '14:20' (local time); None -> None."""
-    if not iso:
+    """'2026-11-14T14:20:00Z' -> '14:20' (this workstation's local time; '14 Nov 14:20' past 20 h); None -> None.
+    Every time a person reads goes through here or proto.local_when (release 2026.11.12); --json keeps ISO UTC."""
+    return proto.local_hm(iso)
+
+
+def pause_note(pz):
+    """A paused or resuming job's note, in local time, from the ISO fields of `paused`: the node's own note names its
+    times in UTC (it does not know this workstation's zone), so it is never shown as it is."""
+    if not isinstance(pz, dict):
         return None
-    try:
-        import calendar
-        t = calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
-    except (ValueError, TypeError):
-        return str(iso)
-    return time.strftime("%H:%M" if abs(t - time.time()) < 20 * 3600 else "%d %b %H:%M", time.localtime(t))
+    if pz.get("resume_asked"):
+        return "resuming: waits for %s (ends by %s)" % (" ".join(str(x)[-6:] for x in pz.get("lent_to") or []),
+                                                        hhmm(pz.get("resumes_by")))
+    if pz.get("why") == "auto":
+        return "paused for %s until %s" % (str(pz.get("for_job") or "")[-6:], hhmm(pz.get("until")))
+    return "paused until %s by %s" % (hhmm(pz.get("until")), proto.one_line(pz.get("by")))
+
+
+def localise(s):
+    """A job's status or an answer from a node, with its words for people in local time: a paused job's note is
+    rebuilt from `paused`. The ISO fields are left as they are (they are the --json contract). Fault node-time-words:
+    the node's own words, as before release 2026.11.12."""
+    from mu.durable import fault
+    if isinstance(s, dict) and isinstance(s.get("paused"), dict) and s.get("note") and not fault("node-time-words"):
+        s["note"] = pause_note(s["paused"])
+    return s
 
 
 def dur(s):
@@ -223,7 +242,7 @@ def cmd_queue(a):
         ans = conn.call("list", limit=0)   # an older node: all its jobs, without order or bands
         ans = {"ok": True, "node": conf["name"], "fallback": "list", "jobs": ans.get("jobs", []),
                "note": "%s is older than the scheduler: the list of its jobs, without order or bands" % conf["name"]}
-    jobs_ = [tidy(j) for j in ans.get("jobs") or [] if isinstance(j, dict) and isinstance(j.get("job_id"), str)]
+    jobs_ = [localise(tidy(j)) for j in ans.get("jobs") or [] if isinstance(j, dict) and isinstance(j.get("job_id"), str)]
     ans["jobs"] = jobs_
     for j in jobs_:
         j["this_project"] = bool(frm) and j.get("project_id") == frm
@@ -351,6 +370,19 @@ def cmd_pause(op, a):
     ans = conn.call(op, **args)
     ans.setdefault("exit", 0)
     ans.update(node=conf["name"])
+    from mu.durable import fault
+    if not fault("node-time-words"):   # `next` is this workstation's text (job-layer §4.2), in its local time
+        localise(ans)
+        pz = ans.get("paused") if isinstance(ans.get("paused"), dict) else {}
+        if op == "pause":
+            ans["next"] = "it resumes by itself at %s; to resume sooner: mu resume %s" % (hhmm(pz.get("until")), a.job_id)
+        elif ans.get("state") == "resuming":
+            ans["next"] = "mu queue --json (the resume stays asked: it thaws after its borrower ends, by %s)" % hhmm(
+                ans.get("resumes_by") or pz.get("resumes_by"))
+        elif ans.get("state") in proto.FINISHED:
+            ans["next"] = "mu status %s" % a.job_id
+        else:
+            ans["next"] = "mu queue --json"
     if op == "resume" and ans.get("state") == "resuming" and a.timeout is not None:
         end = time.time() + a.timeout
         while time.time() < end:
@@ -383,6 +415,81 @@ def cmd_pause(op, a):
         print("%s resumed (%s)" % (a.job_id, ans.get("state")))
     print("next: %s" % ans.get("next", "mu queue --json"))
     return ans["exit"]
+
+
+def gc_line(g):
+    """For mu compute status (release 2026.11.12): the finished job folders and what the clean-up would free."""
+    fin, due, pa = g.get("finished") or {}, g.get("due") or {}, g.get("prunable") or {}
+    lr = g.get("last_run") or {}
+    if not g.get("as_of"):
+        return "job folders: not measured yet (the node's first clean-up pass has not run)"
+    t = "job folders: %s in %s finished job(s) · the clean-up would free %s now (%s due) and up to %s under disk " \
+        "pressure (%s) · as of %s" % (gb(fin.get("bytes")), fin.get("jobs"), gb(due.get("bytes")), due.get("jobs"),
+                                     gb(pa.get("bytes")), pa.get("jobs"), hhmm(g.get("as_of")))
+    if lr:
+        t += " · last clean-up %s: %s pruned, %s freed" % (hhmm(lr.get("at")), lr.get("pruned"), gb(lr.get("freed_bytes")))
+    return t + ("" if g.get("enabled", True) else " · the hourly clean-up is OFF (gc.enabled)")
+
+
+def cmd_compute_gc(a):
+    """mu compute gc NODE [--dry-run] (job-layer §24): the node's clean-up now; an owner key only (the folders are
+    every workstation's). --dry-run lists what it would prune."""
+    from mu import jobs
+    conf = jobs.load_node(a.node)
+    conn = jobs.Conn(conf)
+    if not has(jobs.hello(conn), "gc"):
+        raise too_old(conf, "clean-up of job folders")
+    ans = conn.call("gc", **({"dry": 1} if a.dry_run else {}))
+    ans.update(ok=True, exit=0, node=conf["name"], next="mu compute status %s" % conf["name"])
+    if a.json:
+        proto.emit_json(ans)
+        return 0
+    sp = ans.get("space") or {}
+    print("%s: %s%s · %s GB free on %s (counting space freed inside the virtual disk: %s GB; the early clean-up starts "
+          "below %s GB)" % (conf["name"], "would prune" if a.dry_run else "pruned", " %d job folder(s), %s" % (
+              len(ans.get("pruned") or []), gb(sum(x.get("bytes") or 0 for x in ans.get("pruned") or []))),
+          sp.get("free_gb"), sp.get("where"), ans.get("free_gb_effective"), ans.get("line_gb")))
+    for x in ans.get("pruned") or []:
+        print("  %s  %s  %s" % (x.get("job_id"), gb(x.get("bytes")), proto.one_line(x.get("why"))))
+    for x in ans.get("skipped") or []:
+        print("  skipped %s: %s" % (x.get("job_id"), proto.one_line(x.get("why"))))
+    ns = ans.get("not_candidates") or {}
+    print("  not candidates: %s unfinished, %s kept, %s already cleaned up, %s in use by a running job, %s too recent" % (
+        ns.get("unfinished"), ns.get("kept"), ns.get("pruned"), ns.get("referenced"), ns.get("young")))
+    print("next: %s" % ans["next"])
+    return 0
+
+
+def cmd_keep(a):
+    """mu keep JOB [--off] (job-layer §24): exempt a job from the node's clean-up, or end that. This workstation's own
+    jobs; another's only with --others from an owner key (the node decides)."""
+    from mu import jobs
+    conf, _ = jobs.job_node(a.job_id, a.on)
+    conn = jobs.Conn(conf)
+    if not has(jobs.hello(conn), "gc"):
+        raise too_old(conf, "clean-up of job folders (nothing to keep a job from)")
+    args = {"id": a.job_id}
+    frm = project_id()
+    if frm:
+        args["from"] = frm
+    if a.others:
+        args["others"] = 1
+    if a.off:
+        args["off"] = 1
+    ans = conn.call("keep", **args)
+    ans.update(ok=True, exit=0, node=conf["name"], next="mu status %s" % a.job_id)
+    if a.json:
+        proto.emit_json(ans)
+        return 0
+    if ans.get("pruned"):
+        print("%s: nothing to keep: already cleaned up on %s" % (a.job_id, proto.local_when(ans["pruned"].get("at"))))
+    elif a.off:
+        print("%s: %s: the node's clean-up may remove its outputs again (7 days after a fetch, 30 without)" % (
+            a.job_id, "keep ended" if ans.get("changed") else "was not kept"))
+    else:
+        print("%s: %s: exempt from the node's clean-up until mu keep %s --off" % (
+            a.job_id, "kept" if ans.get("changed") else "already kept", a.job_id))
+    return 0
 
 
 def cmd_compute_update(a):
@@ -436,7 +543,8 @@ def main(cmd, args):
         "priority": "put a queued or held job at the back of a band: urgent (owner key only), high, normal, low",
         "pause": "freeze a running job until --for passes (default 30m, at most 2h); its cores and unused memory are "
                  "lent meanwhile; it resumes by itself",
-        "resume": "thaw a paused job now, or as soon as the job borrowing its cores ends"}[cmd])
+        "resume": "thaw a paused job now, or as soon as the job borrowing its cores ends",
+        "keep": "exempt a job from the node's clean-up of finished job folders (--off ends that)"}[cmd])
     p.add_argument("--on", metavar="NODE", help="the node (default: this clone's record of the job, or the only node)")
     if cmd == "queue":
         p.add_argument("--mine", action="store_true", help="this project's jobs only")
@@ -456,9 +564,13 @@ def main(cmd, args):
     if cmd == "resume":
         p.add_argument("--timeout", type=float, metavar="S", help="wait up to S seconds for the thaw (exit 10 if a "
                        "borrower still runs then)")
+    if cmd == "keep":
+        p.add_argument("--off", action="store_true", help="end the exemption")
     a = p.parse_args(args)
     if not proto.JOB_ID.match(a.job_id or ""):
         raise MuError(proto.EXIT_USAGE, "bad-job-id", "'%s' is not a job id (YYYYMMDD-HHMMSS-xxxxxx)" % a.job_id, "mu queue")
     if cmd in ("pause", "resume"):
         return cmd_pause(cmd, a)
+    if cmd == "keep":
+        return cmd_keep(a)
     return cmd_arrange(cmd, a)

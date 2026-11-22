@@ -1827,3 +1827,12 @@ touch only e2e scripts, the workflow and docs).
 freeze and the dead-man re-arm on real systemd (unit level, stubbed systemd only); `PAUSE_COUNT_MAX` and the renewal
 limit through the workstation's wording (the node's refusal is `pause-limit`, which the CLI already maps to exit 2).
 
+### 22.6 Release 2026.11.12: pause times in local time
+
+`mu pause` printed "paused until 01:40" (the Mac's time) and then the node's `next`, "it resumes by itself at 19:55"
+(UTC). As built (job-layer.md §26): `mu pause` and `mu resume` build `next` on the workstation from `paused.until` and
+`resumes_by`, in local time ("it resumes by itself at 01:40; to resume sooner: mu resume JOB"), and a paused or
+resuming job's `note` is rebuilt there too (also in `--json`; the time fields stay ISO UTC). §20.9's example `next`
+reads as the workstation's words. The node's own `note` and `next` now name their zone ("paused until 19:55 UTC by
+avi-mac") for older workstations. Test: `tools/test-jobs/unit_gc.py` `tz`, under `TZ=Asia/Kathmandu`, with the faults
+`node-time-words` and `utc-words`. Not tested on the office PC (no node change beside the words).

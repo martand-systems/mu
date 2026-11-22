@@ -3,7 +3,8 @@ with each Python under test). Usage: python unit.py SECTION [ARG...]. Prints one
 "FAIL  name" (with details on indented lines), and exits with the number of failed checks.
 
 Sections: durable, atomic, ids, globs, proxy, classify, sshconfig, controlpath, unpack, untrusted-node, runner,
-snapshot-alone, snapshot-content, snapshot-report, pins REPO."""
+snapshot-alone, snapshot-content, snapshot-report, pins REPO; the scheduler's (unit_sched.py) and release 2026.11.12's
+gc-node, gc-client, sending, tz (unit_gc.py)."""
 import hashlib
 import io
 import json
@@ -995,7 +996,10 @@ def t_sched_runner():
 
 sys.path.insert(0, HERE)
 import unit_sched  # noqa: E402
+import unit_gc  # noqa: E402
 unit_sched.check = check
+unit_gc.check = check
+STUBS = {"systemctl": SYSTEMCTL_STUB, "systemd-run": SYSTEMD_RUN_STUB}
 
 SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs": t_globs, "proxy": t_proxy,
             "classify": t_classify, "sshconfig": t_sshconfig, "controlpath": t_controlpath, "unpack": t_unpack,
@@ -1003,7 +1007,11 @@ SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs"
             "snapshot-alone": t_snapshot_alone, "snapshot-content": t_snapshot_content,
             "snapshot-report": t_snapshot_report, "sched": unit_sched.t_sched, "sched-sim": unit_sched.t_sched_sim,
             "sched-runner": t_sched_runner, "sched-pause": lambda: unit_sched.t_sched_pause(tmpdir("sched-pause")),
-            "r2-shapes": lambda: __import__("r2_answers").t_r2_shapes(check, unit_sched.flag, tmpdir("r2-shapes"))}
+            "r2-shapes": lambda: __import__("r2_answers").t_r2_shapes(check, unit_sched.flag, tmpdir("r2-shapes")),
+            # release 2026.11.12 (job-layer.md §24-§26): the clean-up, stuck sending records, local times
+            "gc-node": lambda: unit_gc.t_gc_node(tmpdir("gc-node"), STUBS),
+            "gc-client": lambda: unit_gc.t_gc_client(tmpdir("gc-client")),
+            "sending": lambda: unit_gc.t_sending(tmpdir("sending")), "tz": lambda: unit_gc.t_tz(tmpdir("tz"))}
 
 if __name__ == "__main__":
     sec = sys.argv[1]

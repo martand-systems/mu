@@ -12,13 +12,13 @@
  },
  "index": null,
  "job": {
-  "as_of": 1794759069.0,
+  "as_of": 1795373978.0,
   "attempt": 1,
   "band": "normal",
   "cancel_requested": false,
   "class": "normal",
   "ended_at": null,
-  "ends_by": 1794767178.0,
+  "ends_by": 1795382087.0,
   "exit_code": null,
   "grant": {
    "borrowed": [],
@@ -36,23 +36,23 @@
   "mine": false,
   "name": "r7mm2x",
   "node": "office-pc",
-  "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+  "note": "resuming: waits for b8b8b8 (ends by 19:05 UTC)",
   "pausable": false,
   "paused": {
    "by": "avi-mac",
    "for_job": null,
-   "held_mem_bytes": 2147483648,
+   "held_mem_bytes": 1610612736,
    "lent_to": [
     "20261114-143010-b8b8b8"
    ],
    "phase": "frozen",
    "resume_asked": {
-    "at": 1794759069.0,
+    "at": 1795373978.0,
     "by": "avi-mac"
    },
-   "resumes_by": 1794759439.0,
-   "since": 1794759069.0,
-   "until": 1794759969.0,
+   "resumes_by": 1795374348.0,
+   "since": 1795373978.0,
+   "until": 1795374877.0,
    "why": "hand"
   },
   "paused_s": null,
@@ -64,7 +64,7 @@
   "run_s": null,
   "short": "r7mm2x",
   "stale": false,
-  "started_at": 1794759068.0,
+  "started_at": 1795373977.0,
   "state": "running",
   "time": {
    "budget_left_s": 7200,
@@ -80,7 +80,7 @@
   "old_node": false,
   "state": "online"
  },
- "now": 1794759071.0,
+ "now": 1795373980.0,
  "ok": true,
  "record": null,
  "run": null

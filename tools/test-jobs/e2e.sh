@@ -571,6 +571,31 @@ r_fetchint() {
 f_hash_on() { WSF=no-fetch-hash; }
 f_hash_off() { WSF=""; }
 
+# release 2026.11.12 (job-layer.md §24): the clean-up on real systemd and ext4 (renameat2 RENAME_EXCHANGE, the detached
+# rm), through the relay: a fetched job, the node's clock for the clean-up 40 days ahead (the injector gc-clock-ahead),
+# mu compute gc by the owner key; then status, fetch (exit 11) and log of the pruned job
+GCF=""
+r_gc() {
+  local id out rc st pr cnt lg left i
+  asws rm -rf "$WCWD/results"
+  id="$(submit -- python3 job.py gc)"; wait_state "$id" "succeeded failed" 90
+  out="$(ws fetch "$id" --json 2>&1)"; rc=$?
+  nfault gc-clock-ahead $GCF
+  out="$(ws compute gc office-pc --json 2>&1)"
+  for i in $(seq 1 30); do st="$(ws status "$id" --json 2>/dev/null)"; [ -n "$(printf '%s' "$st" | jget pruned.at)" ] && break; sleep 1; done
+  nfault
+  pr="$(printf '%s' "$st" | jget pruned.at)"; cnt="$(printf '%s' "$st" | jget pruned.fetched.count)"
+  out="$(ws fetch "$id" --json 2>&1)"; rc=$?
+  lg="$(ws log "$id" 2>&1 >/dev/null)"
+  for i in $(seq 1 15); do left="$(sudo ls -A /srv/mu/prune 2>/dev/null | wc -l | tr -d ' ')"; [ "$left" = 0 ] && break; sleep 1; done
+  M="pruned: ${pr:-no}; fetched: ${cnt:-none}; work/ on the node: $(sudo test -e "/srv/mu/jobs/$id/work" && echo present || echo gone); pruned.json: $(sudo test -e "/srv/mu/jobs/$id/pruned.json" && echo yes || echo no); fetch exit $rc ($(printf '%s' "$out" | jget error)): $(printf '%s' "$out" | jget message | cut -c1-120); log: $(printf '%s' "$lg" | grep -o 'this is the last [^(]*' | head -1); left in prune/: $left; audit: $(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)"
+  [ -n "$pr" ] && [ "$cnt" = 1 ] && ! sudo test -e "/srv/mu/jobs/$id/work" && [ "$rc" = 11 ] && \
+    printf '%s' "$out" | jget message | grep -q 'fetched 1 time' && printf '%s' "$lg" | grep -q 'this is the last' && \
+    [ "$left" = 0 ] && [ "$(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)" -ge 1 ]
+}
+f_gcfetch_on() { GCF=fetch-not-recorded; }
+f_gcfetch_off() { GCF=""; }
+
 r_fetchinside() {
   local id out rc
   asws rm -f "$WCWD/outside.txt"
@@ -743,6 +768,7 @@ rows() {
   run_row R30 "disk low: below min_free_gb, submit is exit 6 (disk-low)" r_disklow
   run_row R31 "protocol mismatch: hello with protocol 2 is refused (65, protocol-mismatch)" r_protocol
   run_row R32 "the tunnel's egress filter: mu-sshd reachable, the runner's own address refused by the kernel" r_egress
+  run_row G01 "clean-up (release 2026.11.12): a fetched job pruned by mu compute gc on ext4; status says so, fetch exit 11, log a tail" r_gc
 }
 faults() {
   must_fail R01 no-strict-hostkey f_strict_on f_strict_off r_hostkey
@@ -771,6 +797,7 @@ faults() {
   must_fail R26 route-by-pin f_route_on f_route_off r_versions
   must_fail R27 skip-limits-check true true r_limits_fault
   must_fail R32 no-egress-filter f_egress_on f_egress_off r_egress
+  must_fail G01 fetch-not-recorded f_gcfetch_on f_gcfetch_off r_gc "fetched: none"
 }
 
 # ================================================================================================== the host script (H rows)
@@ -1065,8 +1092,8 @@ qf_restore_ws() { WSPF=""; rfault; ws compute invite --cancel "$INV" --json > /d
 qf_reused_off() { PF=""; pair_office --replace > /dev/null; pinned_json; snap_node; close_master; wait_up 60 > /dev/null; }
 
 # every row and fault that `all` is meant to run did run (a row left out or never called would otherwise go unseen)
-EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 H9 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 H6 H7"
-EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 H1 H1 H1 H1 H1 H1 H1 H1 H8 H9 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
+EXPECT_ROWS="S0 S1 S2 S3 S4 P1 P2 P3 P4 P5 P6 P7 H1 H2 H3 H4 H5 H8 H9 Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q13 Q14 R00 R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R30 R31 R32 G01 H6 H7"
+EXPECT_FAULTS="R01 R02 R03 R04 R05 R06 R07 R10 R11 R12 R13 R14 R15 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R26 R27 R32 G01 H1 H1 H1 H1 H1 H1 H1 H1 H8 H9 Q2 Q3 Q4 Q5 Q6 Q7 Q9 Q10 Q11 Q12 Q14"
 # the scheduler's rows (docs/design/scheduler.md §13): tools/test-jobs/e2e-sched.sh, run by `e2e.sh sched`
 . "$ROOT/tools/test-jobs/e2e-sched.sh"
 . "$ROOT/tools/test-jobs/e2e-dash.sh"

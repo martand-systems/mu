@@ -30,7 +30,7 @@ from mu.proto import MuError  # noqa: E402
 FIXED_T0 = 1794650000.0      # the fixtures' "now": 2026-11-14T07:53:20Z
 FEATURES_R1 = ["sched", "usage", "queue-control", "update"]            # v2026.11.10 (scheduler release 1)
 FEATURES_1B = FEATURES_R1 + ["stats", "watch", "metrics"]               # dashboard phase 1b
-FEATURES = FEATURES_1B + ["pause"]                                      # with scheduler release 2 (contract §3.8)
+FEATURES = FEATURES_1B + ["gc", "pause"]   # with scheduler release 2 (contract §3.8); gc: the clean-up, release 2026.11.12
 GB = 1000 ** 3
 
 SCENARIOS = {
@@ -385,11 +385,11 @@ class FakeNode:
             out["time"] = {"limit_s": j.time_s, "run_s": int(run), "paused_s": 0 if express else int(j.paused_s(t)),
                            "budget_left_s": 0 if express else int(max(0, 4 * 3600 - j.paused_s(t)))}
             if pz is not None and asked:   # the node's wording (pausectl.note_of), built at answer time
-                out["note"] = "resuming: waits for %s (ends by %s)" % (
+                out["note"] = "resuming: waits for %s (ends by %s UTC)" % (
                     " ".join(x[-6:] for x in j.lent_to), out["paused"]["resumes_by"][11:16])
-            elif pz is not None:
-                out["note"] = ("paused for %s until %s" % (pz[4][-6:], time.strftime("%H:%M", time.gmtime(pz[1])))
-                               if pz[3] == "auto" else "paused until %s by %s" % (
+            elif pz is not None:   # release 2026.11.12: the node names the zone of its own words
+                out["note"] = ("paused for %s until %s UTC" % (pz[4][-6:], time.strftime("%H:%M", time.gmtime(pz[1])))
+                               if pz[3] == "auto" else "paused until %s UTC by %s" % (
                                    time.strftime("%H:%M", time.gmtime(pz[1])), pz[2]))
         elif st in proto.FINISHED:
             out["run_s"] = round(j.run_s(t), 1)

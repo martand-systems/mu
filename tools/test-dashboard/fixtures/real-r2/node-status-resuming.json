@@ -4,7 +4,7 @@
  "cancel_requested": false,
  "class": "normal",
  "ended_at": null,
- "ends_by": "2026-11-15T18:26:18Z",
+ "ends_by": "2026-11-22T21:14:47Z",
  "exit_code": null,
  "grant": {
   "class": "normal",
@@ -17,24 +17,24 @@
  "key": "avi-mac",
  "log_size": 0,
  "name": "r7mm2x",
- "note": "resuming: waits for b8b8b8 (ends by 16:17)",
+ "note": "resuming: waits for b8b8b8 (ends by 19:05 UTC)",
  "ok": true,
  "pausable": false,
  "paused": {
   "by": "avi-mac",
   "for_job": null,
-  "held_mem_bytes": 2147483648,
+  "held_mem_bytes": 1610612736,
   "lent_to": [
    "20261114-143010-b8b8b8"
   ],
   "phase": "frozen",
   "resume_asked": {
-   "at": "2026-11-15T16:11:09Z",
+   "at": "2026-11-22T18:59:38Z",
    "by": "avi-mac"
   },
-  "resumes_by": "2026-11-15T16:17:19Z",
-  "since": "2026-11-15T16:11:09Z",
-  "until": "2026-11-15T16:26:09Z",
+  "resumes_by": "2026-11-22T19:05:48Z",
+  "since": "2026-11-22T18:59:38Z",
+  "until": "2026-11-22T19:14:37Z",
   "why": "hand"
  },
  "position": null,
@@ -53,7 +53,7 @@
   "time_s": 7200,
   "why": "2 cores, 2.0 GB, 2h (cores flag, mem flag, time flag)"
  },
- "started_at": "2026-11-15T16:11:08Z",
+ "started_at": "2026-11-22T18:59:37Z",
  "state": "running",
  "time": {
   "budget_left_s": 7200,

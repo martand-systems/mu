@@ -7,6 +7,9 @@ checks are what decides. Built from the security review's exploit (docs/design/j
   FAKE_GLOBS    JSON list: the globs the node claims the job declared (result.json job.outputs), default ["**"]
   FAKE_REFUSE   a JSON object: printed as the answer to any verb, with exit FAKE_RC (default 69)
   MU_SRC        the src folder (for the sealed record)
+  FAKE_ANSWERS  a JSON file {"VERB:ID" or "VERB": answer}: printed for that request (an answer's "_rc" is the exit
+                code, default 0); tried before the rest (tools/test-jobs/unit_gc.py, release 2026.11.12)
+  FAKE_LOG      a file each request is appended to (one line: the request), so a test sees what was asked
 """
 import hashlib
 import io
@@ -25,6 +28,21 @@ req = argv[-1]
 words = req.split()
 verb = words[0]
 args = dict(w.split("=", 1) for w in words[1:] if "=" in w)
+if os.environ.get("FAKE_LOG"):
+    with open(os.environ["FAKE_LOG"], "a") as f:
+        f.write(req + "\n")
+if os.environ.get("FAKE_ANSWERS"):
+    with open(os.environ["FAKE_ANSWERS"]) as f:
+        table = json.load(f)
+    for k in ("%s:%s" % (verb, args.get("id", "")), verb):
+        if k in table:
+            a = dict(table[k])
+            rc = a.pop("_rc", 0)
+            if "_raw" in a:   # a byte stream (log), not JSON
+                sys.stdout.write(a["_raw"])
+            else:
+                print(json.dumps(a))
+            sys.exit(rc)
 if os.environ.get("FAKE_REFUSE"):
     print(os.environ["FAKE_REFUSE"])
     sys.exit(int(os.environ.get("FAKE_RC", "69")))

@@ -13,9 +13,11 @@ PROTOCOL_MIN = 1    # the lowest client protocol this code still serves
 # exit codes of the workstation commands (§4.2)
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_VERSION, EXIT_UNREACHABLE, EXIT_REFUSED = 0, 1, 2, 3, 4, 5
 EXIT_NODE_CANNOT, EXIT_JOB_FAILED, EXIT_INTEGRITY, EXIT_NO_SUCH, EXIT_STILL_RUNNING = 6, 7, 8, 9, 10
+EXIT_PRUNED = 11    # release 2026.11.12: the job's outputs were removed on the node by its clean-up (job-layer §24)
 EXIT_CODES_LINE = ("exit codes: 0 ok, 2 usage or project, 3 the node lacks the pinned μ, 4 unreachable (retry later), "
                    "5 refused (never retry), 6 the node cannot take jobs, 7 the job ended but not succeeded, "
-                   "8 fetch integrity, 9 no such node or job, 10 still running after --timeout")
+                   "8 fetch integrity, 9 no such node or job, 10 still running after --timeout, "
+                   "11 the job's outputs were cleaned up on the node (run it again)")
 
 # exit codes of node verbs (§7.2): sysexits values, never 1, 2 or ssh's 255
 NODE_USAGE, NODE_PROTOCOL, NODE_NO_SUCH, NODE_UNAVAILABLE, NODE_INTERNAL, NODE_TOOLCHAIN = 64, 65, 66, 69, 70, 78
@@ -61,6 +63,48 @@ def job_id_epoch(job_id):
 
 def iso(t=None):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t if t is not None else time.time()))
+
+
+def epoch_of(iso):
+    """'2026-11-14T14:20:00Z' (what nodes and records carry, always UTC) -> epoch seconds, or None."""
+    import calendar
+    try:
+        return calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _local_clock():
+    """time.localtime, or time.gmtime under the test fault utc-words (tools/test-jobs unit.py `tz`: the check that
+    no human-facing time is UTC must then fail)."""
+    from mu.durable import fault
+    return time.gmtime if fault("utc-words") else time.localtime
+
+
+def local_hm(iso, now=None):
+    """A time for people, in this workstation's local time zone (release 2026.11.12: one rule for every human-facing
+    time; --json keeps ISO UTC): '14:20' within 20 h of now, else '14 Nov 14:20'. None -> None; text that is not an
+    ISO time is returned as it is."""
+    if not iso:
+        return None
+    t = iso if isinstance(iso, (int, float)) else epoch_of(iso)
+    if t is None:
+        return str(iso)
+    now = time.time() if now is None else now
+    return time.strftime("%H:%M" if abs(t - now) < 20 * 3600 else "%d %b %H:%M", _local_clock()(t))
+
+
+def local_when(iso, now=None):
+    """A date and time for people, local: '14 Nov 14:20' (the form mu queue uses past 20 h), with the year when it is
+    not this year's. None -> None."""
+    if not iso:
+        return None
+    t = iso if isinstance(iso, (int, float)) else epoch_of(iso)
+    if t is None:
+        return str(iso)
+    lt = _local_clock()(t)
+    this = _local_clock()(time.time() if now is None else now).tm_year
+    return time.strftime("%d %b %H:%M" if lt.tm_year == this else "%d %b %Y %H:%M", lt)
 
 
 def one_line(v, n=200):

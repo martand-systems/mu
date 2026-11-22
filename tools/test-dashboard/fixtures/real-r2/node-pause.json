@@ -6,24 +6,24 @@
  "lent": {
   "cores": 4,
   "cpus": "0-3",
-  "mem_bytes": 0,
-  "until": "2026-11-15T16:26:09Z"
+  "mem_bytes": 536870912,
+  "until": "2026-11-22T19:14:37Z"
  },
- "next": "it resumes by itself at 16:26; to resume sooner: mu resume 20261114-120102-k3f9qa",
- "note": "paused until 16:26 by avi-mac",
+ "next": "it resumes by itself at 19:14 UTC; to resume sooner: mu resume 20261114-120102-k3f9qa",
+ "note": "paused until 19:14 UTC by avi-mac",
  "ok": true,
  "op": "pause",
  "paused": {
   "by": "avi-mac",
   "for_job": null,
   "frozen": true,
-  "held_mem_bytes": 6442450944,
+  "held_mem_bytes": 5905580032,
   "lent_to": [],
   "phase": "frozen",
   "resume_asked": null,
   "resumes_by": null,
-  "since": "2026-11-15T16:11:09Z",
-  "until": "2026-11-15T16:26:09Z",
+  "since": "2026-11-22T18:59:37Z",
+  "until": "2026-11-22T19:14:37Z",
   "why": "hand"
  },
  "state": "running",

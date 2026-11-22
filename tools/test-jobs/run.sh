@@ -81,8 +81,8 @@ done
 for p in $PYS; do
   out="$("$p" -I -S -c 'import ast, sys
 for f in sys.argv[1:]:
-    ast.parse(open(f, encoding="utf-8").read(), f)' "$REPO"/src/mu/{cli,jobs,node,durable,proto}.py "$HERE/unit.py" 2>&1)"
-  eq "src/mu/{cli,jobs,node,durable,proto}.py parse ($("$p" -c 'import sys; print(sys.version.split()[0])'))" "$out" ""
+    ast.parse(open(f, encoding="utf-8").read(), f)' "$REPO"/src/mu/{cli,jobs,node,nodegc,durable,proto}.py "$HERE/unit.py" "$HERE/unit_gc.py" 2>&1)"
+  eq "src/mu/{cli,jobs,node,nodegc,durable,proto}.py parse ($("$p" -c 'import sys; print(sys.version.split()[0])'))" "$out" ""
 done
 eq "dispatcher revs match (bin/mu, install/install.sh)" "$(sed -n 's/^DISPATCHER_REV=\([0-9]*\).*/\1/p' "$REPO/install/install.sh")" \
   "$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$REPO/bin/mu")"
@@ -231,18 +231,31 @@ out="$(route_pause "$MU_HOME/bin/mu")"
 if printf '%s\n' "$out" | grep -q 'stub toolchain'; then bad "mu pause and mu resume reach the job layer (rev 13)" "$out"
 else has "mu pause and mu resume reach the job layer of the default toolchain, also in a project pinned to v2026.11.6 (rev 13)" \
   "$out" '"error": "no-node"'; fi
-sed 's/|pause|resume)/)/' "$MU_HOME/bin/mu" > "$ROOT/mu-no-pause"
+sed 's/|pause|resume|keep)/|keep)/' "$MU_HOME/bin/mu" > "$ROOT/mu-no-pause"
 out="$(route_pause "$ROOT/mu-no-pause")"
 case "$out" in *'stub toolchain v2026.11.6: pause'*) ok "must-fail: a dispatcher without the two words hands mu pause to the pinned toolchain (as it must)" ;;
   *) bad "must-fail: a dispatcher without pause|resume still reached the job layer" "$out" ;; esac
 has "mu help lists pause and resume" "$(mu help 2>&1)" "mu pause JOB [--for D]"
+# release 2026.11.12 (dispatcher rev 14): keep and forget reach the default toolchain's job layer too
+route_keep() {   # route_keep DISPATCHER: "keep forget" answers, as one line each
+  local w; for w in keep forget; do (cd "$ROOT/old project" && /bin/bash "$1" "$w" 20261114-101500-k3f9qa --json 2>&1 | tail -n 1); done
+}
+out="$(route_keep "$MU_HOME/bin/mu")"
+if printf '%s\n' "$out" | grep -q 'stub toolchain'; then bad "mu keep and mu forget reach the job layer (rev 14)" "$out"
+else has "mu keep and mu forget reach the job layer of the default toolchain, also in a project pinned to v2026.11.6 (rev 14)" \
+  "$out" '"exit": '; fi
+sed -e 's/|pause|resume|keep)/|pause|resume)/' -e 's/|cancel|forget|/|cancel|/' "$MU_HOME/bin/mu" > "$ROOT/mu-no-keep"
+out="$(route_keep "$ROOT/mu-no-keep")"
+case "$out" in *'stub toolchain v2026.11.6: keep'*'stub toolchain v2026.11.6: forget'*) ok "must-fail: a dispatcher without the two words hands mu keep and mu forget to the pinned toolchain (as it must)" ;;
+  *) bad "must-fail: a dispatcher without keep|forget still reached the job layer" "$out" ;; esac
+has "mu help lists forget, compute gc and exit 11" "$(mu help 2>&1)" "11 outputs cleaned up on the node"
 t0="$(date +%s)"; for i in 1 2 3 4 5; do mu compute list --json >/dev/null 2>&1; done; t1="$(date +%s)"
 echo "  info  5 starts of a job command: $((t1 - t0)) s"
 
 # ---------------------------------------------------------------- python units
 for p in $PYS; do
   section "unit checks, $p"
-  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report sched sched-sim sched-runner; do
+  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report sched sched-sim sched-runner gc-node gc-client sending tz; do
     py_section "$p" "$s"
   done
   py_section "$p" atomic "$([ "${QUICK:-0}" = 1 ] && echo 30 || echo 120)"
@@ -338,6 +351,19 @@ for f in lend-without-deadline borrow-past-deadline lend-whole-grant borrower-me
          ignore-mem-restore-failure renewal-over-2h no-pause-count-cap limit-command-unquoted limit-check-each-pass \
          pause-without-selftest lend-unlowered-mem auto-charges-max cgroup-from-record-only; do
   must_fail_tagged "scheduler release 2: pause, lending, timers, auto-pause" "$f" "$PY1" sched-pause
+done
+# release 2026.11.12 (job-layer.md §24-§26): the clean-up, stuck sending records, local times; each fault on its check
+for f in gc-fetch-ignored gc-ignores-unfinished gc-ignores-keep gc-ignores-refs fetch-pruned-served gc-pressure-order \
+         gc-pressure-all gc-no-min-age prune-in-place fetch-not-recorded gc-ignores-fetch-lock keep-any-key gc-any-key \
+         gc-hourly-ignored gc-no-start-lock; do
+  must_fail_tagged "release 2026.11.12: the node's clean-up of finished job folders" "$f" "$PY1" gc-node
+done
+must_fail_tagged "release 2026.11.12: mu fetch of a cleaned-up job" fetch-ignores-pruned "$PY1" gc-client
+for f in no-unsent forget-unfinished; do
+  must_fail_tagged "release 2026.11.12: stuck sending records, mu forget" "$f" "$PY1" sending
+done
+for f in node-time-words utc-words; do
+  must_fail_tagged "release 2026.11.12: every human-facing time is local (TZ=Asia/Kathmandu)" "$f" "$PY1" tz
 done
 # the dashboard's release 2 fixtures against the real node's answers (tools/test-jobs/r2_answers.py; the integration)
 py_section "$PY1" r2-shapes
