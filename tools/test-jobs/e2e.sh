@@ -579,16 +579,17 @@ r_gc() {
   local id out rc st pr cnt lg left i
   asws rm -rf "$WCWD/results"
   id="$(submit -- python3 job.py gc)"; wait_state "$id" "succeeded failed" 90
+  [ -z "$GCF" ] || nfault "$GCF"   # the row's fault must be on during the fetch it is about
   out="$(ws fetch "$id" --json 2>&1)"; rc=$?
-  nfault gc-clock-ahead $GCF
-  out="$(ws compute gc office-pc --json 2>&1)"
+  nfault "gc-clock-ahead${GCF:+,$GCF}"   # one fault file line, comma-separated (durable.faults; a space joins names)
+  out="$(ws compute gc office-pc --json 2>&1)"; printf '%s\n' "$out" > "$WORK/out/g01-gc.json"
   for i in $(seq 1 30); do st="$(ws status "$id" --json 2>/dev/null)"; [ -n "$(printf '%s' "$st" | jget pruned.at)" ] && break; sleep 1; done
   nfault
   pr="$(printf '%s' "$st" | jget pruned.at)"; cnt="$(printf '%s' "$st" | jget pruned.fetched.count)"
   out="$(ws fetch "$id" --json 2>&1)"; rc=$?
   lg="$(ws log "$id" 2>&1 >/dev/null)"
   for i in $(seq 1 15); do left="$(sudo ls -A /srv/mu/prune 2>/dev/null | wc -l | tr -d ' ')"; [ "$left" = 0 ] && break; sleep 1; done
-  M="pruned: ${pr:-no}; fetched: ${cnt:-none}; work/ on the node: $(sudo test -e "/srv/mu/jobs/$id/work" && echo present || echo gone); pruned.json: $(sudo test -e "/srv/mu/jobs/$id/pruned.json" && echo yes || echo no); fetch exit $rc ($(printf '%s' "$out" | jget error)): $(printf '%s' "$out" | jget message | cut -c1-120); log: $(printf '%s' "$lg" | grep -o 'this is the last [^(]*' | head -1); left in prune/: $left; audit: $(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)"
+  M="pruned: ${pr:-no} by $(printf '%s' "$st" | jget pruned.by); fetched: ${cnt:-none}; work/ on the node: $(sudo test -e "/srv/mu/jobs/$id/work" && echo present || echo gone); pruned.json: $(sudo test -e "/srv/mu/jobs/$id/pruned.json" && echo yes || echo no); fetch exit $rc ($(printf '%s' "$out" | jget error)): $(printf '%s' "$out" | jget message | cut -c1-120); log: $(printf '%s' "$lg" | grep -o 'this is the last [^(]*' | head -1); left in prune/: $left; audit: $(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)"
   [ -n "$pr" ] && [ "$cnt" = 1 ] && ! sudo test -e "/srv/mu/jobs/$id/work" && [ "$rc" = 11 ] && \
     printf '%s' "$out" | jget message | grep -q 'fetched 1 time' && printf '%s' "$lg" | grep -q 'this is the last' && \
     [ "$left" = 0 ] && [ "$(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)" -ge 1 ]

@@ -570,7 +570,7 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
         freed = sum(x["bytes"] for x in done)
         cands2 = [c for c in cands if c["j"]["id"] not in {x["job_id"] for x in done}] if not dry else cands
         finished = [j for j in jobs if j["result"]]
-        out = {"ok": True, "by": by, "dry_run": dry, "at": proto.iso(now), "pruned": done, "skipped": skip,
+        out = {"ok": True, "by": by, "dry_run": dry, "at": proto.iso(t0), "pruned": done, "skipped": skip,
                "freed_bytes": freed, "pressure": pressure, "line_gb": line, "space": sp, "free_gb_effective":
                None if eff is None else round(eff + (freed / float(1 << 30) if not dry else 0), 1),
                "settings": st, "not_candidates": skipped,
@@ -582,7 +582,7 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
                "took_s": round(time.time() - t0, 2)}
         if not st["enabled"]:
             out["note"] = "the runner's clean-up is off (node.json gc.enabled false)"
-        cache.update(sizes=sizes, as_of=proto.iso(now), finished=out["finished"], due=out["due"],
+        cache.update(sizes=sizes, as_of=proto.iso(t0), finished=out["finished"], due=out["due"],
                      prunable=out["prunable"], space=sp, line_gb=line)
         if not dry:
             cache["last_run"] = {"at": out["at"], "by": by, "pruned": len(done), "freed_bytes": freed,
@@ -611,6 +611,8 @@ def tick(stop=None, now=None):
         if not LAST["at"]:   # once per runner process: the last run's time and the setting (no read on every pass)
             LAST["at"] = proto.epoch_of((read_cache().get("last_run") or {}).get("at")) or 1.0
             LAST["every"] = settings()["every_s"]
+        if LAST["at"] > now + 300:   # a last run "in the future": the clock stepped back (WSL's can); do not wait for it
+            LAST["at"] = 1.0
         if now < LAST["again_at"] or (now - LAST["at"] < LAST.get("every", DEFAULTS["every_s"]) and
                                       not LAST["again_at"]):
             return None
