@@ -1231,7 +1231,8 @@ Sizes are relative: **S** a few focused sessions, **M** several, **L** many, wit
 ### 9.3 Spikes
 
 Each tests an assumption a phase depends on, and runs at the start of that phase or before it. Records go in
-`docs/verification/`. Timing: ES1 and ES2 in E0; ES7 in E1; ES4 at the start of E3; ES5 at the start of E4; ES3 during
+`docs/verification/`. None has been run: this document only plans them. The agent that implements a phase runs its
+spikes first and records what it finds before building on the assumption. Timing: ES1 and ES2 in E0; ES7 in E1; ES4 at the start of E3; ES5 at the start of E4; ES3 during
 E4, before E5 commits to a route; ES6 in E7; ES8 at the start of E8.
 
 | Spike | Tests | If it fails |
@@ -1244,6 +1245,22 @@ E4, before E5 commits to a route; ES6 in E7; ES8 at the start of E8.
 | **ES6** | Write semantic PMI through OCCT, read it back with an independent parser, check against the NIST test models | Drawings and GD&T stay fully manual for now |
 | **ES7** | Ten agent-evaluation tasks end to end, once E1's project format exists | Fix the harness before the baseline is trusted |
 | **ES8** | The topology engine, existing tools first. Run BESO on the MBB benchmark in its stiffness mode and on one JATAYU bracket meshed with 10-node tetrahedra: does it run under Python 3.13 and CalculiX 2.23, how do its layouts and final stiffness compare with the reference at equal mass, is a run repeatable, and how long does it take at 50,000 to 500,000 elements on the laptop and the office PC. Then pyMOTO on the same cases. An in-house density loop is prototyped only if neither passes. Also: whether CalculiX's sensitivity step works on 10-node tetrahedra | If BESO's layouts fail the benchmarks, build the in-house loop. If no route works, E8 delivers parametric sizing only. If the sensitivity step fails, `mu opt shape` is dropped |
+
+**ES8 in steps,** for the agent that picks up E8. Nothing here has been run; a first attempt at step 1 during the
+research was stopped before it produced a result.
+
+1. Run BESO's own first example (`wiki_files/example_1`, a 2D beam) unchanged, with μ's CalculiX and Python. Record
+   whether it runs, how long it takes, and the result against the pictures in its wiki.
+2. Run it twice with the same settings and confirm the two results are identical.
+3. Run the MBB benchmark in stiffness mode, as a thin slab of 10-node tetrahedra meshed by Gmsh. Compare final
+   stiffness at equal mass with the stored reference (Tier 5, §8.1), and check the invariants.
+4. Run one JATAYU bracket with its fixed regions and at least two load cases. Record run time at increasing mesh
+   sizes on the laptop and the office PC, and look for checkerboarding and for the filters its source marks as faulty.
+5. Try its casting-direction filter on a part meant for machining from one side.
+6. Repeat steps 3 and 4 with pyMOTO if BESO's results are poor.
+7. Check that CalculiX's `*SENSITIVITY` step runs on a 10-node tetrahedral mesh and that a symmetric case gives a
+   symmetric map.
+8. Write the result and the engine decision to `docs/verification/`, and pin the chosen tool in `toolchain/pins.toml`.
 
 ---
 
