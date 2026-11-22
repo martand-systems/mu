@@ -1751,6 +1751,49 @@ job, with `--force`, and of a fetched one.
   run.sh` 433 passed, 0 failed, 9 skipped, `tools/test-autoupdate/run.sh` 292 passed, `tools/test-pair/run.sh` 318
   passed.
 
+### 24.7 The reviews of 2026-11-23 and what was done
+
+Two reviews of a24be43 (data safety and correctness; tests and dependencies). Each finding was reproduced first with
+the reviewers' scripts on a24be43, then run again against the fix; each fix has a check with its fault (§24.4). Code
+and tests: e7a2e41; these notes: b8aedb7 and this commit.
+
+| Finding | Reproduced | Done |
+|---|---|---|
+| The disk figure counted space freed inside the virtual disk from the file system's highest use: once `C:` got it back (sparse, compacted) it counted twice, and pressure began only after admission had stopped | yes (165 GB "free" at 15 GB on `C:`) | kept pass to pass (§24.2); `disk-low`'s next step; the words. Admission unchanged: the owner's decision (§24.5) |
+| Any paired key's fetch counted as the job's fetch (moved a job from the 30-day rule to the 7-day one) | yes | only the job's own workstation's fetches count; keys and owner recorded and shown |
+| `mu fetch` of a job pruned between its calls: exit 8 `integrity` | yes | the node's refusal read first: exit 11 |
+| `mu forget` of a finished job never fetched here dropped what `mu fetch` needs | yes | refused (`not-fetched`) unless `--force` (§25) |
+| A job's `log` as a FIFO (or a link to one) stalled the clean-up under the queue lock, and with it the runner | yes (blocked over 20 s) | files opened with `O_NOFOLLOW|O_NONBLOCK`, regular files only |
+| An unreadable `keep.json` did not keep | yes | it keeps, and the answer warns |
+| The first size walk ran inside the runner's loop without a budget; the notes said it never held back a start | yes (1.0 s for 200,000 files, warm) | 10 s budget per pass; the sentence corrected |
+| A full file system: no prune at all | yes (a full 40 MB HFS+ image) | the ballast; checked by hand on a full 60 MB APFS volume: pruned with it, ENOSPC without (`gc-no-ballast`) |
+| `mu compute status` counted unmeasured folders as 0 bytes | yes | every finished folder measured; the count of measured ones shown |
+| `mu status` (the list) did not mark cleaned-up jobs | read | marked |
+| An error after the swap listed a pruned job as skipped | read | listed as pruned |
+| `runs/ID.json` keeps `archive: node:/srv/mu/jobs/ID/work`, gone after the clean-up | read | not changed: the run record is history, nothing reads `archive` |
+| An older μ's submit still uploading after 10 min is marked not sent; two Macs sharing a clone; the node's clock jumping forward; a unit stuck over 24 h after its result | read | not changed; noted (only across an upgrade; §25's untested list; rare) |
+| `mu keep --off` by the job's workstation ends a keep an owner set with `--others` | read | not changed: the owner's decision |
+| Half of the fetch lock untested | mutations passed | a fetch waits while the clean-up holds the folder, then answers `pruned` (`fetch-no-lock`). Removing the inode re-check cannot be caught: `send_fetch` reads everything by path and finds `pruned.json` either way (kept as defence in depth) |
+| The unsent/forget guards untested | mutations passed | `unsent-any-error`, `unsent-ignores-lock`, `forget-unreachable`, `forget-during-submit` |
+| The hourly tick in the runner and `gc.enabled=false` untested | mutations passed | `node.runner_pass()` (`gc-no-tick`); `gc-enabled-ignored` |
+| Local-time checks blind on UTC CI | yes | `gc-client` and `sending` under `TZ=Asia/Kathmandu`; `mu compute status` in `tz`. Found by it: the unsent note printed `unsent_at` as "submitted" (fixed) |
+| "Every check has a named fault" was false | yes (37 of 56) | 26 faults added; 20 of 93 checks still have none, listed in §24.4 |
+| Tags that could not fail (`node-time-words` on resume and queue, `prune-in-place` after the swap) | yes | the fake's resume carries a UTC time; tags removed where they cannot fail |
+| Guards untested: other references, the re-check under the lock, the 10-minute fetch skip, a node that cannot swap | mutations passed | `gc-ignores-refs` (victims, `for_job`), `gc-no-recheck`, `gc-no-fetch-recent`, `gc-swap-fallback` |
+| `mu log` said "the last 169 B of its log (of 169 B)" | yes (CI's G01) | `its whole log was kept`; G01 now sees that |
+| jsdom 31's breaking changes not recorded | — | one line in dashboard.md §7.1.3 |
+
+**Runs on b8aedb7** (the commit after it is docs only):
+- job-layer.yml **45073936924**, every job green: fast tests Linux (`run.sh` 792 passed, 0 failed) and macOS bash 3.2
+  (791; `test-autoupdate` 292), probe, end to end 65 PASS and 48 FAILS-OK (G01: pruned by `mu compute gc`, fetched by
+  its workstation once, fetch exit 11, "its whole log was kept"; with `fetch-not-recorded`: "fetched: none"), Z1 63
+  rows, Z2 48 faults; scheduler 48 PASS and 55 FAILS-OK; dashboard 1b against a real node 21 PASS and 15 FAILS-OK.
+- dashboard.yml **45073941179**: front (D28), supply, server tests Linux and macOS, Playwright, e2e must-fails: green.
+- linux-install.yml **45073944483**: ubuntu and wsl: green.
+- Local, macOS: `tools/test-jobs/run.sh` 1204 passed, 0 failed (both Pythons, every must-fail);
+  `tools/test-dashboard/run.sh` 433 passed, 0 failed, 9 skipped (as before); `tools/test-autoupdate/run.sh` 292;
+  `tools/test-pair/run.sh` 318.
+
 ## 25. Records that never reached the node (release 2026.11.12)
 
 **Why.** In a JATAYU clone, 8 records of 2026-11-15 still said `sending`: their upload never finished, the node had
