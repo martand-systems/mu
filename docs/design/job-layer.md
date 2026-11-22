@@ -1678,6 +1678,25 @@ refusal mapped to 11, `mu log`'s note and `--json`, `mu status`'s words, `mu kee
 - The dashboard shows a pruned job's row and log tail; its chart is empty (`metrics.jsonl` is removed). Not
   tested in a browser.
 
+### 24.6 CI and local runs (release 2026.11.12)
+
+- **job-layer.yml run 45061238248** on bcd35da (the later commits touch only `linux-install.yml` and docs), every job
+  green: fast tests on Linux (`run.sh` 717 passed, 0 failed) and macOS bash 3.2 (716; `test-autoupdate` 292), probe,
+  end to end 65 PASS and 48 FAILS-OK (G01 among them: pruned by `mu compute gc` on ext4, fetch exit 11, the log's
+  tail; with `fetch-not-recorded` the job is pruned as never fetched, so the row fails on `fetched: none`), Z1 63 rows,
+  Z2 48 faults; scheduler 48 PASS and 55 FAILS-OK; dashboard 1b against a real node 21 PASS and 15 FAILS-OK.
+  The run before it (45058592709, ffe852a) showed G01's must-fail counting for the wrong reason (§24.4 note in the
+  commit bcd35da): fixed and seen right here.
+- **dashboard.yml run 45061264411** on bcd35da: front (D28 with CI's own bundle), supply (lockfile platforms, drift,
+  canary, `npm audit --audit-level=high`, `npm audit signatures`, licences), server tests on Linux and macOS, e2e in
+  Chromium and WebKit, e2e must-fails: all green.
+- **linux-install.yml run 45062782184** on b6ef579: both images green (the download cache restored for the first
+  time, dashboard.md §7.1.3).
+- Local, macOS (bash 3.2; system Python 3.11 and the toolchain's 3.13.18): `tools/test-jobs/run.sh` 1090 passed, 0
+  failed (on 38ef912; the sections of this release and each of their faults again on bcd35da), `tools/test-dashboard/
+  run.sh` 433 passed, 0 failed, 9 skipped, `tools/test-autoupdate/run.sh` 292 passed, `tools/test-pair/run.sh` 318
+  passed.
+
 ## 25. Records that never reached the node (release 2026.11.12)
 
 **Why.** In a JATAYU clone, 8 records of 2026-11-15 still said `sending`: their upload never finished, the node had
