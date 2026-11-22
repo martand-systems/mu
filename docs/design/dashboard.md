@@ -1345,7 +1345,9 @@ Node 24.22.3 with the old range (the run's error) and accepts it with the new on
 The updates Dependabot had chosen within the 14-day cooldown were applied through `tools/dashboard-npm` (`lock`, then
 `install`, `lint`, `typecheck`, `test`, `build` in the sandbox), exact pins kept (§3.2 table above): react-query
 5.107.1, lucide-react 1.70.0, Playwright 1.65.0, Tailwind 4.3.5, plugin-react 6.2.1, jsdom 31.0.0 (a major: Vitest's
-193 tests pass), Vite 8.3.6, Vitest 5.1.0. Not taken: TypeScript 7 (peer range) and `@types/node` 26 (Node 24). The
+193 tests pass; its release notes list a new CSS engine, a new canvas backend and asynchronous parsing, and jsdom is a
+test-only package here), Vite 8.3.6, Vitest 5.1.0 (it now loads a test's `.css` imports as empty modules, so those
+files must exist; they do). Not taken: TypeScript 7 (peer range) and `@types/node` 26 (Node 24). The
 lockfile diff: 6 packages added (jsdom 31's `bcp-47`, `bcp-47-match`, `is-alphabetical`, `is-alphanumerical`,
 `is-decimal`, `parse5-parser-stream`; all MIT), 29 removed (jsdom 30's CSS engine and Vite's nested Lightning CSS
 1.33 copies, now hoisted), 46 changed; no new install script (`fsevents` is the only one, as before); the shipped

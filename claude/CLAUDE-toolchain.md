@@ -191,7 +191,8 @@ mu cancel <id>                        # also forgets a job that was never accept
                                       # workstation's job: exit 5 not-allowed (only its own workstation or an owner)
 mu status                             # this project's jobs. (`mu` alone is the toolchain status); "unsent" = never
                                       # reached the node: its row's `next` is mu submit --resume <id> or mu forget <id>
-mu forget <id>                        # drop this clone's record of an unsent (or finished) job; local only
+mu forget <id>                        # drop this clone's record of an unsent (or finished) job; local only;
+                                      # refused (exit 2 not-fetched) for a finished job never fetched here: fetch it
 mu keep <id> [--off]                  # exempt a job's outputs on the node from its clean-up (only when asked)
 mu queue --json                       # the whole node: every project's jobs, in the order they start
 ```
