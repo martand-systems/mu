@@ -33,11 +33,11 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo docker image prune -af >/dev/null 2>&1 || true
           df -h / | tail -1
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.sel.outputs.run == '1'
       - name: Restore download cache
         if: steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: mucache
           key: mucache-${{ matrix.image }}-${{ github.run_id }}
@@ -68,7 +68,7 @@ jobs:
       # download (install #1) and the offline rebuild from that cache (install #2), see tools/s2/ci-install.sh
       - name: Save download cache (also after a failure, so a retry doesn't download again)
         if: always() && steps.sel.outputs.run == '1' && github.event.inputs.cache != 'false'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             mucache/downloads
@@ -76,7 +76,7 @@ jobs:
             mucache/pkgs/https/conda.anaconda.org/conda-forge/*/*.conda
             mucache/uv
           key: mucache-${{ matrix.image }}-${{ github.run_id }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.sel.outputs.run == '1'
         with:
           name: install-${{ matrix.image }}

@@ -1,6 +1,12 @@
 # docs/design/dashboard.md §4.6.1: weekly grouped pull requests, a 14-day cooldown on new releases. A Dependabot PR
 # changes package.json and the lockfile only, so D28 fails on it by design; a person reads the lockfile diff and the
 # changelogs, then commits CI's rebuilt bundle (the `dashboard-build` artifact) to the PR. Nothing updates itself.
+#
+# Release 2026.11.12 (run 44999445046 of 2026-11-22 failed on every package): Dependabot's updater runs its own Node
+# and npm (24.22.3 and npm 12.2.0 that day), and dashboard/.npmrc's engine-strict refused them against package.json's
+# "npm": "<12". engines now allows npm 12 (the Node major stays pinned: ">=24.22.2 <25"). Two majors that cannot pass
+# are not proposed: typescript 7 (typescript-eslint 8.72 declares typescript <6.1.0: "Error while updating peer
+# dependency" in that run) and @types/node past 24 (the build's Node is 24, §3.2). Lift each ignore when that changes.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -13,6 +19,11 @@ updates:
     groups:
       dashboard:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:

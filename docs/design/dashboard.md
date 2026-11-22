@@ -198,8 +198,8 @@ and image optimisation: features for public web apps with many users and search 
 ### 3.2 Front-end libraries, pinned
 
 Few dependencies, well maintained, permissively licensed. **Pinning rule:** the newest release that was at least 14
-days old on the day of pinning (cut-off 2026-10-31 for this list), so a compromised or broken release has time to be
-found. Versions, release dates, licences and engine ranges were read from the npm registry
+days old on the day of pinning (cut-off 2026-10-31 for this list; the rows marked "was" were moved on 2026-11-23 to
+Dependabot's choices of 2026-11-22, §7.1.3), so a compromised or broken release has time to be found. Versions, release dates, licences and engine ranges were read from the npm registry
 (`registry.npmjs.org/<package>`) on 2026-11-14. Sizes are bundlephobia's minified + gzipped size of the whole package;
 the real cost is what the build contains, which D36 measures and bounds.
 
@@ -208,12 +208,12 @@ the real cost is what the build contains, which D36 measures and bounds.
 | Package | Pin (released) | Newer, not yet pinned | Licence | Size (gzip) | For | Phase |
 |---|---|---|---|---|---|---|
 | `react`, `react-dom` | 19.3.1 (2026-10-14) | — | MIT | about 60 kB together (estimate: the unminified production file of `react-dom/client` is 110 kB gzipped) | the UI | 1a |
-| `@tanstack/react-query` | 5.105.0 (2026-10-26) | 5.107.1 | MIT | 13 kB | polling `/api`, caching, deduplication, pausing in hidden tabs, retry with back-off. Set to `networkMode: 'always'`: the default pauses every query while `navigator.onLine` is false, which would freeze a page whose server is on the same Mac (D41) | 1a |
+| `@tanstack/react-query` | 5.107.1 (2026-11-06; was 5.105.0) | 5.108.2 | MIT | 13 kB | polling `/api`, caching, deduplication, pausing in hidden tabs, retry with back-off. Set to `networkMode: 'always'`: the default pauses every query while `navigator.onLine` is false, which would freeze a page whose server is on the same Mac (D41) | 1a |
 | `uplot` | 1.6.32 (2025-03-14) | — | MIT | 22 kB | every chart on a canvas: the job's resource chart, later host history (1a: the machine cards' 10-minute sparklines are small SVG paths drawn by React instead, styled by the tokens, so a theme change needs no redraw). Wrapped in our own component of about 80 lines; `uplot-react` (1.2.4, MIT) is not adopted. Its last release is from March 2025 and it has one maintainer: acceptable because only our wrapper touches it, so it can be replaced in one file (§8) | 1a |
 | `radix-ui` | 1.8.1 (2026-10-12) | — | MIT | 74 kB if all of it were imported; only the parts used are bundled | accessible primitives. **1a: Tooltip only.** Phase 2: Tabs and Popover (non-modal, its default). Styled by us with Tailwind, following shadcn/ui's patterns (MIT, copied as source where useful, not a dependency; the shadcn CLI is not used in CI). **Never used:** `ScrollArea` (it renders a `<style>` element, which `style-src 'self'` blocks: native overflow with scrollbar styling in our stylesheet instead), `Toggle` (a `<button aria-pressed>` instead), and any part in a modal mode (`Dialog`, `AlertDialog`, `DropdownMenu`, `Select` and `Popover` with `modal`), whose scroll lock (`react-remove-scroll`) injects a `<style>` element when it opens. The two job-table filters were to be native `<select>` elements; built in 1a as segmented `<button aria-pressed>` groups, because WebKit (Playwright's 27.2 build) reports a `style-src-attr` violation for every `<select>` it creates, even from plain DOM calls (its user-agent shadow tree carries an inline style), and D29 allows none | 1a |
 | `@tanstack/react-table` | 9.3.1 (2026-10-12) | — | MIT | 32 kB whole; tree-shaken | phase 2's job list with filters and search. Not in 1a: a 100-row table with three sortable columns is a few lines of our own, and v9 is a month old | 2 |
 | `@tanstack/react-virtual` | not pinned: 3.14.26 (2026-11-03) is under 14 days old | — | MIT | about 5 kB | long logs and job lists, only if phase 2's caps prove too small (§5.3 `LogView` caps the log at numbers in 1a) | 2 (if needed) |
-| `lucide-react` | 1.65.0 (2026-10-30) | 1.73.0 | ISC | under 1 kB per icon used | state icons (an icon and a word go with every state colour) | 1a |
+| `lucide-react` | 1.70.0 (2026-11-06; was 1.65.0) | 1.77.0 | ISC | under 1 kB per icon used | state icons (an icon and a word go with every state colour) | 1a |
 | `@tanstack/react-router` | 1.170.46 (2026-10-22) | — | MIT | 31 kB | separate pages, filters kept in the URL with types, hash history. Phase 1 has one page and reads `#job=<id>` itself, so no router until phase 2 | 2 |
 | `echarts` | 6.1.0 (2026-05-19) | — | Apache-2.0 | 368 kB whole; only the chart types used, in a lazily loaded chunk | Compare › Performance bars and scatter, the daily compute-hours chart. Adopted only if hand-drawn SVG is not enough; canvas renderer, tooltip only in `renderMode: 'richText'` or none (§4.6, CSP by phase) | 2 (optional) |
 | `three` | 0.187.0 (2026-10-30) | — | MIT | 186 kB whole; lazily loaded | STL and untextured GLB previews (its own `OrbitControls`, `STLLoader`, `GLTFLoader`); no Draco, KTX2 or meshopt decoders (§4.6, CSP by phase) | 4 |
@@ -225,16 +225,16 @@ the real cost is what the build contains, which D36 measures and bounds.
 |---|---|---|---|---|
 | Node.js | 24.22.2 LTS "Krypton" (2026-10-27), with npm 11.19.1 | 24.22.3, 26.13.1 LTS | MIT | the build, in `.nvmrc`, `package.json` `engines` (with `engine-strict`), and CI's `setup-node`. On the Mac, the official tarball checked against a pinned SHA-256, in `$MU_CACHE/dev/`, used only through `tools/dashboard-npm` (§4.6.1) |
 | `typescript` | 6.0.3 (2026-04-16) | 7.0.2 | Apache-2.0 | type checking (`tsc --noEmit`; Vite strips types itself). **Not 7.0**: `typescript-eslint` 8.72 declares `typescript >=4.8.4 <6.1.0`. Move when it supports 7 |
-| `vite` | 8.3.5 (2026-10-21) | 8.3.8 | MIT | dev server and build (needs Node ^20.19 or ≥ 22.12) |
-| `@vitejs/plugin-react` | 6.1.2 (2026-10-05) | 6.3.0 | MIT | JSX and fast refresh in the dev server |
-| `tailwindcss`, `@tailwindcss/vite` | 4.3.3 (2026-07-16) | 4.3.5 | MIT | utility CSS compiled at build time into one `.css` file; the design tokens (§5.3) are its theme |
+| `vite` | 8.3.6 (2026-11-05; was 8.3.5) | 8.3.8 | MIT | dev server and build (needs Node ^20.19 or ≥ 22.12) |
+| `@vitejs/plugin-react` | 6.2.1 (2026-11-02; was 6.1.2) | 6.3.0 | MIT | JSX and fast refresh in the dev server |
+| `tailwindcss`, `@tailwindcss/vite` | 4.3.5 (2026-11-06; was 4.3.3) | — | MIT | utility CSS compiled at build time into one `.css` file; the design tokens (§5.3) are its theme |
 | `eslint` | 10.14.0 (2026-10-30) | 10.15.0 | MIT | lint, including the rules of §4.6.1 |
 | `typescript-eslint` | 8.72.1 (2026-10-26) | 8.72.2 | MIT | TypeScript rules |
 | `eslint-plugin-react-hooks` | 7.1.1 (2026-04-17) | — | MIT | hooks rules. `eslint-plugin-react` is not adopted: 7.37.5 declares ESLint ≤ 9.7; the HTML-sink ban uses ESLint's own `no-restricted-syntax` and `no-restricted-properties`. `eslint-plugin-jsx-a11y` cannot be used either: 6.10.2, its latest, declares ESLint ≤ 9; accessibility is checked by axe and D26 instead |
-| `vitest` | 5.0.5 (2026-10-15) | 5.1.0 | MIT | unit tests of components and data shaping (needs Node ^22.12, ^24 or ≥ 26) |
-| `jsdom` | 30.1.3 (2026-10-15) | 31.0.1 | MIT | DOM for Vitest |
+| `vitest` | 5.1.0 (2026-11-02; was 5.0.5) | 5.1.1 | MIT | unit tests of components and data shaping (needs Node ^22.12, ^24 or ≥ 26) |
+| `jsdom` | 31.0.0 (2026-11-05; was 30.1.3) | 31.0.1 | MIT | DOM for Vitest |
 | `@testing-library/react` | 16.3.3 (2026-08-27) | — | MIT | component tests |
-| `@playwright/test` | 1.64.1 (2026-10-14) | 1.65.1 | Apache-2.0 | end-to-end tests in headless Chromium and WebKit, with the browser builds pinned to that Playwright version |
+| `@playwright/test` | 1.65.0 (2026-11-05; was 1.64.1) | 1.65.1 | Apache-2.0 | end-to-end tests in headless Chromium and WebKit, with the browser builds pinned to that Playwright version |
 | `@axe-core/playwright` | 4.14.0 (2026-10-15) | — | **MPL-2.0** | accessibility checks in Playwright. File-level copyleft, test-only and never shipped: allowed by name for dev dependencies (§4.6.1) |
 | `@types/react`, `@types/react-dom` | 19.3.0 | — | MIT | types (release date not checked) |
 | `actions/setup-node` | v7.1.0, commit `949feb2413d6458794dcd2491c4babbbce0c15c1` (2026-10-08) | — | MIT | CI, pinned by commit like the other actions in `job-layer.yml` |
@@ -1329,6 +1329,35 @@ core with the overview open, about 0.3 % with a running job's page open). μ's o
 a core with no dashboard at all (release 1's runner scans every job folder every second, and no code removes old job
 folders), so "μ's processes under 2 %" as §7.1 first wrote it does not hold today. Keep the budget for the dashboard's
 share, or set one for μ in total (then the runner's scan needs work).
+
+### 7.1.3 Dependabot's updates as built (release 2026.11.12)
+
+**npm (`/dashboard`).** Dependabot's weekly run 44999445046 (2026-11-22) opened no pull request: every update failed
+with `EBADENGINE`. Its updater runs its own Node and npm (24.22.3, npm 12.2.0 that day), and `.npmrc`'s
+`engine-strict=true` refused them against `package.json`'s `"npm": ">=11.19.1 <12"`; TypeScript 7.0.2 also failed on
+its peer range (`typescript-eslint` 8.72 declares `typescript <6.1.0`, §3.2). Done: `engines.npm` is `>=11.19.1 <13`
+(the Node major stays pinned, `>=24.22.2 <25`, and `.nvmrc` stays 24.22.2); `.github/dependabot.yml` ignores the
+major updates of `typescript` and `@types/node` (Node 24), each with its reason, to lift when that changes. Verified
+here: npm's own engine check (`npm-install-checks`, run through `tools/dashboard-npm npm exec`) refuses npm 12.2.0 /
+Node 24.22.3 with the old range (the run's error) and accepts it with the new one; npm 11.19.1 is accepted by both.
+**Not verified:** Dependabot's next weekly run itself (it runs on `main` only).
+
+The updates Dependabot had chosen within the 14-day cooldown were applied through `tools/dashboard-npm` (`lock`, then
+`install`, `lint`, `typecheck`, `test`, `build` in the sandbox), exact pins kept (§3.2 table above): react-query
+5.107.1, lucide-react 1.70.0, Playwright 1.65.0, Tailwind 4.3.5, plugin-react 6.2.1, jsdom 31.0.0 (a major: Vitest's
+193 tests pass), Vite 8.3.6, Vitest 5.1.0. Not taken: TypeScript 7 (peer range) and `@types/node` 26 (Node 24). The
+lockfile diff: 6 packages added (jsdom 31's `bcp-47`, `bcp-47-match`, `is-alphabetical`, `is-alphanumerical`,
+`is-decimal`, `parse5-parser-stream`; all MIT), 29 removed (jsdom 30's CSS engine and Vite's nested Lightning CSS
+1.33 copies, now hoisted), 46 changed; no new install script (`fsevents` is the only one, as before); the shipped
+packages that changed are react-query, its core and lucide-react, all MIT/ISC. `tools/dashboard-licences.py`: 355
+packages, 81 shipped, ok. The committed `share/dashboard/` is CI's `dashboard-build` artifact (D28).
+
+**GitHub Actions.** Dependabot's PR #1 (`dependabot/github_actions/actions-6d104135f2`, CI green) moved the two
+workflows that still used tags (`linux-install.yml`, `s2-probe.yml`) from `@v4` to `actions/checkout@v7`,
+`actions/cache/{restore,save}@v6`, `actions/upload-artifact@v7`. Brought in by hand, pinned by commit as every other
+workflow is: checkout v7.0.1 `3d3c42e5…`, upload-artifact v7.0.2 `cf430e03…` (the pins job-layer.yml and dashboard.yml
+already use), cache v6.1.0 `55cc8345…` (released 2026-06-26; its inputs are those of v4). The PR is left open on
+GitHub (not merged), to be closed once this release is on `main`.
 
 ### 7.2 Phase 2: history, more screens, benchmark comparison (4–6 days)
 

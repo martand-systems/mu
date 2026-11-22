@@ -24,7 +24,7 @@ jobs:
           - tool: openvsp
             image: wsl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Skip unless selected
         id: sel
         run: |
@@ -51,7 +51,7 @@ jobs:
         if: always() && steps.sel.outputs.run == '1'
         run: |
           { echo "### ${{ matrix.tool }} on ${{ matrix.image }}"; echo '```'; cat out/results.txt 2>/dev/null; echo; cat out/timeline.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.sel.outputs.run == '1'
         with:
           name: probe-${{ matrix.tool }}-${{ matrix.image }}
