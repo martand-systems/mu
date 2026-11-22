@@ -1669,7 +1669,11 @@ refusal mapped to 11, `mu log`'s note and `--json`, `mu status`'s words, `mu kee
   `C:`'s free figure (what `disk-low` and the start check read) does not rise. The owner should decide: make the disk
   sparse at the next visit, or compact it (`Optimize-VHD`) by hand. The pressure rule counts the reuse (§24.2), so it
   does not prune everything in that case; with a sparse disk it may count the same space twice and prune less.
-- The exchange call on WSL's ext4 (CI's runner ext4 and macOS APFS are tested); `ionice` in WSL.
+- The exchange call on WSL's ext4 was **checked on the office PC by a probe job** (`--quick`, 2026-11-23, job
+  `20261122-191623-xxqgug`, its own work folder only): WSL kernel 6.18.58.1, glibc 2.39, the toolchain's Python
+  3.13.18, `renameat2(RENAME_EXCHANGE)` swapped two folders on the distro's ext4 (`/dev/sdd`, the file system of
+  `/srv/mu`: 48.7 GB used of 1006.9 GB virtual); `ionice` and `nice` are in `/usr/bin`; the host drive record is
+  `C /mnt/c`. The clean-up itself has not run there (it needs this release on the node).
 - The detached `rm` outliving the runner's restart is assumed, not tested (the next clean-up deletes leftovers anyway).
 - The dashboard shows a pruned job's row and log tail; its chart is empty (`metrics.jsonl` is removed). Not
   tested in a browser.
