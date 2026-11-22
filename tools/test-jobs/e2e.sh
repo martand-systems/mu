@@ -589,9 +589,10 @@ r_gc() {
   out="$(ws fetch "$id" --json 2>&1)"; rc=$?
   lg="$(ws log "$id" 2>&1 >/dev/null)"
   for i in $(seq 1 15); do left="$(sudo ls -A /srv/mu/prune 2>/dev/null | wc -l | tr -d ' ')"; [ "$left" = 0 ] && break; sleep 1; done
-  M="pruned: ${pr:-no} by $(printf '%s' "$st" | jget pruned.by); fetched: ${cnt:-none}; work/ on the node: $(sudo test -e "/srv/mu/jobs/$id/work" && echo present || echo gone); pruned.json: $(sudo test -e "/srv/mu/jobs/$id/pruned.json" && echo yes || echo no); fetch exit $rc ($(printf '%s' "$out" | jget error)): $(printf '%s' "$out" | jget message | cut -c1-120); log: $(printf '%s' "$lg" | grep -o 'this is the last [^(]*' | head -1); left in prune/: $left; audit: $(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)"
+  M="pruned: ${pr:-no} by $(printf '%s' "$st" | jget pruned.by); fetched: ${cnt:-none}; work/ on the node: $(sudo test -e "/srv/mu/jobs/$id/work" && echo present || echo gone); pruned.json: $(sudo test -e "/srv/mu/jobs/$id/pruned.json" && echo yes || echo no); fetch exit $rc ($(printf '%s' "$out" | jget error)): $(printf '%s' "$out" | jget message | cut -c1-120); log: $(printf '%s' "$lg" | grep -oE "this is the last [^(]*|its whole log was kept" | head -1); left in prune/: $left; audit: $(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)"
   [ -n "$pr" ] && [ "$cnt" = 1 ] && ! sudo test -e "/srv/mu/jobs/$id/work" && [ "$rc" = 11 ] && \
-    printf '%s' "$out" | jget message | grep -q 'fetched 1 time' && printf '%s' "$lg" | grep -q 'this is the last' && \
+    printf '%s' "$out" | jget message | grep -q 'fetched by [^ ]* (the job.s workstation) 1 time' && \
+    printf '%s' "$lg" | grep -qE 'this is the last|its whole log was kept' && \
     [ "$left" = 0 ] && [ "$(sudo grep -c "gc: pruned id=$id" /srv/mu/audit.log)" -ge 1 ]
 }
 f_gcfetch_on() { GCF=fetch-not-recorded; }

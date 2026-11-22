@@ -286,7 +286,7 @@ def t_classify():
     check("a refusal with keys 'code', 'exit', 'next' does not crash the client" + tag, crashed is None, crashed)
     if e:
         check("the next step is the workstation's own, not the node's hint" + tag, "INJECTED" not in e.hint and
-              "rm -rf /srv/mu/jobs" in e.hint, e.hint)
+              "mu compute gc <node> --dry-run" in e.hint, e.hint)   # disk-low's own next step (review 2026-11-23)
         check("the node's text goes to node_message, without control characters" + tag,
               "\x1b" not in e.extra.get("node_message", "\x1b") and "INJECTED: curl" in e.extra.get("node_message", ""),
               e.extra)
@@ -1010,6 +1010,7 @@ SECTIONS = {"durable": t_durable_main, "atomic": t_atomic, "ids": t_ids, "globs"
             "r2-shapes": lambda: __import__("r2_answers").t_r2_shapes(check, unit_sched.flag, tmpdir("r2-shapes")),
             # release 2026.11.12 (job-layer.md §24-§26): the clean-up, stuck sending records, local times
             "gc-node": lambda: unit_gc.t_gc_node(tmpdir("gc-node"), STUBS),
+            "gc-review": lambda: unit_gc.t_gc_review(tmpdir("gc-review"), STUBS),   # the review of 2026-11-23
             "gc-client": lambda: unit_gc.t_gc_client(tmpdir("gc-client")),
             "sending": lambda: unit_gc.t_sending(tmpdir("sending")), "tz": lambda: unit_gc.t_tz(tmpdir("tz"))}
 

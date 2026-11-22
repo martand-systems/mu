@@ -42,6 +42,27 @@ Test faults (MU_NODE_FAULT, MU_JOBS_FAULT or /etc/mu/test-fault; tools/test-jobs
   fetch-pruned-served   the fetch verb sends a pruned job's result as if its outputs were there
   keep-any-key          keep acts on any job for any key (no ownership check)
   gc-ignores-fetch-lock the clean-up swaps a folder whose outputs are being fetched
+  (review of 2026-11-23, job-layer.md §24.7:)
+  gc-reclaim-double     the space freed inside the virtual disk counts as free even after C: got it back (sparse disk,
+                        compaction): the same space counted twice
+  gc-any-fetch          a fetch by any paired key counts as the job's fetch (not only its own workstation's)
+  gc-log-follows        the log is opened by its path, following a link, blocking on a FIFO
+  keep-needs-seal       a keep.json that does not read as a sealed record does not keep
+  gc-walk-unbudgeted    the runner's size walk has no time budget (a first pass walks every folder before a start)
+  gc-no-ballast         no ballast: a full file system leaves no room for the pruned copy, nothing is pruned
+  gc-post-swap-error-skips  an error after the swap (fsync, the rename into prune/) reports the job as not pruned
+  gc-enabled-ignored    the runner's clean-up runs although gc.enabled is false
+  gc-no-recheck         prune_one does not check the job again under the queue lock (a keep racing the pass)
+  gc-no-fetch-recent    a job fetched minutes ago may be pruned under disk pressure
+  gc-swap-fallback      a node that cannot swap folders deletes in place instead (what the swap exists to prevent)
+  gc-measure-candidates-only  only the candidates' folders are measured (the figure counts the others as 0 bytes)
+  gc-dry-prunes         a dry run prunes
+  gc-sizes-not-cached   every pass walks every folder again (gc.json's sizes ignored)
+  gc-no-remove          the old folders are never deleted from prune/
+  gc-no-leftovers       what a crash left in prune/ is never deleted
+  gc-settings-unchecked mu node settings writes any gc value unchecked
+  fetch-result-counts   fetch what=result counts as a fetch of the outputs
+  status-no-gc-marks    status of a finished job leaves out pruned, kept, fetched
 and one test injector (not a check): gc-clock-ahead, the clean-up judges ages 40 days ahead (e2e G01 on real systemd)
 """
 import ctypes
@@ -52,6 +73,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -68,7 +90,11 @@ KEEP = ("job.json", "state.json", "result.json", "events.log", "cancel", "timeli
         "keep.json")
 EVENTS_CAP = 1 << 20          # events.log is kept whole up to this, else its last part
 TICK_BUDGET_S = 60            # the runner's tick stops pruning after this and comes back a minute later
+WALK_BUDGET_S = 10            # the runner's size walk stops after this (and one folder), goes on a minute later
 FETCH_RECENT_S = 600          # a fetch started this recently counts as in progress (the lock is the real guard)
+BALLAST_BYTES = 16 << 20      # /srv/mu/gc-ballast: deleted when a full file system leaves no room for a pruned copy
+BALLAST_MIN_FREE = 1 << 30    # the ballast is made again only with this much free
+FETCH_KEYS = 10               # fetched.json `by` keeps this many keys (always the job's own)
 JOB_REF = re.compile(r"[0-9]{8}-[0-9]{6}-[0-9a-z]{6}")
 LAST = {"at": 0.0, "again_at": 0.0}
 
@@ -93,6 +119,8 @@ def settings(node=None):
 
 def parse_setting(k, v):
     """`gc.KEY=VALUE` of mu node settings -> (key, value) or raises ValueError with the reason."""
+    if fault("gc-settings-unchecked"):
+        return k, v
     if k == "enabled":
         if v not in ("true", "false"):
             raise ValueError("gc.enabled is true or false")
@@ -113,40 +141,82 @@ def fetched(d):
 
 
 def kept(d):
-    return durable.read_record(os.path.join(d, "keep.json"))
+    """keep.json. One that exists but does not read (damaged, unsealed, written by hand) still keeps: the clean-up
+    fails closed (review 2026-11-23) -> {"by": None, "at": None, "unreadable": True}."""
+    path = os.path.join(d, "keep.json")
+    if fault("keep-needs-seal"):
+        return durable.read_record(path)
+    if not os.path.lexists(path):
+        return None
+    return durable.read_record(path) or {"by": None, "at": None, "unreadable": True}
 
 
 def pruned(d):
     return durable.read_record(os.path.join(d, "pruned.json"))
 
 
-def note_fetch(d, job_id, key):
-    """The fetch verb, after it sent a job's outputs whole: fetched.json (first_at, last_at, count, keys)."""
+def note_fetch(d, job_id, key, owner=None):
+    """The fetch verb, after it sent a job's outputs whole: fetched.json (first_at, last_at, count, keys: every key's
+    fetches; `by`: each key's count and last time, the job's own workstation OWNER always among them). Only OWNER's
+    fetches count for the clean-up's rules (own_fetch)."""
     if fault("fetch-not-recorded"):
         return
     old = fetched(d) or {}
     now = proto.iso()
-    keys = [k for k in old.get("keys") or [] if isinstance(k, str)][-9:]
+    keys = [k for k in old.get("keys") or [] if isinstance(k, str)][-(FETCH_KEYS - 1):]
     if key not in keys:
         keys.append(key)
+    by = {k: v for k, v in (old.get("by") or {}).items() if isinstance(k, str) and isinstance(v, dict)} \
+        if isinstance(old.get("by"), dict) else {}
+    mine = by.get(key) or {}
+    by[key] = {"count": int(mine.get("count") or 0) + 1, "first_at": mine.get("first_at") or now, "last_at": now}
+    while len(by) > FETCH_KEYS:   # the oldest other key goes; never the job's own
+        drop = min((k for k in by if k != owner and k != key), key=lambda k: str(by[k].get("last_at")), default=None)
+        if drop is None:
+            break
+        by.pop(drop)
     try:
         durable.write_record(os.path.join(d, "fetched.json"), {
             "schema": 1, "job_id": job_id, "first_at": old.get("first_at") or now, "last_at": now,
-            "count": int(old.get("count") or 0) + 1, "keys": keys})
+            "count": int(old.get("count") or 0) + 1, "keys": keys, "owner": owner or old.get("owner"), "by": by})
     except OSError as e:   # a full disk must not fail the fetch that just worked
         _N().journal("fetch id=%s: could not record the fetch (%s)" % (job_id, e))
 
 
-def public(d, res=None):
+def own_fetch(f, owner):
+    """The fetches of the job's own workstation (job.json `key`) in fetched.json F: {count, first_at, last_at} or None.
+    Only these count for the rules (review 2026-11-23: another paired key's fetch moved a job from the 30-day rule to
+    the 7-day one, and the node cannot know whether that key passed the files on)."""
+    if not f:
+        return None
+    if fault("gc-any-fetch"):
+        return {"count": f.get("count"), "first_at": f.get("first_at"), "last_at": f.get("last_at")}
+    by = f.get("by") if isinstance(f.get("by"), dict) else {}
+    x = by.get(owner) if owner else None
+    return x if isinstance(x, dict) and x.get("last_at") else None
+
+
+def fetch_facts(f, owner):
+    """fetched.json for people and for pruned.json: every key's count and last time, and the owner's."""
+    if not f:
+        return None
+    own = own_fetch(f, owner)
+    return {"count": f.get("count"), "first_at": f.get("first_at"), "last_at": f.get("last_at"),
+            "keys": [k for k in f.get("keys") or [] if isinstance(k, str)], "owner": owner,
+            "by_owner": None if not own else {"count": own.get("count"), "last_at": own.get("last_at")}}
+
+
+def public(d, res=None, owner=None):
     """What status and list add for a finished job: pruned, kept, fetched (small, ISO times)."""
     out = {}
     pr = pruned(d)
     out["pruned"] = None if not pr else {k: pr.get(k) for k in ("at", "why", "by", "bytes_freed", "fetched", "log")}
     k = kept(d)
-    out["kept"] = None if not k else {"by": k.get("by"), "at": k.get("at")}
-    f = fetched(d)
-    out["fetched"] = None if not f else {"count": f.get("count"), "first_at": f.get("first_at"),
-                                         "last_at": f.get("last_at")}
+    out["kept"] = None if not k else dict({"by": k.get("by"), "at": k.get("at")},
+                                          **({"unreadable": True} if k.get("unreadable") else {}))
+    if owner is None:
+        owner = (durable.read_record(os.path.join(d, "job.json")) or {}).get("key")
+    out["fetched"] = fetch_facts(fetched(d), owner)
     return out
 
 
@@ -173,22 +243,61 @@ def fs_used(path):
         return None
 
 
+RETURN_MIN = 256 << 20   # a rise of C:'s free space under this between two passes is noise, not space given back
+
+
+def host_free_bytes(d):
+    """Free bytes of the drive disk_info D names ('C: (/mnt/c)'), or of /srv/mu's file system."""
+    m = re.match(r"^[A-Za-z]: \((.*)\)$", d.get("where") or "")
+    try:
+        s = os.statvfs(m.group(1) if m else _N().ROOT)
+        return s.f_bavail * s.f_frsize
+    except OSError:
+        return None
+
+
 def space(node, cache):
     """The free space the clean-up decides by, in GB: the figure jobs are admitted by (hello's disk: the smaller of
-    /srv/mu's file system and the Windows drive the host script recorded). When the Windows drive is the smaller, a
-    folder deleted inside WSL's virtual disk does not give C: its space back unless the disk is sparse, but new jobs
-    reuse those blocks before the disk grows: so the space freed since the file system's highest use (kept in gc.json,
-    `used_peak`) counts as free too. -> (free_gb_effective, detail)."""
+    /srv/mu's file system and the Windows drive the host script recorded), plus, when the Windows drive is the
+    smaller, the space freed inside WSL's virtual disk that the drive has not got back (`unreturned` in gc.json): on a
+    disk that is not sparse, deleted blocks stay in the virtual disk and new jobs reuse them before it grows.
+    Kept from pass to pass by the changes since the last one (review 2026-11-23: a figure from the file system's
+    highest use counted the same space twice once C: got it back, on a sparse disk or after a compaction):
+      + what the file system inside freed (its used bytes fell)
+      - what new data reused (its used bytes rose: the virtual disk does not grow for it)
+      - what C: got back (its free bytes rose by RETURN_MIN or more: a sparse disk, a compaction)
+    Space Windows itself uses on C: in the same interval can hide a return (then the figure is too high until the
+    next return); space Windows frees counts as a return (too low: the error is on the side of pruning early).
+    -> (free_gb_effective, detail)."""
     N = _N()
     d = N.disk_info(node)
     used = fs_used(N.ROOT)
-    peak = max(cache.get("used_peak") or 0, used or 0)
-    cache["used_peak"] = peak
-    reclaim = (peak - used) if used is not None and d.get("where") != N.ROOT else 0
     free = d.get("free_gb")
-    eff = None if free is None else free + reclaim / float(1 << 30)
-    return eff, {"free_gb": free, "where": d.get("where"), "reclaim_inside_bytes": reclaim,
+    host = d.get("where") != N.ROOT
+    hb = host_free_bytes(d) if host else None
+    held = cache.get("unreturned") if isinstance(cache.get("unreturned"), int) else 0
+    pu, ph = cache.get("used_prev"), cache.get("host_free_prev")
+    if not host:
+        held = 0
+    elif used is not None and isinstance(pu, int):
+        held += max(0, pu - used) - max(0, used - pu)
+        if hb is not None and isinstance(ph, int) and hb - ph >= RETURN_MIN and not fault("gc-reclaim-double"):
+            held -= hb - ph
+        held = max(0, held)
+    cache.update(used_prev=used, host_free_prev=hb, unreturned=held)
+    for k in ("used_peak", "free_at_peak"):   # the figure of the first build (review 2026-11-23)
+        cache.pop(k, None)
+    eff = None if free is None else free + held / float(1 << 30)
+    return eff, {"free_gb": free, "where": d.get("where"), "reclaim_inside_bytes": held,
                  "min_free_gb": d.get("min_free_gb")}
+
+
+def space_words(eff, sp):
+    """The figure for people: 'N GB free for jobs (M GB on C: (…), K GB freed inside the virtual disk)'."""
+    t = "%.0f GB free for new jobs (%s GB on %s" % (eff, sp.get("free_gb"), sp.get("where"))
+    r = sp.get("reclaim_inside_bytes") or 0
+    return t + (" and %.1f GB freed inside the virtual disk, which C: has not got back)" % (r / float(1 << 30))
+                if r else ")")
 
 
 # ------------------------------------------------------------------------------------------------ the selection
@@ -228,8 +337,11 @@ def candidates(jobs, st, now, refs=None):
         if pruned(d):
             skipped["pruned"] += 1
             continue
-        if kept(d) and not fault("gc-ignores-keep"):
+        k = kept(d)
+        if k and not fault("gc-ignores-keep"):
             skipped["kept"] += 1
+            if k.get("unreadable"):
+                skipped.setdefault("unreadable_keep", []).append(j["id"])
             continue
         if j["id"] in refs:
             skipped["referenced"] += 1
@@ -239,16 +351,18 @@ def candidates(jobs, st, now, refs=None):
             skipped["young"] += 1
             continue
         f = None if fault("gc-fetch-ignored") else fetched(d)
-        fat = proto.epoch_of((f or {}).get("last_at"))
-        if fat is not None and now - fat < FETCH_RECENT_S:
+        anyat = proto.epoch_of((f or {}).get("last_at"))   # any key's fetch: one in progress is never raced
+        if anyat is not None and now - anyat < FETCH_RECENT_S and not fault("gc-no-fetch-recent"):
             skipped["young"] += 1
             continue
+        owner = j["job"].get("key")
+        fat = proto.epoch_of((own_fetch(f, owner) or {}).get("last_at"))   # the rules count the owner's fetches only
         if fat is not None:
             due = now - fat >= st["after_fetch_days"] * 86400
-            why = "fetched %d days ago" % ((now - fat) // 86400)
+            why = "fetched by %s %d days ago" % (owner, (now - fat) // 86400)
         else:
             due = now - ended >= st["unfetched_days"] * 86400
-            why = "ended %d days ago, never fetched" % ((now - ended) // 86400)
+            why = "ended %d days ago, never fetched%s" % ((now - ended) // 86400, " by %s" % owner if f else "")
         out.append({"j": j, "ended": ended, "fetched_at": fat, "fetched": f, "due": due, "why_due": why})
     return out, skipped
 
@@ -298,33 +412,65 @@ def exchange(a, b):
     return None
 
 
-def tail_bytes(path, n):
-    """The last N bytes of a file, cut to start after a newline (no half line, no half UTF-8 character), and the
-    file's size."""
+def open_regular(path):
+    """A job's file, opened without following a link and without blocking (the job, running as the same user, may
+    have left a FIFO or a link to one where its log is: the clean-up holds the queue lock and must never wait on it;
+    review 2026-11-23). -> (file object, None) or (None, why not)."""
+    if fault("gc-log-follows"):
+        try:
+            return open(path, "rb"), None
+        except OSError as e:
+            return None, e.strerror or str(e)
     try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as f:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as e:
+        return None, "a link" if e.errno == errno.ELOOP else (e.strerror or str(e))
+    try:
+        st = os.fstat(fd)
+    except OSError as e:
+        os.close(fd)
+        return None, e.strerror or str(e)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return None, "not a regular file"
+    return os.fdopen(fd, "rb"), None
+
+
+def tail_bytes(path, n):
+    """The last N bytes of a regular file, cut to start after a newline (no half line, no half UTF-8 character), its
+    size, and why nothing was read (None when it was)."""
+    f, why = open_regular(path)
+    if f is None:
+        return b"", 0, why
+    try:
+        with f:
+            size = os.fstat(f.fileno()).st_size
             f.seek(max(0, size - n))
             b = f.read(n)
-    except OSError:
-        return b"", 0
+    except OSError as e:
+        return b"", 0, e.strerror or str(e)
     if size > n:
         i = b.find(b"\n")
         b = b[i + 1:] if i >= 0 else b""
-    return b, size
+    return b, size, None
 
 
 def copy_small(src, dst):
-    with open(src, "rb") as f:
+    """A kept file into the pruned copy; False when SRC is not a regular file (not copied)."""
+    f, why = open_regular(src)
+    if f is None:
+        return False
+    with f:
         data = f.read()
+        st = os.fstat(f.fileno())
     fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.write(fd, data)
         durable._sync(fd)
     finally:
         os.close(fd)
-    st = os.stat(src)
     os.utime(dst, (st.st_atime, st.st_mtime))
+    return True
 
 
 def prune_dir():
@@ -341,20 +487,26 @@ def build_pruned(j, why, by, st, size_before, newd):
         src = os.path.join(d, n)
         if n in KEEP and os.path.isfile(src) and not os.path.islink(src):
             if n == "events.log" and os.path.getsize(src) > EVENTS_CAP:
-                b, _ = tail_bytes(src, EVENTS_CAP)
+                b, _, _ = tail_bytes(src, EVENTS_CAP)
                 durable.write_durable(os.path.join(newd, n), b"== mu: earlier events removed at the clean-up ==\n" + b)
-            else:
-                copy_small(src, os.path.join(newd, n))
+            elif not copy_small(src, os.path.join(newd, n)):
+                removed.append(n)
         elif n != "log":
             removed.append(n)
-    tail, size = tail_bytes(os.path.join(d, "log"), st["log_tail_kb"] << 10)
-    head = ("== μ: the job's folder was cleaned up (%s): its outputs and working copy were removed; this is the last "
-            "%d bytes of its log of %d bytes ==\n" % (why, len(tail), size)).encode("utf-8") if size > len(tail) else b""
+    tail, size, notlog = tail_bytes(os.path.join(d, "log"), st["log_tail_kb"] << 10)
+    if notlog and os.path.lexists(os.path.join(d, "log")):
+        head = ("== μ: the job's folder was cleaned up (%s): its outputs and working copy were removed; its log was "
+                "not kept: %s ==\n" % (why, notlog)).encode("utf-8")
+    else:
+        head = ("== μ: the job's folder was cleaned up (%s): its outputs and working copy were removed; this is the "
+                "last %d bytes of its log of %d bytes ==\n" % (why, len(tail), size)).encode("utf-8") \
+            if size > len(tail) else b""
     durable.write_durable(os.path.join(newd, "log"), head + tail)
-    f = fetched(d)
     rec = {"schema": 1, "job_id": j["id"], "at": proto.iso(), "why": why, "by": by, "bytes_before": size_before,
            "removed": removed, "log": {"size_before": size, "kept": len(tail), "tail": size > len(tail)},
-           "fetched": None if not f else {"count": f.get("count"), "last_at": f.get("last_at")}}
+           "fetched": fetch_facts(fetched(d), j["job"].get("key"))}
+    if notlog and os.path.lexists(os.path.join(d, "log")):
+        rec["log"]["not_kept"] = notlog
     rec["bytes_freed"] = max(0, size_before - tree_bytes(newd) - 4096)
     durable.write_record(os.path.join(newd, "pruned.json"), rec)
     durable.sync_dir(newd)
@@ -372,7 +524,7 @@ def prune_in_place(j, why, by, st, size_before):
         shutil.rmtree(path) if os.path.isdir(path) and not os.path.islink(path) else os.unlink(path)
         if fault("prune-crash-before-swap"):
             os._exit(9)
-    tail, size = tail_bytes(os.path.join(d, "log"), st["log_tail_kb"] << 10)
+    tail, size, _ = tail_bytes(os.path.join(d, "log"), st["log_tail_kb"] << 10)
     durable.write_durable(os.path.join(d, "log"), tail)
     rec = {"schema": 1, "job_id": j["id"], "at": proto.iso(), "why": why, "by": by, "bytes_before": size_before,
            "bytes_freed": max(0, size_before - tree_bytes(d)), "removed": [], "log": {"size_before": size,
@@ -398,8 +550,8 @@ def prune_one(c, why, by, st, sizes):
             except BlockingIOError:
                 return None, "its outputs are being fetched"
             j = N.load_job(jid)   # again, under the lock
-            if (not j["result"] and not fault("gc-ignores-unfinished")) or pruned(d) or (
-                    kept(d) and not fault("gc-ignores-keep")):
+            if not fault("gc-no-recheck") and ((not j["result"] and not fault("gc-ignores-unfinished")) or pruned(d) or
+                                               (kept(d) and not fault("gc-ignores-keep"))):
                 return None, "changed"
             size = sizes.get(jid)
             if not isinstance(size, int):
@@ -410,20 +562,39 @@ def prune_one(c, why, by, st, sizes):
             newd = os.path.join(prune_dir(), "%s.%d" % (jid, os.getpid()))
             if os.path.lexists(newd):
                 shutil.rmtree(newd, ignore_errors=True)
-            rec = build_pruned(j, why, by, st, size, newd)
+            try:
+                rec = build_pruned(j, why, by, st, size, newd)
+            except OSError as e:   # a full file system: the ballast makes room for the small pruned copy, once
+                shutil.rmtree(newd, ignore_errors=True)
+                if e.errno not in (errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)) or not drop_ballast():
+                    raise
+                N.journal("gc: the file system is full: the ballast %s was deleted to make room for the pruned copy of "
+                          "%s" % (ballast_path(), jid))
+                rec = build_pruned(j, why, by, st, size, newd)
             if fault("prune-crash-before-swap"):
                 os._exit(9)
             err = exchange(newd, d)
             if err:
                 shutil.rmtree(newd, ignore_errors=True)
+                if fault("gc-swap-fallback"):   # what the swap exists to prevent
+                    return prune_in_place(j, why, by, st, size)
                 return None, err
-            durable.sync_dir(N.p("jobs"))
-            durable.sync_dir(prune_dir())
-            if fault("prune-crash-after-swap"):
-                os._exit(9)
-            old = newd + ".old"
-            os.rename(newd, old)   # the old folder now holds the whole job: it goes
-            N.event(d, "pruned by %s: %s; %s freed" % (by, why, proto.human_size(rec["bytes_freed"])))
+            # from here the job's name holds the pruned copy: the job is pruned whatever fails below (what is left in
+            # prune/ is deleted by the next clean-up); review 2026-11-23: it was reported as skipped
+            old = newd
+            try:
+                durable.sync_dir(N.p("jobs"))
+                durable.sync_dir(prune_dir())
+                if fault("prune-crash-after-swap"):
+                    os._exit(9)
+                os.rename(newd, newd + ".old")   # the old folder now holds the whole job: it goes
+                old = newd + ".old"
+                N.event(d, "pruned by %s: %s; %s freed" % (by, why, proto.human_size(rec["bytes_freed"])))
+            except OSError as e:
+                if fault("gc-post-swap-error-skips"):
+                    raise
+                N.journal("gc: id=%s is pruned, but after the swap: %s: %s (the next clean-up deletes what is left in "
+                          "%s)" % (jid, type(e).__name__, e, prune_dir()))
         finally:
             os.close(fd)
     N.journal("gc: pruned id=%s by=%s (%s): %d bytes freed; kept job.json, state, result, the log's last %d bytes" % (
@@ -434,7 +605,7 @@ def prune_one(c, why, by, st, sizes):
 def remove_later(paths):
     """Delete the old folders without waiting: a detached rm at the lowest CPU and I/O priority."""
     paths = [x for x in paths if x and os.path.isdir(x)]
-    if not paths:
+    if not paths or fault("gc-no-remove"):
         return
     cmd = ["rm", "-rf", "--"] + paths
     if shutil.which("ionice"):
@@ -449,10 +620,55 @@ def remove_later(paths):
             shutil.rmtree(x, ignore_errors=True)
 
 
+def ballast_path():
+    return _N().p("gc-ballast")
+
+
+def drop_ballast():
+    """Delete the ballast (a full file system). -> True when there was one."""
+    if fault("gc-no-ballast"):
+        return False
+    try:
+        os.unlink(ballast_path())
+        return True
+    except OSError:
+        return False
+
+
+def ensure_ballast():
+    """/srv/mu/gc-ballast: BALLAST_BYTES of zeros, written (allocated, not sparse) while the file system has
+    BALLAST_MIN_FREE free, so that a later full file system still leaves room for a pruned copy (review 2026-11-23:
+    a full disk meant no prune at all). Outside prune/, which the clean-up empties."""
+    path = ballast_path()
+    if fault("gc-no-ballast") or os.path.exists(path):
+        return
+    try:
+        s = os.statvfs(os.path.dirname(path))
+        if s.f_bavail * s.f_frsize < BALLAST_MIN_FREE:
+            return
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            chunk = b"\0" * (1 << 20)
+            for _ in range(BALLAST_BYTES // len(chunk)):
+                os.write(fd, chunk)
+            durable._sync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, path)
+    except OSError:
+        try:
+            os.unlink(path + ".tmp")
+        except OSError:
+            pass
+
+
 def leftovers():
     """What a crash left in /srv/mu/prune/: an unswapped pruned copy (`<id>.<pid>`, made before the swap: garbage)
     or an old folder (`.old`, or `<id>.<pid>` after a swap: the job's name already holds the pruned copy). Either
     way nothing under that folder is the job's record any more; deleted (only by the holder of gc.lock)."""
+    if fault("gc-no-leftovers"):
+        return []
     try:
         return [os.path.join(prune_dir(), n) for n in os.listdir(prune_dir())]
     except OSError:
@@ -492,6 +708,8 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
     node = N.node_info() if node is None else node
     st = settings(node)
     now = time.time() if now is None else now
+    if fault("gc-dry-prunes"):
+        dry = False
     if fault("gc-clock-ahead"):   # a test injector (e2e G01): the clean-up judges ages 40 days from now
         now += 40 * 86400
     t0 = time.time()
@@ -505,12 +723,29 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
             remove_later(leftovers())
         jobs = N.scan_jobs()
         cands, skipped = candidates(jobs, st, now)
-        sizes = dict(cache.get("sizes") or {})
         ids = {j["id"] for j in jobs}
-        for c in cands:   # a finished job's size does not change: walked once, then cached
-            if not isinstance(sizes.get(c["j"]["id"]), int):
-                sizes[c["j"]["id"]] = tree_bytes(c["j"]["dir"])
-        sizes = {k: v for k, v in sizes.items() if k in ids}
+        sizes = {} if fault("gc-sizes-not-cached") else {k: v for k, v in (cache.get("sizes") or {}).items()
+                                                         if k in ids and isinstance(v, int)}
+        pset = {j["id"] for j in jobs if j["result"] and pruned(j["dir"])}
+        # a finished job's size does not change: walked once, then cached in gc.json. The candidates first, then the
+        # other finished jobs (kept, young, referenced: for mu compute status's figure; not those that ended under
+        # FETCH_RECENT_S ago, still draining). The runner's walk stops after WALK_BUDGET_S (and at least one folder)
+        # and goes on a minute later (review 2026-11-23: a first pass walked every folder before the next job start)
+        cids = {c["j"]["id"] for c in cands}
+        order = [c["j"] for c in cands] + ([] if fault("gc-measure-candidates-only") else [
+            j for j in jobs if j["result"] and j["id"] not in pset and j["id"] not in cids and
+            now - ended_epoch(j) >= FETCH_RECENT_S])
+        walk_end = None if budget_s is None or fault("gc-walk-unbudgeted") else t0 + min(budget_s, WALK_BUDGET_S)
+        walked, unwalked = 0, []
+        for j in order:
+            if isinstance(sizes.get(j["id"]), int):
+                continue
+            if walk_end is not None and walked and time.time() >= walk_end:
+                unwalked.append(j["id"])
+                continue
+            sizes[j["id"]] = tree_bytes(j["dir"])
+            walked += 1
+        walk_left = any(c["j"]["id"] in unwalked for c in cands)
         eff, sp = space(node, cache)
         line = sp["min_free_gb"] + st["pressure_extra_gb"] if isinstance(sp.get("min_free_gb"), (int, float)) else None
         plan = [(c, "%s (after %s days)" % (c["why_due"], st["after_fetch_days"] if c["fetched_at"] is not None else
@@ -523,14 +758,17 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
             for c in pressure_order([c for c in cands if c["j"]["id"] not in chosen], st, now):
                 if eff + gain / float(1 << 30) >= line and not fault("gc-pressure-all"):
                     break
-                plan.append((c, "disk pressure: %.0f GB free where the jobs live, under min_free_gb %s + %s GB (%s)"
-                             % (eff, sp["min_free_gb"], st["pressure_extra_gb"], c["why_due"])))
+                plan.append((c, "disk pressure: %s, under min_free_gb %s + %s GB (%s)"
+                             % (space_words(eff, sp), sp["min_free_gb"], st["pressure_extra_gb"], c["why_due"])))
                 gain += sizes.get(c["j"]["id"], 0)
         done, garbage, skip = [], [], []
-        if not st["enabled"] and by == "runner":
+        if not st["enabled"] and by == "runner" and not fault("gc-enabled-ignored"):
             plan = []
-        # the start lock only for the prunes themselves (the sizes above were walked without it: a first clean-up of
-        # many folders never holds back a job start); each prune checks its job again under the queue lock
+        if walk_left and not dry:   # the sizes of this pass's candidates are not all known yet: no prune before
+            plan = []
+        # the start lock only for the prunes themselves (the sizes above were walked without it, and the runner's walk
+        # is budgeted: a job start waits at most WALK_BUDGET_S and one folder); each prune checks its job again under
+        # the queue lock
         if plan and not dry and not fault("gc-no-start-lock"):
             end = time.time() + (0 if by == "runner" else 30)
             while not N.take_start_lock():
@@ -569,19 +807,28 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
         remove_later(garbage)
         freed = sum(x["bytes"] for x in done)
         cands2 = [c for c in cands if c["j"]["id"] not in {x["job_id"] for x in done}] if not dry else cands
-        finished = [j for j in jobs if j["result"]]
+        gone = set() if dry else {x["job_id"] for x in done}
+        finished = [j for j in jobs if j["result"] and j["id"] not in pset and j["id"] not in gone]
         out = {"ok": True, "by": by, "dry_run": dry, "at": proto.iso(t0), "pruned": done, "skipped": skip,
                "freed_bytes": freed, "pressure": pressure, "line_gb": line, "space": sp, "free_gb_effective":
                None if eff is None else round(eff + (freed / float(1 << 30) if not dry else 0), 1),
                "settings": st, "not_candidates": skipped,
-               "finished": {"jobs": len(finished), "bytes": sum(sizes.get(j["id"], 0) for j in finished
-                                                                 if not pruned(j["dir"]))},
+               "finished": {"jobs": len(finished), "bytes": sum(sizes.get(j["id"], 0) for j in finished),
+                            "measured": len([j for j in finished if isinstance(sizes.get(j["id"]), int)]),
+                            "pruned": len(pset) + (len(done) if not dry else 0)},
                "due": {"jobs": len([c for c in cands2 if c["due"]]),
                        "bytes": sum(sizes.get(c["j"]["id"], 0) for c in cands2 if c["due"])},
                "prunable": {"jobs": len(cands2), "bytes": sum(sizes.get(c["j"]["id"], 0) for c in cands2)},
                "took_s": round(time.time() - t0, 2)}
         if not st["enabled"]:
             out["note"] = "the runner's clean-up is off (node.json gc.enabled false)"
+        out["warnings"] = ["the keep.json of %s does not read (damaged or not written by mu keep): the job is kept "
+                           "anyway; mu keep %s --off, then mu keep %s, writes a good one" % (x, x, x)
+                           for x in skipped.pop("unreadable_keep", [])]
+        if unwalked:
+            out["warnings"].append("%d finished job folder(s) not measured yet (the runner measures them a few at a "
+                                   "time)%s" % (len(unwalked), "; no prune in this pass until the candidates are "
+                                                "measured" if walk_left and not dry else ""))
         cache.update(sizes=sizes, as_of=proto.iso(t0), finished=out["finished"], due=out["due"],
                      prunable=out["prunable"], space=sp, line_gb=line)
         if not dry:
@@ -591,7 +838,11 @@ def run(by="runner", dry=False, node=None, now=None, budget_s=None):
         if done and not dry:
             N.journal("gc: %d job folder(s) pruned by %s, %d bytes freed%s" % (len(done), by, freed, " (disk pressure)"
                                                                                if pressure else ""))
-        out["more"] = bool(skip and any("next pass" in x["why"] for x in skip))
+        if not dry:
+            ensure_ballast()
+        out["more"] = bool(skip and any("next pass" in x["why"] for x in skip)) or bool(unwalked)
+        if unwalked:
+            out["walk"] = {"walked": walked, "left": len(unwalked), "prunes_held": walk_left and not dry}
         return out
     finally:
         if started_lock:

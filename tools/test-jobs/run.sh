@@ -255,7 +255,7 @@ echo "  info  5 starts of a job command: $((t1 - t0)) s"
 # ---------------------------------------------------------------- python units
 for p in $PYS; do
   section "unit checks, $p"
-  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report sched sched-sim sched-runner gc-node gc-client sending tz; do
+  for s in durable ids globs proxy classify sshconfig controlpath unpack untrusted-node runner snapshot-alone snapshot-content snapshot-report sched sched-sim sched-runner gc-node gc-review gc-client sending tz; do
     py_section "$p" "$s"
   done
   py_section "$p" atomic "$([ "${QUICK:-0}" = 1 ] && echo 30 || echo 120)"
@@ -355,11 +355,21 @@ done
 # release 2026.11.12 (job-layer.md §24-§26): the clean-up, stuck sending records, local times; each fault on its check
 for f in gc-fetch-ignored gc-ignores-unfinished gc-ignores-keep gc-ignores-refs fetch-pruned-served gc-pressure-order \
          gc-pressure-all gc-no-min-age prune-in-place fetch-not-recorded gc-ignores-fetch-lock keep-any-key gc-any-key \
-         gc-hourly-ignored gc-no-start-lock; do
+         gc-hourly-ignored gc-no-start-lock fetch-no-lock gc-any-fetch gc-no-fetch-recent gc-dry-prunes \
+         gc-sizes-not-cached gc-no-remove gc-no-leftovers gc-settings-unchecked fetch-result-counts status-no-gc-marks; do
   must_fail_tagged "release 2026.11.12: the node's clean-up of finished job folders" "$f" "$PY1" gc-node
 done
-must_fail_tagged "release 2026.11.12: mu fetch of a cleaned-up job" fetch-ignores-pruned "$PY1" gc-client
-for f in no-unsent forget-unfinished; do
+# the review of 2026-11-23 (job-layer.md §24.7): its fixes and the guards it found untested
+for f in gc-reclaim-double gc-log-follows keep-needs-seal gc-walk-unbudgeted gc-no-ballast gc-post-swap-error-skips \
+         gc-enabled-ignored gc-no-tick gc-no-recheck gc-swap-fallback gc-measure-candidates-only gc-ignores-keep; do
+  must_fail_tagged "release 2026.11.12, review: the clean-up's fixes" "$f" "$PY1" gc-review
+done
+for f in fetch-ignores-pruned fetch-tar-error-first log-note-says-tail list-ignores-pruned fetched-words-no-keys \
+         gc-line-no-measured utc-words pruned-not-mapped keep-no-feature-check; do
+  must_fail_tagged "release 2026.11.12: mu fetch, log, status, keep of a cleaned-up job" "$f" "$PY1" gc-client
+done
+for f in no-unsent forget-unfinished unsent-any-error unsent-ignores-lock forget-unfetched forget-unreachable \
+         forget-during-submit utc-words; do
   must_fail_tagged "release 2026.11.12: stuck sending records, mu forget" "$f" "$PY1" sending
 done
 for f in node-time-words utc-words; do

@@ -59,6 +59,12 @@ PC_MU = "wsl -d mu-compute -u mu --cd /home/mu --"   # what the owner types at t
 # first visit: "mu: command not found"). No ~ either: a newer PowerShell may expand it to the Windows home
 PC_MUCMD = PC_MU + " /home/mu/.local/bin/mu"
 PC_ROOT = "wsl -d mu-compute -u root --"
+# disk-low (review 2026-11-23): the node's clean-up frees finished job folders, but when the limit is C: and WSL's
+# virtual disk is not sparse, space freed inside it does not reach C: (job-layer.md §24.5)
+DISK_LOW_NEXT = ("mu compute gc <node> --dry-run lists the finished job folders the node's clean-up would free (the "
+                 "owner runs mu compute gc <node>); when the drive short of space is C: (Windows) and WSL's virtual "
+                 "disk is not sparse, freeing them does not raise C:'s free space: free space on C:, or compact the "
+                 "virtual disk (docs/design/job-layer.md §24.5)")
 LARGE_UNTRACKED = 100 << 20   # the snapshot's uncommitted and untracked files above which submit asks --allow-large
 KEEP_SNAP_REFS = 10           # refs/mu/snap/* of accepted jobs kept in this clone (all unaccepted ones are kept)
 
@@ -708,8 +714,7 @@ NODE_REFUSALS = {
     "not-enabled": ("the job runner on {n} is not running", "tell the user; on the PC: " + PC_MUCMD + " node enable"),
     "limits-unavailable": ("{n} cannot enforce a job's memory limit (its self-test failed), so it takes no jobs",
                            "tell the user; on the PC: " + PC_MUCMD + " node selftest (docs/design/job-layer.md §19)"),
-    "disk-low": ("{n} has too little free disk space for a job", "tell the user; on the PC, delete the folders of old "
-                 "finished jobs: " + PC_MU + " rm -rf /srv/mu/jobs/<job-id> (largest: see `largest`)"),
+    "disk-low": ("{n} has too little free disk space for a job", "tell the user: " + DISK_LOW_NEXT),
     "toolchain-missing": ("{n} lacks the μ version this project pins", "tell the user: an install at the PC takes over "
                           "an hour (" + PC_MUCMD + " install <version>); or, with the user's agreement, mu pin a version "
                           "the node has (`installed`)"),
@@ -771,7 +776,7 @@ def node_error(rc, text, name, job_id=None):
         code = proto.EXIT_USAGE
     if err in ("protocol-mismatch", "key-revoked"):
         code = proto.EXIT_REFUSED
-    if err == "pruned":
+    if err == "pruned" and not fault("pruned-not-mapped"):
         code = proto.EXIT_PRUNED
     said = proto.clean_text(" ".join(str(ans.get(k)) for k in ("message", "hint") if ans.get(k)), 600)
     if fault("node-hint"):   # the old way: the node's hint is the next step, its fields pass through
@@ -1362,8 +1367,7 @@ def check_node(ans, node_name, pin, job_id=None):
     if isinstance(disk.get("free_gb"), (int, float)) and disk["free_gb"] < disk.get("min_free_gb", 0):
         raise MuError(proto.EXIT_NODE_CANNOT, "disk-low", "%s has %s GB free (%s); jobs need %s GB" % (
             node_name, disk["free_gb"], disk.get("where"), disk.get("min_free_gb")),
-            "tell the user; on the PC, delete the folders of old finished jobs: %s rm -rf /srv/mu/jobs/<job-id> "
-            "(mu status lists this project's jobs)" % PC_MU, **extra)
+            "tell the user: " + DISK_LOW_NEXT, **extra)
 
 
 def uncommitted_size(root):
@@ -1756,7 +1760,7 @@ def unsent_view(prj, rec):
     """A record that never reached its node, as mu status shows it: state "unsent" and the one next step."""
     jid = rec["job_id"]
     snap = snapshot_exists(prj, jid)
-    since = rec.get("unsent_at") or (rec.get("spec") or {}).get("submitted", {}).get("at")
+    since = (rec.get("spec") or {}).get("submitted", {}).get("at")   # (it printed unsent_at as "submitted": fixed)
     nxt = ("mu submit --resume %s sends it again (same id, same snapshot); mu forget %s drops the record" % (jid, jid)
            if snap else "mu forget %s drops the record (its snapshot is gone: it cannot be sent again)" % jid)
     return {"job_id": jid, "node": rec.get("node"), "state": "unsent", "name": (rec.get("spec") or {}).get("name"),
@@ -1770,12 +1774,13 @@ def reconcile_sending(prj, rec, conn):
     the node asked: no such job -> state "unsent" (written durably), the node knows it -> the node's state (the
     answer of the submit was lost). -> ("unsent" | "accepted" | "sending", the node's status or None). Never
     changes anything on the node."""
-    if record_age(prj, rec) < UNSENT_AFTER_S or submit_alive(prj, rec) or fault("no-unsent"):
+    if record_age(prj, rec) < UNSENT_AFTER_S or (submit_alive(prj, rec) and not fault("unsent-ignores-lock")) or \
+            fault("no-unsent"):
         return "sending", None
     try:
         s = conn.call("status", id=rec["job_id"])
     except MuError as e:
-        if e.error != "no-such-job":
+        if e.error != "no-such-job" and not fault("unsent-any-error"):   # busy, unreachable, ...: ask again later
             return "sending", None
         rec = dict(rec, state="unsent", unsent_at=proto.iso(), unsent_why="%s has no such job; the upload never "
                    "finished" % rec.get("node"))
@@ -1843,7 +1848,11 @@ def cmd_status(a):
                 if j.get("state") == "unsent":
                     print("%-24s %-10s not sent · %s" % (j["job_id"], j.get("node"), j["next"]))
                 else:
-                    print("%-24s %-10s %s" % (j["job_id"], j.get("node"), describe(j)[len(j["job_id"]) + 1:]))
+                    pr = j.get("pruned") if isinstance(j.get("pruned"), dict) and not fault("list-ignores-pruned") \
+                        else None   # review 2026-11-23: only mu status ID said so
+                    print("%-24s %-10s %s%s" % (j["job_id"], j.get("node"), describe(j)[len(j["job_id"]) + 1:],
+                                                " · cleaned up %s: outputs removed on the node" % proto.local_when(
+                                                    pr.get("at")) if pr else ""))
             if reconciled:   # said once, when the records change
                 print("note: %d job(s) were never accepted (their upload did not finish and the node has no such job): "
                       "now shown as not sent. Nothing was changed on the node." % len(reconciled))
@@ -1915,9 +1924,26 @@ def not_sent(prj, job_id, conn):
 
 
 def fetched_words(pr):
+    """Whether, when and by whom the outputs had been fetched (the node counts only the job's own workstation's
+    fetches for its rules; review 2026-11-23)."""
     f = pr.get("fetched") if isinstance(pr.get("fetched"), dict) else None
-    return ("they had been fetched %s time(s), last on %s" % (f.get("count"), proto.local_when(f.get("last_at")))
-            if f and f.get("count") else "they had never been fetched")
+    if not f or not f.get("count"):
+        return "they had never been fetched"
+    if fault("fetched-words-no-keys"):   # the words of the first build: no key named
+        return "they had been fetched %s time(s), last on %s" % (f.get("count"), proto.local_when(f.get("last_at")))
+    keys = [proto.one_line(k) for k in f.get("keys") or [] if isinstance(k, str)]
+    own = f.get("by_owner") if isinstance(f.get("by_owner"), dict) else None
+    owner = proto.one_line(f.get("owner")) if isinstance(f.get("owner"), str) else None
+    others = [k for k in keys if k != owner]
+    if own and own.get("count"):
+        return "they had been fetched by %s (the job's workstation) %s time(s), last on %s%s" % (
+            owner, own.get("count"), proto.local_when(own.get("last_at")),
+            "; also by %s" % ", ".join(others) if others else "")
+    if owner and others:
+        return "the job's workstation %s never fetched them; %s did (last on %s)" % (
+            owner, ", ".join(others), proto.local_when(f.get("last_at")))
+    return "they had been fetched %s time(s), last on %s%s" % (f.get("count"), proto.local_when(f.get("last_at")),
+                                                            " by %s" % ", ".join(keys) if keys else "")
 
 
 def pruned_words(job_id, pr, node):
@@ -1978,9 +2004,15 @@ def cmd_log(a):
     pr = s.get("pruned") if isinstance(s.get("pruned"), dict) else None
     if pr and not a.json:   # the node kept only the log's last part (§24): say so, on stderr (stdout is the log)
         lg = pr.get("log") if isinstance(pr.get("log"), dict) else {}
-        sys.stderr.write("note: job %s was cleaned up on %s on %s: this is the last %s of its log (of %s)\n" % (
-            a.job_id, conf["name"], proto.local_when(pr.get("at")), proto.human_size(lg.get("kept") or 0),
-            proto.human_size(lg.get("size_before") or 0)))
+        if lg.get("tail") or fault("log-note-says-tail"):
+            what = "this is the last %s of its log (of %s)" % (proto.human_size(lg.get("kept") or 0),
+                                                               proto.human_size(lg.get("size_before") or 0))
+        elif lg.get("not_kept"):
+            what = "its log was not kept (%s)" % proto.one_line(lg.get("not_kept"))
+        else:   # review 2026-11-23: "the last 169 B of its log (of 169 B)"
+            what = "its whole log was kept (%s)" % proto.human_size(lg.get("kept") or 0)
+        sys.stderr.write("note: job %s was cleaned up on %s on %s: %s\n" % (
+            a.job_id, conf["name"], proto.local_when(pr.get("at")), what))
     size = s.get("log_size") or 0
     offset = a.offset or 0
     if a.tail is not None:
@@ -2242,9 +2274,19 @@ def cmd_fetch(a):
                 pipe.read(1 << 20)
     t = threading.Thread(target=consume, daemon=True)
     t.start()
-    rc, err, st, muxed = conn.stream("fetch id=%s" % a.job_id, pipe.feed)
+    head = []   # the answer's first bytes: a refusal is a JSON line where the tar was expected
+
+    def feed(b):
+        if sum(len(x) for x in head) < 65536:
+            head.append(b[:65536])
+        pipe.feed(b)
+    rc, err, st, muxed = conn.stream("fetch id=%s" % a.job_id, feed)
     pipe.close()
     t.join()
+    # the node's refusal first (review 2026-11-23: a job pruned between the status and this call was reported as a
+    # damaged copy, exit 8, instead of exit 11 pruned)
+    if rc != 0 and rc in proto.NODE_TO_CLIENT and not fault("fetch-tar-error-first"):
+        raise node_error(rc, b"".join(head).decode("utf-8", "replace") + "\n" + err, conn.name, a.job_id)
     if "error" in box:
         e = box["error"]
         if isinstance(e, (FetchError, tarfile.TarError)):
@@ -2311,16 +2353,17 @@ def cmd_forget(a):
     if not rec:
         raise MuError(proto.EXIT_NO_SUCH, "no-local-record", "this clone has no record of job %s (.mu/jobs)" % a.job_id,
                       "mu status (the jobs this clone knows)", job_id=a.job_id)
-    if rec.get("state") == "sending" and submit_alive(prj, rec):
+    if rec.get("state") == "sending" and submit_alive(prj, rec) and not fault("forget-during-submit"):
         raise MuError(proto.EXIT_USAGE, "submit-running", "a mu submit is sending job %s right now" % a.job_id,
                       "wait for it, then mu status %s" % a.job_id, job_id=a.job_id)
-    node_name, node_state, asked = rec.get("node"), None, False
+    node_name, node_state, asked, ans = rec.get("node"), None, False, {}
     if node_name in paired_nodes():
         try:
-            node_state = Conn(load_node(node_name)).call("status", id=a.job_id).get("state")
+            ans = Conn(load_node(node_name)).call("status", id=a.job_id)
+            node_state = ans.get("state")
             asked = True
         except MuError as e:
-            if e.error != "no-such-job":
+            if e.error != "no-such-job" and not fault("forget-unreachable"):
                 raise MuError(e.code, e.error, "%s; nothing was forgotten (the node must say whether it has job %s)"
                               % (e.message, a.job_id), e.hint, job_id=a.job_id, node=node_name)
             asked = True
@@ -2328,6 +2371,16 @@ def cmd_forget(a):
         raise MuError(proto.EXIT_USAGE, "node-has-job", "%s still has job %s, %s: forgetting it here would lose track of "
                       "it" % (node_name, a.job_id, node_state), "mu cancel %s first, or wait until it has ended" % a.job_id,
                       job_id=a.job_id, state=node_state, node=node_name)
+    run_here = os.path.exists(os.path.join(prj.root, "runs", a.job_id + ".json"))
+    if node_state in proto.FINISHED and not isinstance(ans.get("pruned"), dict) and not run_here and \
+            not getattr(a, "force", False) and not fault("forget-unfetched"):
+        # review 2026-11-23: the record is what mu fetch takes the declared outputs from; dropping it silently left a
+        # finished job's outputs on the node with no plain way to fetch them
+        raise MuError(proto.EXIT_USAGE, "not-fetched", "%s has job %s, %s, and this clone never fetched its outputs "
+                      "(no runs/%s.json): mu fetch needs this record (it names the outputs the job declared)" % (
+                          node_name, a.job_id, node_state, a.job_id),
+                      "mu fetch %s first; or mu forget %s --force (mu fetch then needs --output 'GLOB')" % (
+                          a.job_id, a.job_id), job_id=a.job_id, state=node_state, node=node_name)
     _unlink(prj.job_record_path(a.job_id))
     _unlink(submit_lock_path(prj, a.job_id))
     snap = git(prj.root, "update-ref", "-d", "refs/mu/snap/%s" % a.job_id, check=False).returncode == 0
@@ -2336,8 +2389,11 @@ def cmd_forget(a):
     out = {"ok": True, "exit": 0, "job_id": a.job_id, "forgotten": True, "was": rec.get("state"), "node": node_name,
            "node_state": node_state, "snapshot_ref_removed": snap, "note": "this clone's record of %s is removed (%s); "
            "nothing was changed on the node" % (a.job_id, why), "next": "mu status"}
-    if node_state in proto.FINISHED and os.path.exists(os.path.join(prj.root, "runs", a.job_id + ".json")):
+    if node_state in proto.FINISHED and run_here:
         out["note"] += "; its run record runs/%s.json stays" % a.job_id
+    elif node_state in proto.FINISHED and not isinstance(ans.get("pruned"), dict):
+        out["note"] += "; its outputs were never fetched here: mu fetch %s --output 'GLOB' can still fetch them" % \
+            a.job_id
     if a.json:
         proto.emit_json(out)
     else:
@@ -2532,6 +2588,8 @@ def main(cmd, args):
         p = parser("mu forget", "drop this clone's record of a job (.mu/jobs) and its snapshot ref; local only: refused "
                    "while the node still has the job unfinished, and nothing is changed on the node")
         p.add_argument("job_id")
+        p.add_argument("--force", action="store_true", help="also when the node has the job finished and this clone "
+                       "never fetched its outputs")
         return cmd_forget(p.parse_args(args))
     if cmd == "relay":
         from mu import invite

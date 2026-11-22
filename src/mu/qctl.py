@@ -423,9 +423,15 @@ def gc_line(g):
     lr = g.get("last_run") or {}
     if not g.get("as_of"):
         return "job folders: not measured yet (the node's first clean-up pass has not run)"
-    t = "job folders: %s in %s finished job(s) · the clean-up would free %s now (%s due) and up to %s under disk " \
-        "pressure (%s) · as of %s" % (gb(fin.get("bytes")), fin.get("jobs"), gb(due.get("bytes")), due.get("jobs"),
-                                     gb(pa.get("bytes")), pa.get("jobs"), hhmm(g.get("as_of")))
+    from mu.durable import fault
+    meas = fin.get("measured")   # review 2026-11-23: unmeasured folders counted as 0 bytes, unsaid
+    part = "" if not isinstance(meas, int) or meas >= (fin.get("jobs") or 0) or fault("gc-line-no-measured") else \
+        " (%s of them measured so far)" % meas
+    t = "job folders: %s in %s finished job(s)%s · the clean-up would free %s now (%s due) and up to %s under disk " \
+        "pressure (%s) · as of %s" % (gb(fin.get("bytes")), fin.get("jobs"), part, gb(due.get("bytes")),
+                                     due.get("jobs"), gb(pa.get("bytes")), pa.get("jobs"), hhmm(g.get("as_of")))
+    if fin.get("pruned"):
+        t += " · %s cleaned up before" % fin.get("pruned")
     if lr:
         t += " · last clean-up %s: %s pruned, %s freed" % (hhmm(lr.get("at")), lr.get("pruned"), gb(lr.get("freed_bytes")))
     return t + ("" if g.get("enabled", True) else " · the hourly clean-up is OFF (gc.enabled)")
@@ -445,10 +451,13 @@ def cmd_compute_gc(a):
         proto.emit_json(ans)
         return 0
     sp = ans.get("space") or {}
-    print("%s: %s%s · %s GB free on %s (counting space freed inside the virtual disk: %s GB; the early clean-up starts "
-          "below %s GB)" % (conf["name"], "would prune" if a.dry_run else "pruned", " %d job folder(s), %s" % (
-              len(ans.get("pruned") or []), gb(sum(x.get("bytes") or 0 for x in ans.get("pruned") or []))),
-          sp.get("free_gb"), sp.get("where"), ans.get("free_gb_effective"), ans.get("line_gb")))
+    print("%s: %s%s · %s GB free on %s; %s GB for new jobs, counting space freed inside the virtual disk that %s has "
+          "not got back (the early clean-up starts below %s GB)" % (
+              conf["name"], "would prune" if a.dry_run else "pruned", " %d job folder(s), %s" % (
+                  len(ans.get("pruned") or []), gb(sum(x.get("bytes") or 0 for x in ans.get("pruned") or []))),
+              sp.get("free_gb"), sp.get("where"), ans.get("free_gb_effective"), sp.get("where"), ans.get("line_gb")))
+    for w in ans.get("warnings") or []:
+        print("  warning: %s" % proto.one_line(w))
     for x in ans.get("pruned") or []:
         print("  %s  %s  %s" % (x.get("job_id"), gb(x.get("bytes")), proto.one_line(x.get("why"))))
     for x in ans.get("skipped") or []:
@@ -466,7 +475,8 @@ def cmd_keep(a):
     from mu import jobs
     conf, _ = jobs.job_node(a.job_id, a.on)
     conn = jobs.Conn(conf)
-    if not has(jobs.hello(conn), "gc"):
+    from mu.durable import fault
+    if not has(jobs.hello(conn), "gc") and not fault("keep-no-feature-check"):
         raise too_old(conf, "clean-up of job folders (nothing to keep a job from)")
     args = {"id": a.job_id}
     frm = project_id()
@@ -484,7 +494,8 @@ def cmd_keep(a):
     if ans.get("pruned"):
         print("%s: nothing to keep: already cleaned up on %s" % (a.job_id, proto.local_when(ans["pruned"].get("at"))))
     elif a.off:
-        print("%s: %s: the node's clean-up may remove its outputs again (7 days after a fetch, 30 without)" % (
+        print("%s: %s: the node's clean-up may remove its outputs again (7 days after its workstation fetched them, "
+              "30 without)" % (
             a.job_id, "keep ended" if ans.get("changed") else "was not kept"))
     else:
         print("%s: %s: exempt from the node's clean-up until mu keep %s --off" % (

@@ -8,7 +8,8 @@ checks are what decides. Built from the security review's exploit (docs/design/j
   FAKE_REFUSE   a JSON object: printed as the answer to any verb, with exit FAKE_RC (default 69)
   MU_SRC        the src folder (for the sealed record)
   FAKE_ANSWERS  a JSON file {"VERB:ID" or "VERB": answer}: printed for that request (an answer's "_rc" is the exit
-                code, default 0); tried before the rest (tools/test-jobs/unit_gc.py, release 2026.11.12)
+                code, default 0); tried before the rest (tools/test-jobs/unit_gc.py, release 2026.11.12);
+                "fetch-outputs:ID" answers only the outputs' fetch (fetch without what=result)
   FAKE_LOG      a file each request is appended to (one line: the request), so a test sees what was asked
 """
 import hashlib
@@ -34,7 +35,10 @@ if os.environ.get("FAKE_LOG"):
 if os.environ.get("FAKE_ANSWERS"):
     with open(os.environ["FAKE_ANSWERS"]) as f:
         table = json.load(f)
-    for k in ("%s:%s" % (verb, args.get("id", "")), verb):
+    keys = ("%s:%s" % (verb, args.get("id", "")), verb)
+    if verb == "fetch" and args.get("what") != "result":   # the outputs' fetch alone (unit_gc.py: pruned in between)
+        keys = ("fetch-outputs:%s" % args.get("id", ""),) + keys
+    for k in keys:
         if k in table:
             a = dict(table[k])
             rc = a.pop("_rc", 0)

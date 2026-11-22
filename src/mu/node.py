@@ -586,6 +586,24 @@ def safe_plan(now, cap, running, items, disk):
         return sched.plan(now, cap, [{"id": r["id"], "grant": None, "end": None} for r in running], [], disk)
 
 
+def runner_pass(first, stop, started):
+    """One pass of the runner's loop: step() (starts, ends, the scheduler), the busy flag, then the clean-up of
+    finished job folders, between two passes (no job is starting), at most once an hour (nodegc.tick). -> busy.
+    Fault gc-no-tick: the clean-up is never called (tools/test-jobs/unit_gc.py, review 2026-11-23)."""
+    try:
+        busy = step(first, stop, started)
+    except Exception:  # noqa
+        journal("runner error: %s" % traceback.format_exc().replace("\n", " | ")[-1500:])
+        busy = True
+    set_busy(busy)
+    if not fault("gc-no-tick"):
+        try:
+            nodegc.tick(stop)
+        except Exception:  # noqa
+            journal_once("gc", "runner: clean-up: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
+    return busy
+
+
 def disk_block(node):
     """None while jobs may start; else what waiting_for says (§3.6)."""
     if fault("no-start-disk-check"):
@@ -1140,7 +1158,10 @@ def verb_submit(key, args):
                             message="the job runner (mu-node.service) is not running")
         disk = disk_info(node)
         if disk["free_gb"] is not None and disk["free_gb"] < disk["min_free_gb"]:
-            raise NodeError(proto.NODE_UNAVAILABLE, "disk-low", "free space on the node (old job folders in %s)" % p("jobs"),
+            raise NodeError(proto.NODE_UNAVAILABLE, "disk-low", "mu compute gc NODE --dry-run lists the finished job "
+                            "folders a clean-up would free; when %s is a Windows drive and WSL's virtual disk is not "
+                            "sparse, that does not raise its free space: free space there, or compact the virtual disk "
+                            "(job-layer.md §24.5)" % disk["where"],
                             message="%s GB free on %s; jobs need %s GB" % (disk["free_gb"], disk["where"], disk["min_free_gb"]),
                             largest=largest_jobs())
         if not limits_ok(node) and not fault("skip-limits-check"):
@@ -1271,10 +1292,10 @@ def run_in_session(j):
 def verb_status(key, args):
     j = load_job(args.get("id", ""))
     out = status_of(j, None if j["result"] else view())
-    if j["result"]:   # the clean-up's marks (release 2026.11.12): pruned, kept, fetched
-        out.update(nodegc.public(j["dir"]))
+    if j["result"] and not fault("status-no-gc-marks"):   # the clean-up's marks (release 2026.11.12)
+        out.update(nodegc.public(j["dir"], owner=j["job"].get("key")))
     elif nodegc.kept(j["dir"]):
-        out["kept"] = nodegc.public(j["dir"])["kept"]
+        out["kept"] = nodegc.public(j["dir"], owner=j["job"].get("key"))["kept"]
     return out
 
 
@@ -1292,7 +1313,7 @@ def verb_list(key, args):
     for s in finished:   # a finished job's pause history (up to 20 entries) is status's alone (contract §3.1)
         if not fault("list-keeps-pauses"):
             s.pop("pauses", None)
-        s.update(nodegc.public(job_dir(s["job_id"])))   # the clean-up's marks, for the jobs sent only
+        s.update(nodegc.public(job_dir(s["job_id"]), owner=s.get("key")))   # the clean-up's marks, for the jobs sent only
     return {"ok": True, "jobs": sorted(unfinished + finished, key=lambda s: s["job_id"]),
             "rev": nodestats.read_rev() if rev is None else rev}
 
@@ -1346,9 +1367,12 @@ def verb_fetch(key, args):
                         message="job %s has no result yet" % j["id"])
     # a shared lock on job.json while the outputs are read: the clean-up (nodegc.prune_one) needs it exclusively, so
     # it never swaps a folder that is being sent; a folder swapped while this waited is read again (its new inode)
+    # (fault fetch-no-lock: tools/test-jobs/unit_gc.py, review 2026-11-23). The inode re-check is defence in depth:
+    # send_fetch reads everything by path, so a fetch that waited finds pruned.json there and refuses either way
     for _ in range(3):
         lk = os.open(os.path.join(j["dir"], "job.json"), os.O_RDONLY)
-        fcntl.flock(lk, fcntl.LOCK_SH)
+        if not fault("fetch-no-lock"):
+            fcntl.flock(lk, fcntl.LOCK_SH)
         try:
             same = os.fstat(lk).st_ino == os.stat(os.path.join(j["dir"], "job.json")).st_ino
         except OSError:
@@ -1402,8 +1426,9 @@ def send_fetch(key, args, j):
             tf.addfile(ti, io.BytesIO(b))
     tf.close()
     out.flush()
-    if args.get("what") != "result":   # the outputs went out whole: the clean-up counts from here (fetched.json)
-        nodegc.note_fetch(j["dir"], j["id"], key)
+    # the outputs went out whole: the clean-up counts from here (fetched.json)
+    if args.get("what") != "result" or fault("fetch-result-counts"):
+        nodegc.note_fetch(j["dir"], j["id"], key, owner=j["job"].get("key"))
     return None
 
 
@@ -2611,17 +2636,8 @@ def run_runner():
     first = True
     n = 0
     while not stop[0]:
-        try:
-            busy = step(first, stop, started)
-        except Exception:  # noqa
-            journal("runner error: %s" % traceback.format_exc().replace("\n", " | ")[-1500:])
-            busy = True
+        busy = runner_pass(first, stop, started)
         first = False
-        set_busy(busy)
-        try:   # the clean-up of finished job folders: between two passes (no job is starting), at most once an hour
-            nodegc.tick(stop)
-        except Exception:  # noqa
-            journal_once("gc", "runner: clean-up: %s" % traceback.format_exc().replace("\n", " | ")[-800:])
         n += 1
         if n % SAMPLE_EVERY == 0:
             try:
