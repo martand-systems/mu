@@ -8,9 +8,10 @@
 - **Reads with:** `docs/PLAN.md` (installation, compute, relay, Claude Code integration) and `docs/ROADMAP.md` (the
   order of the work in hand: pairing fixes, dashboard, shell experience). This document covers what they do not: the
   engineering analyses μ offers, and how their results become something a human engineer can check quickly and sign.
-- **Evidence behind it:** a read-only review of this repo at commit `94fd2fd`, re-checked against `main` at `1fdd3b3`
-  (after v2026.11.9). μ's engineering code (`src/mu/fea.py`, `src/mu/post/`, `src/mu/bench.py`, `benchmarks/`,
-  `claude-plugin/`) is identical at both commits; statements about the job layer and PLAN.md describe `1fdd3b3`. And a
+- **Evidence behind it:** a read-only review of this repo at commit `94fd2fd`, re-checked against `main` at `c59a49d`
+  (2026-11-22). μ's engineering code (`src/mu/fea.py`, `src/mu/post/`, `src/mu/bench.py`, `benchmarks/`,
+  `claude-plugin/`) is unchanged between the two except that `mu.fea` now takes its thread count from a node job's core
+  grant; line references are to `c59a49d`. Statements about the job layer and PLAN.md describe `1fdd3b3`. And a
   research report, [`docs/research/2026-11-engineering-landscape.md`](research/2026-11-engineering-landscape.md), built
   from six sets of cited notes. Sources are listed in §14.
 
@@ -167,15 +168,15 @@ These are in code today. The first two can put a wrong number in front of a revi
 
 | # | Defect | Where | Confidence |
 |---|---|---|---|
-| D1 | The maximum principal stress field `S1` is computed with two shear components swapped when it is fed nodal stress from the `.frd` file | `fea.py:269-271`, `281-286` | Code verified. The `.frd` component order is from CalculiX's documented format **(to confirm, ES2)** |
-| D2 | The margin of safety uses the raw peak integration-point stress, which the project's own validation policy says not to trust. Bonded joints and rigid couplings create singular corners by construction | `fea.py:352-354` | Verified |
-| D3 | One scalar allowable per material, and the failure criterion is chosen by whether the material name starts with `cf`, unless the caller overrides it. A carbon part is solved as an isotropic solid and judged by maximum principal stress | `fea.py:185`, `350-353` | Verified |
+| D1 | The maximum principal stress field `S1` is computed with two shear components swapped when it is fed nodal stress from the `.frd` file | `fea.py:270-272`, `289-295` | Code verified. The `.frd` component order is from CalculiX's documented format **(to confirm, ES2)** |
+| D2 | The margin of safety uses the raw peak integration-point stress, which the project's own validation policy says not to trust. Bonded joints and rigid couplings create singular corners by construction | `fea.py:361-363` | Verified |
+| D3 | One scalar allowable per material, and the failure criterion is chosen by whether the material name starts with `cf`, unless the caller overrides it. A carbon part is solved as an isotropic solid and judged by maximum principal stress | `fea.py:185`, `359-362` | Verified |
 | D4 | A static step without point loads inherits the previous step's point loads, and the same for gravity | `fea.py:198-205` | Code verified; solver behaviour **(to confirm, ES2)** |
 | D5 | Point masses are left out of gravity, so a payload contributes to modes and not to a g-load case | `fea.py:176`, `204-205` | Verified |
 | D6 | Partly overlapping parts are assigned to whichever part was added first, silently; parts that do not touch stay disconnected, silently | `fea.py:59-63` | Verified |
-| D7 | Solver failure is detected only by a missing file or the text `*ERROR`. The return code and warnings are ignored; there is no timeout | `fea.py:222-225` | Verified |
-| D8 | Eigenfrequencies accumulate across modal steps; step results are indexed by position, mixing steps and modes | `fea.py:253`, `293-324` | Verified |
-| D9 | Thread counts are fixed at 4, against the repo rule on hardware sizes. Mesh node counts already vary from run to run with the parallel mesher | `fea.py:41`, `218` | Verified |
+| D7 | Solver failure is detected only by a missing file or the text `*ERROR`. The return code and warnings are ignored; there is no timeout | `fea.py:223-226` | Verified |
+| D8 | Eigenfrequencies accumulate across modal steps; step results are indexed by position, mixing steps and modes | `fea.py:254`, `302-333` | Verified |
+| D9 | Thread counts follow a node job's core grant since the scheduler landed, but a local run still uses a fixed 4, against the repo rule on hardware sizes. Mesh node counts already vary from run to run with the parallel mesher | `fea.py:41`, `218-219`, `277-282` | Verified |
 | D10 | `mu test --quick` fails `fea-cantilever` whenever a reference file exists, because the second mesh's metrics are missing | `src/mu/bench.py:31-34` | Verified by reading |
 | D11 | `render-png` passes `.frd` files to a reader that has no CalculiX `.frd` support | `src/mu/post/render_png.py:32-35` | Code verified; reader behaviour **(to confirm)** |
 | D12 | The CFD benchmark's docstring lists a vortex as a known answer, and no check reads the velocity field | `benchmarks/cfd-cavity/bench.py:2` | Verified |
@@ -1356,7 +1357,7 @@ PLAN.md v6 corrected the documentation drift the first review found. These remai
 | Stated | Today | Phase |
 |---|---|---|
 | CLAUDE.md: every capability is a CLI command with `--json` | The job-layer commands, `doctor`, `version` and `autoupdate` have it. `render-png`, `mu link`, `mu pin` and others do not; FEA is a library with no command | E0 for existing commands; E4 for `mu fea` |
-| CLAUDE.md: no hard-coded hardware sizes | Thread counts of 4 in `mu.fea` (D9) | E0 |
+| CLAUDE.md: no hard-coded hardware sizes | A local `mu.fea` run uses a fixed 4 threads (D9) | E0 |
 | PLAN.md §6.5 and §6.7: a hook warns when a solver runs outside `mu`; every run has a record | No hooks; a local `mu run` leaves no record | E1 |
 | PLAN.md §11 and `LICENSE`: a `THIRD_PARTY.md` | Not written | E0 |
 | `toolchain/env.yml` header: "recreate: micromamba create …" | Legacy text; the installer does not read the file | E0 |
