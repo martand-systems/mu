@@ -1813,8 +1813,12 @@ def cmd_status(a):
             except MuError as e:
                 errors.append({"node": n, "error": e.error, "message": e.message, "exit": e.code})
                 conns.pop(n, None)
-        seen = {j["job_id"] for j in jobs}
+        seen = {j["job_id"]: j for j in jobs}
         for jid, r in sorted(local.items()):
+            if jid in seen and r.get("state") in ("sending", "unsent") and not fault("no-unsent"):
+                # the node has it: the submit's answer was lost (or a --resume got through); the record follows
+                prj.write_job_record(dict(r, state=seen[jid].get("state"), accepted=r.get("accepted") or proto.iso(),
+                                          recovered=proto.iso()))
             if jid in seen or r.get("state") not in ("sending", "unsent"):
                 continue
             if r.get("state") == "sending" and r.get("node") in conns:

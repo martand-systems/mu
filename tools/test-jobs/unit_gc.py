@@ -498,7 +498,8 @@ def t_gc_client(base):
 
 def t_sending(base):
     w = WS(base, "sending")
-    S1, S2, S3, S4, S5, S6 = ("20261115-0900%02d-send0%d" % (i, i) for i in range(1, 7))
+    S1, S2, S3, S4, S5, S6, S7 = ("20261115-0900%02d-send0%d" % (i, i) for i in range(1, 8))
+    w.record(S7)
     w.record(S1)
     w.snapref(S1)
     w.record(S2, spec={"job_id": S2, "submitted": {"at": proto.iso()}})
@@ -513,7 +514,7 @@ def t_sending(base):
     for j in (S1, S3, S4, S5):
         os.utime(os.path.join(w.proj, ".mu", "jobs", j + ".json"), (old, old))
     nosuch = {"_rc": 66, "ok": False, "error": "no-such-job", "message": "the node has no job"}
-    w.set({"list": {"ok": True, "jobs": []}, "status:" + S1: nosuch, "status:" + S2: nosuch, "status:" + S3: nosuch,
+    w.set({"list": {"ok": True, "jobs": [{"job_id": S7, "state": "succeeded", "attempt": 1}]}, "status:" + S1: nosuch, "status:" + S2: nosuch, "status:" + S3: nosuch,
            "status:" + S5: nosuch, "status:" + S4: {"ok": True, "job_id": S4, "state": "queued", "position": 1}})
     rc, out, o = w.run("status", "--json")
     rows = {j["job_id"]: j for j in o.get("jobs") or []}
@@ -530,8 +531,10 @@ def t_sending(base):
           rows.get(S2, {}).get("state") == "sending" and rows.get(S3, {}).get("state") == "sending" and
           recs[S2].get("state") == "sending" and recs[S3].get("state") == "sending" and
           not any(S2 in r or S3 in r for r in w.requests()), (rows.get(S2), rows.get(S3), w.requests()))
-    check("  a record the node knows (the submit's answer was lost) takes the node's state",
-          rows.get(S4, {}).get("state") == "queued" and recs[S4].get("state") == "queued", (rows.get(S4), recs[S4]))
+    s7 = durable.read_record(os.path.join(w.proj, ".mu", "jobs", S7 + ".json")) or {}
+    check("  a record the node knows (the submit's answer was lost) takes the node's state, asked or in its list",
+          rows.get(S4, {}).get("state") == "queued" and recs[S4].get("state") == "queued" and
+          s7.get("state") == "succeeded", (rows.get(S4), recs[S4], s7.get("state")))
     check("  only list and status were asked of the node (nothing deleted there)",
           all(r.split()[0] in ("list", "status") for r in w.requests()), w.requests())
     rc, out, o = w.run("status", "--json")

@@ -123,7 +123,7 @@ fi
 section "Repository checks"
 r1="$(sed -n 's/^DISPATCHER_REV=\([0-9]*\).*/\1/p' "$REPO/install/install.sh")"; r2="$(sed -n 's/^MU_DISPATCHER_REV=\([0-9]*\).*/\1/p' "$REPO/bin/mu")"
 if [ "$r1" = "$r2" ]; then ok "dispatcher revs match (bin/mu $r2, install.sh $r1)"; else bad "dispatcher revs differ: bin/mu $r2, install.sh $r1"; fi
-if grep -q 'compute|submit|status|log|fetch|cancel|relay|node|dashboard) infra' "$REPO/bin/mu"; then ok "bin/mu hands 'dashboard' to the default toolchain"
+if grep -Eq '^  compute\|submit\|[a-z|]*\|dashboard\) infra "\$cmd"' "$REPO/bin/mu"; then ok "bin/mu hands 'dashboard' to the default toolchain"
 else bad "bin/mu does not route 'dashboard'"; fi
 for x in ./dashboard/node_modules ./dashboard/test-results ./dashboard/playwright-report; do
   if grep -q -- "--exclude $x" "$REPO/install/install.sh"; then ok "install.sh leaves $x out of the recipe"
