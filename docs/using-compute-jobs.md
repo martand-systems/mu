@@ -128,6 +128,12 @@ It writes the declared outputs into the project at their paths (overwriting), an
 (plus `matched nothing: <glob>` for a declared output the job did not make). `--into DIR` writes elsewhere.
 It stops above 50 MB of outputs unless `--max-size` allows more.
 
+**Fetch soon.** The node cleans up finished job folders by itself (release 2026.11.12): 7 days after the outputs were
+fetched, 30 days after the end if they never were, earlier when its disk runs low, never within 24 h of the end. It
+keeps the job's record and the last 64 kB of its log, so `mu status` and `mu log` still answer; `mu fetch` then exits
+11 and says when the outputs were removed. `mu keep <job-id>` exempts a job (`--off` ends that); `mu compute gc
+<node> --dry-run` (the owner's key) lists what would go now.
+
 ### Cancel
 
 ```sh
@@ -182,9 +188,12 @@ are in `node_message`.
 | 8 | fetch integrity | `mu fetch` once more |
 | 9 | no such node or job | |
 | 10 | still running after `--timeout` | ask again |
+| 11 | the job's outputs were cleaned up on the node | run the job again if they are needed |
 
 If a submit failed after printing a job id (`job_id` in the JSON), send the same job with `mu submit --resume <id>`,
-never a fresh submit.
+never a fresh submit. A job whose upload never finished shows in `mu status` as `not sent` with that command (while
+its snapshot is still in the repository) or `mu forget <id>`, which drops the record here and changes nothing on the
+node.
 
 ## Limits and failures, as measured on the office PC
 
